@@ -1,0 +1,2038 @@
+"use client";
+
+import { useState, useCallback, useRef, useEffect, useMemo } from "react";
+import { useTranslations } from "next-intl";
+import {
+  Folder, File, Upload, FolderPlus, Download, Trash2,
+  Pencil, RefreshCw, Home, ChevronRight, MoreVertical,
+  Search, ArrowUp, ArrowDown, X, LayoutGrid, LayoutList,
+  Copy, Clipboard, Scissors, Info, Image as ImageIcon,
+  FilePlus, CopyPlus,
+  AlertCircle, Star, Clock, FolderUp,
+  Menu, Users, Share2, SquarePen,
+} from "@/components/icons";
+import { useIsDesktop } from "@/hooks/use-media-query";
+import { Button } from "@/components/ui/button";
+import { cn, formatFileSize } from "@/lib/utils";
+import { NewFolderDialog } from "@/components/files/new-folder-dialog";
+import { RenameDialog } from "@/components/files/rename-dialog";
+import { fileNameProblem } from "@/lib/file-name-rules";
+import { FileUploadArea } from "@/components/files/file-upload-area";
+import { getFileIconByName, isAudioFile, isImageFile, isPdfFile, isTextFile, isVideoFile } from "@/components/files/file-icons";
+import { loadFilesSettings } from "@/components/files/files-settings-dialog";
+import type { FolderLayout } from "@/components/files/files-settings-dialog";
+import { FolderTreeSidebar } from "@/components/files/folder-tree-sidebar";
+import { ResizeHandle } from "@/components/layout/resize-handle";
+import { Avatar } from "@/components/ui/avatar";
+import { getDroppedFilesAndFolders } from "@/lib/webdav/drop-utils";
+import { useFileStore, type FileResource } from "@/stores/file-store";
+import { ShareCollectionDialog } from "@/components/settings/share-collection-dialog";
+import type { IJMAPClient } from "@/lib/jmap/client-interface";
+import type { FileNodeRights } from "@/lib/jmap/types";
+import { getEffectiveTimeZone } from "@/lib/timezone";
+
+type SortKey = "name" | "size" | "modified";
+type SortDir = "asc" | "desc";
+type ViewMode = "list" | "grid";
+
+interface ClipboardState {
+  mode: "cut" | "copy";
+  ids: string[];
+  names: string[];
+  sourceParentId: string | null;
+}
+
+export interface AccountFolderEntry {
+  accountId: string;
+  label: string;
+  email: string;
+  avatarColor: string;
+}
+
+interface FileBrowserProps {
+  currentPath: string;
+  resources: FileResource[];
+  isLoading: boolean;
+  error: string | null;
+  selectedResources: Set<string>;
+  uploadProgress: { name: string; loaded: number; total: number; current: number; totalFiles: number } | null;
+  clipboard: ClipboardState | null;
+  onNavigate: (path: string, resourceId?: string | null) => void;
+  onCreateFolder: (name: string) => Promise<void>;
+  onUploadFiles: (files: File[]) => Promise<void>;
+  onUploadFolder: (files: File[]) => Promise<void>;
+  onCancelUpload: () => void;
+  onDelete: (name: string) => Promise<void>;
+  onBatchDelete: (names: string[]) => Promise<void>;
+  onRename: (oldName: string, newName: string) => Promise<void>;
+  onDownload: (name: string) => Promise<void>;
+  onBatchDownload: (names: string[]) => Promise<void>;
+  onRefresh: () => Promise<void>;
+  onSelectResource: (name: string | null) => void;
+  onToggleSelect: (name: string) => void;
+  onSelectAll: () => void;
+  onClearSelection: () => void;
+  onSetSelection: (names: Set<string>) => void;
+  onCut: (names: string[]) => void;
+  onCopy: (names: string[]) => void;
+  onPaste: () => Promise<void>;
+  onMoveToFolder: (names: string[], targetFolder: string) => Promise<void>;
+  onMoveToParent: (names: string[]) => Promise<void>;
+  onPreviewImage: (name: string) => void;
+  onPreviewFile: (name: string) => void;
+  /** WOPI document editing (#425): whether a file can open in the document editor. */
+  isOfficeEditable?: (name: string) => boolean;
+  onEditFile?: (name: string) => void;
+  onShowDetails: (name: string) => void;
+  onCreateTextFile: (name: string) => Promise<void>;
+  onDuplicate: (name: string) => Promise<void>;
+  getImageUrl: (name: string) => Promise<string>;
+  listPath: (path: string) => Promise<FileResource[]>;
+  listByParentId: (parentId: string | null) => Promise<FileResource[]>;
+  favorites: string[];
+  recentFiles: { name: string; id: string; timestamp: number }[];
+  onToggleFavorite: (path: string) => void;
+  showDetails: boolean;
+  onToggleDetails: () => void;
+  detailResource: FileResource | null;
+  /** Pro shell only: all connected accounts surfaced as top-level folders at the root. */
+  accountFolders?: AccountFolderEntry[];
+  onSelectAccount?: (accountId: string) => void;
+  /** Pro shell only: when true, the root is a pure account picker - hide the file toolbar and don't render a regular listing. */
+  accountPickerMode?: boolean;
+  /** Pro shell only: label of the currently-attached account, shown as a breadcrumb segment after Home. */
+  accountLabel?: string | null;
+  /** JMAP client for the browsing account, used by the share dialog to list principals. */
+  client?: IJMAPClient | null;
+  /** Files account id of the browsing account; used to exclude self from the share picker. */
+  ownAccountId?: string | null;
+  /** True when the server supports JMAP Sharing (principals); gates the Share action. */
+  sharingEnabled?: boolean;
+  /** Add/update/remove a principal's share on a node. Set null rights to revoke. */
+  onShare?: (id: string, principalId: string, rights: FileNodeRights | null) => Promise<void>;
+}
+
+function isPreviewable(name: string): boolean {
+  return isImageFile(name) || isTextFile(name) || isPdfFile(name) || isAudioFile(name) || isVideoFile(name);
+}
+
+function getFileIcon(resource: FileResource) {
+  if (resource.isDirectory) {
+    return <Folder className="w-5 h-5 text-blue-500" />;
+  }
+  return getFileIconByName(resource.name, "sm");
+}
+
+function getGridIcon(resource: FileResource) {
+  if (resource.isDirectory) {
+    return <Folder className="w-10 h-10 text-blue-500" />;
+  }
+  return getFileIconByName(resource.name, "lg");
+}
+
+// Small inline indicator: a node shared out by the user (shareWith has entries)
+// or a node shared *with* the user by another principal (isShared).
+function ShareBadge({ resource, t }: { resource: FileResource; t: (key: string) => string }) {
+  const sharedOut = !!resource.shareWith && Object.keys(resource.shareWith).length > 0;
+  if (resource.isShared) {
+    return (
+      <Share2
+        className="w-3.5 h-3.5 text-primary shrink-0"
+        aria-label={t("shared_with_me")}
+      >
+        <title>{t("shared_with_me")}</title>
+      </Share2>
+    );
+  }
+  if (sharedOut) {
+    return (
+      <Users
+        className="w-3.5 h-3.5 text-primary shrink-0"
+        aria-label={t("shared")}
+      >
+        <title>{t("shared")}</title>
+      </Users>
+    );
+  }
+  return null;
+}
+
+function Thumbnail({ name, getImageUrl: fetchUrl, size = "sm" }: {
+  name: string;
+  getImageUrl: (n: string) => Promise<string>;
+  size?: "sm" | "lg";
+}) {
+  const [src, setSrc] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchUrl(name).then(url => { if (!cancelled) setSrc(url); }).catch(() => { if (!cancelled) setFailed(true); });
+    return () => { cancelled = true; };
+  }, [name, fetchUrl]);
+
+  if (failed || !src) {
+    return size === "sm"
+      ? <ImageIcon className="w-5 h-5 text-emerald-500" />
+      : <ImageIcon className="w-10 h-10 text-emerald-500" />;
+  }
+
+  const cls = size === "sm"
+    ? "w-5 h-5 rounded object-cover"
+    : "w-10 h-10 rounded object-cover";
+
+  return <img src={src} alt={name} className={cls} loading="lazy" />;
+}
+
+function formatDate(dateString: string): string {
+  if (!dateString) return "";
+  try {
+    return new Date(dateString).toLocaleDateString(undefined, {
+      timeZone: getEffectiveTimeZone(),
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return dateString;
+  }
+}
+
+function SkeletonRow() {
+  return (
+    <tr className="border-b border-border">
+      <td className="px-4 py-2.5">
+        <div className="flex items-center gap-3">
+          <div className="w-4 h-4 shrink-0" />
+          <div className="w-5 h-5 rounded bg-muted animate-pulse shrink-0" />
+          <div className="h-4 rounded bg-muted animate-pulse w-40" />
+        </div>
+      </td>
+      <td className="px-4 py-2.5 hidden md:table-cell">
+        <div className="h-4 rounded bg-muted animate-pulse w-14" />
+      </td>
+      <td className="px-4 py-2.5 hidden lg:table-cell">
+        <div className="h-4 rounded bg-muted animate-pulse w-32" />
+      </td>
+      <td className="px-2 py-2.5">
+        <div className="h-4 w-4 rounded bg-muted animate-pulse" />
+      </td>
+    </tr>
+  );
+}
+
+export function FileBrowser({
+  currentPath,
+  resources,
+  isLoading,
+  error,
+  selectedResources,
+  uploadProgress,
+  onNavigate,
+  onCreateFolder,
+  onUploadFiles,
+  onUploadFolder,
+  onCancelUpload,
+  onDelete,
+  onBatchDelete,
+  onRename,
+  onDownload,
+  onBatchDownload,
+  onRefresh,
+  onSelectResource,
+  onToggleSelect,
+  onSelectAll,
+  onClearSelection,
+  onSetSelection,
+  onCut,
+  onCopy,
+  onPaste,
+  onMoveToFolder,
+  onMoveToParent,
+  onPreviewImage,
+  onPreviewFile,
+  isOfficeEditable,
+  onEditFile,
+  onShowDetails,
+  onCreateTextFile,
+  onDuplicate,
+  getImageUrl,
+  listPath,
+  listByParentId,
+  favorites,
+  recentFiles,
+  onToggleFavorite,
+  showDetails,
+  onToggleDetails,
+  detailResource,
+  clipboard,
+  accountFolders,
+  onSelectAccount,
+  accountPickerMode,
+  accountLabel,
+  client,
+  ownAccountId,
+  sharingEnabled,
+  onShare,
+}: FileBrowserProps) {
+  const t = useTranslations("files");
+  const fileNameRules = useMemo(() => client?.getFileNameRules?.() ?? null, [client]);
+  const validateFileName = useCallback((name: string) => {
+    const problem = fileNameProblem(name, fileNameRules);
+    if (!problem) return null;
+    return problem.kind === "chars" ? t("name_forbidden_chars", { chars: problem.chars }) : t("name_reserved");
+  }, [fileNameRules, t]);
+  const [showNewFolder, setShowNewFolder] = useState(false);
+  const [renameTarget, setRenameTarget] = useState<string | null>(null);
+  const [shareTargetId, setShareTargetId] = useState<string | null>(null);
+  const [isDraggingOver, setIsDraggingOver] = useState(false);
+  // The share dialog is bound to a node id (not name) so its shareWith stays
+  // live after a share refresh re-derives the resource list.
+  // A folder shared from the tree (sidebar layout) is usually not among the
+  // listed resources, so the dialog keeps its own copy and re-reads it after
+  // each change.
+  const [treeShareTarget, setTreeShareTarget] = useState<FileResource | null>(null);
+  const shareTarget = shareTargetId
+    ? resources.find(r => r.id === shareTargetId)
+      ?? (treeShareTarget?.id === shareTargetId ? treeShareTarget : null)
+    : null;
+  // A node is shareable when the server supports JMAP Sharing, the viewer owns
+  // it (not a shared-with-me node), and holds the mayShare right (owned nodes
+  // report full rights; treat missing myRights as allowed).
+  const canShare = useCallback((r: FileResource | null | undefined): boolean =>
+    !!(sharingEnabled && onShare && client && r && !r.isShared && (r.myRights?.mayShare ?? true)),
+    [sharingEnabled, onShare, client]);
+  const reloadTreeShareTarget = useCallback(async (target: FileResource) => {
+    const siblings = await listByParentId(target.parentId ?? null);
+    setTreeShareTarget(siblings.find(r => r.id === target.id) ?? target);
+  }, [listByParentId]);
+  const handleTreeShare = useCallback((target: FileResource) => {
+    setTreeShareTarget(target);
+    setShareTargetId(target.id);
+    // The tree caches its listing; fetch the current shares before editing.
+    void reloadTreeShareTarget(target);
+  }, [reloadTreeShareTarget]);
+  // Folders other principals shared with the user. The sidebar layout lists
+  // them in the folder tree; the inline layout lists them at the root (#1181).
+  const storeClient = useFileStore(s => s.client);
+  const sharedRoots = useFileStore(s => s.sharedRoots);
+  const loadSharedRoots = useFileStore(s => s.loadSharedRoots);
+  useEffect(() => {
+    if (storeClient) void loadSharedRoots();
+  }, [storeClient, loadSharedRoots]);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; name: string } | null>(null);
+  const [emptyContextMenu, setEmptyContextMenu] = useState<{ x: number; y: number } | null>(null);
+  const [showNewTextFile, setShowNewTextFile] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [showSearch, setShowSearch] = useState(false);
+  const [sortKey, setSortKey] = useState<SortKey>("name");
+  const [sortDir, setSortDir] = useState<SortDir>("asc");
+  const [viewMode, setViewMode] = useState<ViewMode>(() => {
+    if (typeof window !== "undefined") {
+      return (localStorage.getItem("files-view-mode") as ViewMode) || "list";
+    }
+    return "list";
+  });
+  const [showThumbnails, setShowThumbnails] = useState(() => loadFilesSettings().showThumbnails);
+  const [folderLayout, setFolderLayout] = useState<FolderLayout>(() => loadFilesSettings().folderLayout);
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    if (typeof window !== "undefined") {
+      const saved = localStorage.getItem("files-sidebar-width");
+      if (saved) return Math.max(180, Math.min(400, Number(saved)));
+    }
+    return 256;
+  });
+  const [isResizing, setIsResizing] = useState(false);
+  const dragStartWidth = useRef(256);
+  const [dragTarget, setDragTarget] = useState<string | null>(null);
+  // Pane-aware: in a Pro split pane (or a narrow window) the folder tree
+  // sidebar collapses into a burger-toggled overlay so it doesn't crowd the
+  // file list.
+  const isDesktopPane = useIsDesktop();
+  const isNarrow = !isDesktopPane;
+  const [narrowSidebarOpen, setNarrowSidebarOpen] = useState(false);
+  useEffect(() => { if (!isNarrow) setNarrowSidebarOpen(false); }, [isNarrow]);
+
+  // Sync showThumbnails and folderLayout when settings change
+  useEffect(() => {
+    const reloadSettings = () => {
+      const s = loadFilesSettings();
+      setShowThumbnails(s.showThumbnails);
+      setFolderLayout(s.folderLayout);
+    };
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === "files-settings") reloadSettings();
+    };
+    // StorageEvent fires cross-tab, custom event fires same-tab
+    window.addEventListener("storage", handleStorage);
+    window.addEventListener("files-settings-changed", reloadSettings);
+    return () => {
+      window.removeEventListener("storage", handleStorage);
+      window.removeEventListener("files-settings-changed", reloadSettings);
+    };
+  }, []);
+  const [breadcrumbDropdown, setBreadcrumbDropdown] = useState<{
+    path: string;
+    folders: FileResource[];
+    x: number;
+    y: number;
+  } | null>(null);
+  const [marquee, setMarquee] = useState<{
+    startX: number;
+    startY: number;
+    currentX: number;
+    currentY: number;
+  } | null>(null);
+  const marqueeRef = useRef<{
+    additive: boolean;
+    initialSelection: Set<string>;
+  } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const scrollAreaRef = useRef<HTMLDivElement>(null);
+
+  // Reset search when navigating
+  useEffect(() => {
+    setSearchQuery("");
+  }, [currentPath]);
+
+  // Focus search input when shown
+  useEffect(() => {
+    if (showSearch) searchInputRef.current?.focus();
+  }, [showSearch]);
+
+  // Persist view mode
+  const handleViewModeChange = useCallback((mode: ViewMode) => {
+    setViewMode(mode);
+    localStorage.setItem("files-view-mode", mode);
+  }, []);
+
+  // Filter and sort resources
+  const displayResources = useMemo(() => {
+    let filtered = resources;
+    // In sidebar mode, folders are shown in the sidebar tree - hide them from the main list
+    if (folderLayout === "sidebar") {
+      filtered = filtered.filter(r => !r.isDirectory);
+    }
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase();
+      filtered = filtered.filter(r => r.name.toLowerCase().includes(q));
+    }
+
+    const sorted = [...filtered].sort((a, b) => {
+      // Directories always first
+      if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
+
+      let cmp = 0;
+      switch (sortKey) {
+        case "name":
+          cmp = a.name.localeCompare(b.name);
+          break;
+        case "size":
+          cmp = a.contentLength - b.contentLength;
+          break;
+        case "modified":
+          cmp = new Date(a.lastModified || 0).getTime() - new Date(b.lastModified || 0).getTime();
+          break;
+      }
+      return sortDir === "asc" ? cmp : -cmp;
+    });
+    return sorted;
+  }, [resources, searchQuery, sortKey, sortDir, folderLayout]);
+
+  const sharedFolders = useMemo(() => {
+    if (folderLayout !== "inline" || currentPath !== "/" || accountPickerMode) return [];
+    const q = searchQuery.toLowerCase();
+    return sharedRoots.filter(r => r.isDirectory && (!q || r.name.toLowerCase().includes(q)));
+  }, [folderLayout, currentPath, accountPickerMode, sharedRoots, searchQuery]);
+  const openSharedFolder = (resource: FileResource) => onNavigate(`/${resource.name}`, resource.id);
+
+  // Build breadcrumb segments. In Pro mode an account is mounted "between"
+  // Home and the account's filesystem - surfaced as a non-clickable label
+  // (clicking the actual account again would be a no-op; Home detaches it).
+  const breadcrumbs: { name: string; path: string; isAccount?: boolean }[] = currentPath === '/'
+    ? [{ name: t("breadcrumb_root"), path: '/' }]
+    : [
+        { name: t("breadcrumb_root"), path: '/' },
+        ...currentPath.split('/').filter(Boolean).map((segment, i, arr) => ({
+          name: segment,
+          path: '/' + arr.slice(0, i + 1).join('/'),
+        })),
+      ];
+  if (accountLabel) {
+    breadcrumbs.splice(1, 0, { name: accountLabel, path: '', isAccount: true });
+  }
+
+  const handleNavigateUp = useCallback(() => {
+    if (currentPath === '/') return;
+    const segments = currentPath.split('/').filter(Boolean);
+    segments.pop();
+    const parentPath = segments.length === 0 ? '/' : '/' + segments.join('/');
+    // Pro shell: going up to root from a subfolder must land on the
+    // account's filesystem root, not detach back to the account picker.
+    // Home click (breadcrumb) still detaches.
+    if (parentPath === '/' && accountLabel) {
+      onNavigate('/', '__account_root__');
+      return;
+    }
+    onNavigate(parentPath);
+  }, [currentPath, onNavigate, accountLabel]);
+
+  const handleResourceClick = (resource: FileResource, e: React.MouseEvent) => {
+    if (resource.isDirectory) {
+      // Ctrl/Cmd+click on directories also toggles selection
+      if (e.ctrlKey || e.metaKey) {
+        onToggleSelect(resource.name);
+        return;
+      }
+      const newPath = currentPath === '/'
+        ? `/${resource.name}`
+        : `${currentPath}/${resource.name}`;
+      onNavigate(newPath, resource.id);
+    } else {
+      if (e.ctrlKey || e.metaKey) {
+        onToggleSelect(resource.name);
+      } else if (e.shiftKey && resources.length > 0) {
+        // Shift+click range select
+        handleShiftSelect(resource.name);
+      } else {
+        onSelectResource(resource.name === [...selectedResources][0] && selectedResources.size === 1 ? null : resource.name);
+      }
+    }
+  };
+
+  const handleShiftSelect = (targetName: string) => {
+    const lastSelected = [...selectedResources].pop();
+    if (!lastSelected) {
+      onToggleSelect(targetName);
+      return;
+    }
+    const names = displayResources.map(r => r.name);
+    const startIdx = names.indexOf(lastSelected);
+    const endIdx = names.indexOf(targetName);
+    if (startIdx === -1 || endIdx === -1) return;
+    const from = Math.min(startIdx, endIdx);
+    const to = Math.max(startIdx, endIdx);
+    for (let i = from; i <= to; i++) {
+      if (!selectedResources.has(names[i])) {
+        onToggleSelect(names[i]);
+      }
+    }
+  };
+
+  // Marquee (rubber-band) selection
+  const handleMarqueeMouseDown = useCallback((e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    const target = e.target as HTMLElement;
+    if (target.closest('[data-resource]') || target.closest('input') || target.closest('button') || target.closest('thead')) return;
+
+    const scrollArea = scrollAreaRef.current;
+    if (!scrollArea) return;
+
+    const rect = scrollArea.getBoundingClientRect();
+    const x = e.clientX - rect.left + scrollArea.scrollLeft;
+    const y = e.clientY - rect.top + scrollArea.scrollTop;
+
+    const additive = e.ctrlKey || e.metaKey;
+    marqueeRef.current = {
+      additive,
+      initialSelection: additive ? new Set(selectedResources) : new Set(),
+    };
+
+    setMarquee({ startX: x, startY: y, currentX: x, currentY: y });
+
+    if (!additive) {
+      onClearSelection();
+    }
+
+    e.preventDefault();
+  }, [selectedResources, onClearSelection]);
+
+  useEffect(() => {
+    if (!marquee) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const scrollArea = scrollAreaRef.current;
+      if (!scrollArea) return;
+
+      const rect = scrollArea.getBoundingClientRect();
+      const x = e.clientX - rect.left + scrollArea.scrollLeft;
+      const y = e.clientY - rect.top + scrollArea.scrollTop;
+
+      setMarquee(prev => prev ? { ...prev, currentX: x, currentY: y } : null);
+
+      // Calculate marquee rect
+      const info = marqueeRef.current;
+      if (!info) return;
+
+      const mx = Math.min(marquee.startX, x);
+      const my = Math.min(marquee.startY, y);
+      const mw = Math.abs(x - marquee.startX);
+      const mh = Math.abs(y - marquee.startY);
+
+      // Find intersecting items
+      const elements = scrollArea.querySelectorAll('[data-resource]');
+      const containerRect = scrollArea.getBoundingClientRect();
+      const newSelection = new Set(info.initialSelection);
+
+      elements.forEach(el => {
+        const name = el.getAttribute('data-resource');
+        if (!name) return;
+        const elRect = el.getBoundingClientRect();
+        const elX = elRect.left - containerRect.left + scrollArea.scrollLeft;
+        const elY = elRect.top - containerRect.top + scrollArea.scrollTop;
+
+        if (mx < elX + elRect.width && mx + mw > elX && my < elY + elRect.height && my + mh > elY) {
+          newSelection.add(name);
+        }
+      });
+
+      onSetSelection(newSelection);
+    };
+
+    const handleMouseUp = () => {
+      setMarquee(null);
+      marqueeRef.current = null;
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [marquee, onSetSelection]);
+
+  const handleResourceDoubleClick = (resource: FileResource) => {
+    if (resource.isDirectory) {
+      const newPath = currentPath === '/'
+        ? `/${resource.name}`
+        : `${currentPath}/${resource.name}`;
+      onNavigate(newPath, resource.id);
+    } else if (isOfficeEditable?.(resource.name) && onEditFile) {
+      onEditFile(resource.name);
+    } else if (isPreviewable(resource.name)) {
+      if (isImageFile(resource.name)) {
+        onPreviewImage(resource.name);
+      } else {
+        onPreviewFile(resource.name);
+      }
+    } else {
+      onDownload(resource.name);
+    }
+  };
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // Only show upload overlay for external file drags, not internal resource drags
+    if (e.dataTransfer.types.includes("Files")) {
+      setIsDraggingOver(true);
+    }
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingOver(false);
+  }, []);
+
+  const handleDrop = useCallback(async (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingOver(false);
+
+    setIsUploading(true);
+    try {
+      const { files, hasDirectories } = await getDroppedFilesAndFolders(e.dataTransfer);
+      if (files.length > 0) {
+        if (hasDirectories) {
+          await onUploadFolder(files);
+        } else {
+          await onUploadFiles(files);
+        }
+      }
+    } finally {
+      setIsUploading(false);
+    }
+  }, [onUploadFiles, onUploadFolder]);
+
+  const handleFileInputChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length > 0) {
+      setIsUploading(true);
+      try {
+        await onUploadFiles(files);
+      } finally {
+        setIsUploading(false);
+      }
+    }
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
+  const handleFolderInputChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length > 0) {
+      setIsUploading(true);
+      try {
+        await onUploadFolder(files);
+      } finally {
+        setIsUploading(false);
+      }
+    }
+    if (folderInputRef.current) {
+      folderInputRef.current.value = '';
+    }
+  };
+
+  const contextMenuRef = useRef<HTMLDivElement>(null);
+
+  const handleContextMenu = (e: React.MouseEvent, name: string) => {
+    e.preventDefault();
+    setContextMenu({ x: e.clientX, y: e.clientY, name });
+  };
+
+  // Adjust context menu position to stay within viewport
+  useEffect(() => {
+    if (contextMenu && contextMenuRef.current) {
+      const menu = contextMenuRef.current;
+      const rect = menu.getBoundingClientRect();
+      let { x, y } = contextMenu;
+      let adjusted = false;
+
+      if (x + rect.width > window.innerWidth) {
+        x = window.innerWidth - rect.width - 8;
+        adjusted = true;
+      }
+      if (y + rect.height > window.innerHeight) {
+        y = window.innerHeight - rect.height - 8;
+        adjusted = true;
+      }
+
+      if (adjusted) {
+        setContextMenu({ ...contextMenu, x, y });
+      }
+    }
+  }, [contextMenu]);
+
+  const handleContainerClick = () => {
+    if (contextMenu) setContextMenu(null);
+    if (emptyContextMenu) setEmptyContextMenu(null);
+    if (breadcrumbDropdown) setBreadcrumbDropdown(null);
+  };
+
+  const handleBreadcrumbRightClick = async (e: React.MouseEvent, crumbPath: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const parentPath = crumbPath === '/' ? '/' : '/' + crumbPath.split('/').filter(Boolean).slice(0, -1).join('/') || '/';
+    try {
+      const items = await listPath(parentPath === '/' ? '/' : parentPath);
+      const folders = items.filter(r => r.isDirectory);
+      setBreadcrumbDropdown({ path: parentPath, folders, x: e.clientX, y: e.clientY });
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleSortClick = (key: SortKey) => {
+    if (sortKey === key) {
+      setSortDir(d => d === "asc" ? "desc" : "asc");
+    } else {
+      setSortKey(key);
+      setSortDir("asc");
+    }
+  };
+
+  const SortIndicator = ({ column }: { column: SortKey }) => {
+    if (sortKey !== column) return null;
+    return sortDir === "asc"
+      ? <ArrowUp className="w-3 h-3 inline ms-1" />
+      : <ArrowDown className="w-3 h-3 inline ms-1" />;
+  };
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      // Don't capture when typing in inputs or dialogs
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      if (showNewFolder || renameTarget) return;
+
+      // Ctrl+F / Cmd+F: toggle search
+      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+        e.preventDefault();
+        setShowSearch(v => !v);
+        return;
+      }
+
+      // Ctrl+A / Cmd+A: select all
+      if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+        e.preventDefault();
+        onSelectAll();
+        return;
+      }
+
+      // Ctrl+C / Cmd+C: copy selected
+      if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
+        if (selectedResources.size > 0) {
+          e.preventDefault();
+          onCopy([...selectedResources]);
+        }
+        return;
+      }
+
+      // Ctrl+X / Cmd+X: cut selected
+      if ((e.ctrlKey || e.metaKey) && e.key === 'x') {
+        if (selectedResources.size > 0) {
+          e.preventDefault();
+          onCut([...selectedResources]);
+        }
+        return;
+      }
+
+      // Ctrl+V / Cmd+V: paste
+      if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
+        if (clipboard) {
+          e.preventDefault();
+          onPaste();
+        }
+        return;
+      }
+
+      // Escape: clear selection, close search
+      if (e.key === 'Escape') {
+        if (showSearch) { setShowSearch(false); setSearchQuery(""); }
+        else if (selectedResources.size > 0) onClearSelection();
+        return;
+      }
+
+      // Delete: delete selected
+      if (e.key === 'Delete') {
+        if (selectedResources.size === 1) {
+          onDelete([...selectedResources][0]);
+        } else if (selectedResources.size > 1) {
+          onBatchDelete([...selectedResources]);
+        }
+        return;
+      }
+
+      // F2: rename selected (single)
+      if (e.key === 'F2' && selectedResources.size === 1) {
+        setRenameTarget([...selectedResources][0]);
+        return;
+      }
+
+      // Enter: open selected directory or download selected file
+      if (e.key === 'Enter' && selectedResources.size === 1) {
+        const name = [...selectedResources][0];
+        const resource = resources.find(r => r.name === name);
+        if (resource?.isDirectory) {
+          const newPath = currentPath === '/'
+            ? `/${resource.name}`
+            : `${currentPath}/${resource.name}`;
+          onNavigate(newPath, resource.id);
+        } else if (resource) {
+          onDownload(resource.name);
+        }
+        return;
+      }
+
+      // Backspace: navigate up
+      if (e.key === 'Backspace' && currentPath !== '/') {
+        handleNavigateUp();
+        return;
+      }
+    };
+
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [selectedResources, resources, currentPath, showSearch, showNewFolder, renameTarget, onDelete, onBatchDelete, onSelectAll, onClearSelection, onNavigate, onDownload, onCut, onCopy, onPaste, clipboard, handleNavigateUp]);
+
+  const allSelected = resources.length > 0 && selectedResources.size === resources.length;
+  const someSelected = selectedResources.size > 0 && !allSelected;
+
+  return (
+    <div
+      ref={containerRef}
+      className="flex flex-col flex-1 min-h-0"
+      onClick={handleContainerClick}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+      tabIndex={-1}
+    >
+      {/* Toolbar */}
+      <div role="toolbar" aria-label={t("toolbar")} className="flex items-center gap-2 px-4 py-2 border-b border-border bg-background">
+        {isNarrow && folderLayout === "sidebar" && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 -ms-2"
+            onClick={() => setNarrowSidebarOpen((v) => !v)}
+            aria-label={t("open_folder_tree")}
+          >
+            <Menu className="w-4 h-4" />
+          </Button>
+        )}
+        {/* Breadcrumbs */}
+        <nav aria-label={t("breadcrumb_root")} className="flex items-center gap-1 text-sm flex-1 min-w-0 overflow-x-auto">
+          {breadcrumbs.map((crumb, i) => (
+            <span key={`${i}:${crumb.path}`} className="flex items-center gap-1 shrink-0">
+              {i > 0 && <ChevronRight className="w-3.5 h-3.5 text-muted-foreground" />}
+              <button
+                onClick={() => crumb.isAccount
+                  ? onNavigate('/', '__account_root__')
+                  : onNavigate(crumb.path)}
+                onContextMenu={(e) => crumb.isAccount ? undefined : handleBreadcrumbRightClick(e, crumb.path)}
+                className={cn(
+                  "px-1.5 py-0.5 rounded hover:bg-muted transition-colors",
+                  i === breadcrumbs.length - 1
+                    ? "font-medium text-foreground"
+                    : "text-muted-foreground hover:text-foreground"
+                )}
+              >
+                {i === 0 ? <Home className="w-4 h-4" /> : crumb.name}
+              </button>
+            </span>
+          ))}
+        </nav>
+
+        {/* Action buttons */}
+        <div className="flex items-center gap-1 shrink-0">
+          {selectedResources.size > 1 && (
+            <>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-8"
+                onClick={() => onBatchDownload([...selectedResources].filter(n => !resources.find(r => r.name === n)?.isDirectory))}
+              >
+                <Download className="w-4 h-4 me-1" />
+                {t("download")} ({[...selectedResources].filter(n => !resources.find(r => r.name === n)?.isDirectory).length})
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-8 text-destructive hover:text-destructive"
+                onClick={() => onBatchDelete([...selectedResources])}
+              >
+                <Trash2 className="w-4 h-4 me-1" />
+                {t("delete")} ({selectedResources.size})
+              </Button>
+            </>
+          )}
+          {clipboard && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-8"
+              onClick={onPaste}
+            >
+              <Clipboard className="w-4 h-4 me-1" />
+              {t("paste")} ({clipboard.names.length})
+            </Button>
+          )}
+          {!accountPickerMode && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8"
+              onClick={() => setShowSearch(v => !v)}
+              title={t("search_placeholder")}
+            >
+              <Search className="w-4 h-4" />
+            </Button>
+          )}
+          <Button
+            variant="ghost"
+            size="icon"
+            className={cn("h-8 w-8", viewMode === "grid" && "bg-muted")}
+            onClick={() => handleViewModeChange(viewMode === "list" ? "grid" : "list")}
+            title={viewMode === "list" ? t("grid_view") : t("list_view")}
+          >
+            {viewMode === "list" ? <LayoutGrid className="w-4 h-4" /> : <LayoutList className="w-4 h-4" />}
+          </Button>
+          {!accountPickerMode && (
+            <>
+              <Button
+                variant="ghost"
+                size="icon"
+                className={cn("h-8 w-8", showDetails && "bg-muted")}
+                onClick={onToggleDetails}
+                title={t("details")}
+              >
+                <Info className="w-4 h-4" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className={cn("h-8 w-8", favorites.includes(currentPath) && "text-yellow-500")}
+                onClick={() => onToggleFavorite(currentPath)}
+                title={t("toggle_favorite")}
+              >
+                <Star className={cn("w-4 h-4", favorites.includes(currentPath) && "fill-current")} />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8"
+                onClick={() => fileInputRef.current?.click()}
+                title={t("upload")}
+                disabled={isUploading}
+              >
+                <Upload className="w-4 h-4" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8"
+                onClick={() => folderInputRef.current?.click()}
+                title={t("upload_folder")}
+                disabled={isUploading}
+              >
+                <FolderUp className="w-4 h-4" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8"
+                onClick={() => setShowNewFolder(true)}
+                title={t("new_folder")}
+              >
+                <FolderPlus className="w-4 h-4" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8"
+                onClick={() => setShowNewTextFile(true)}
+                title={t("new_text_file")}
+              >
+                <FilePlus className="w-4 h-4" />
+              </Button>
+            </>
+          )}
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8"
+            onClick={onRefresh}
+            title={t("refresh")}
+            aria-label={t("refresh")}
+            disabled={isLoading}
+          >
+            <RefreshCw className={cn("w-4 h-4", isLoading && "animate-spin")} />
+          </Button>
+        </div>
+      </div>
+
+      {/* Search bar */}
+      {showSearch && (
+        <div className="flex items-center gap-2 px-4 py-2 border-b border-border bg-muted/30">
+          <Search className="w-4 h-4 text-muted-foreground shrink-0" />
+          <input
+            ref={searchInputRef}
+            type="search"
+            role="searchbox"
+            aria-label={t("search_placeholder")}
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder={t("search_placeholder")}
+            className="flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') {
+                setShowSearch(false);
+                setSearchQuery("");
+              }
+            }}
+          />
+          {searchQuery && (
+            <button onClick={() => setSearchQuery("")} className="text-muted-foreground hover:text-foreground">
+              <X className="w-4 h-4" />
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Hidden file input */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={handleFileInputChange}
+      />
+      {/* Hidden folder input */}
+      <input
+        ref={folderInputRef}
+        type="file"
+        className="hidden"
+        onChange={handleFolderInputChange}
+        {...({ webkitdirectory: '', directory: '' } as React.InputHTMLAttributes<HTMLInputElement>)}
+      />
+
+      {/* Error display with retry */}
+      {error && (
+        <div className="px-4 py-2 bg-destructive/10 text-destructive text-sm border-b border-destructive/20 flex items-center gap-2">
+          <AlertCircle className="w-4 h-4 shrink-0" />
+          <span className="flex-1">{error}</span>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 text-destructive hover:text-destructive shrink-0"
+            onClick={onRefresh}
+          >
+            <RefreshCw className="w-3.5 h-3.5 me-1" />
+            {t("retry")}
+          </Button>
+        </div>
+      )}
+
+      {/* Drag overlay */}
+      {isDraggingOver && (
+        <div className="absolute inset-0 z-50 bg-primary/5 border-2 border-dashed border-primary rounded-lg flex items-center justify-center pointer-events-none">
+          <div className="text-center">
+            <Upload className="w-12 h-12 text-primary mx-auto mb-2" />
+            <p className="text-sm font-medium text-primary">{t("drop_files_here")}</p>
+          </div>
+        </div>
+      )}
+
+      {/* Upload progress */}
+      {uploadProgress && (
+        <div className="px-4 py-2 border-b border-primary/20 bg-primary/5">
+          <div className="flex items-center gap-2 text-sm text-primary mb-1">
+            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+            <span className="truncate">
+              {t("uploading")} {uploadProgress.name}
+              {uploadProgress.totalFiles > 1 && (
+                <span className="text-muted-foreground ms-1">
+                  ({uploadProgress.current}/{uploadProgress.totalFiles})
+                </span>
+              )}
+            </span>
+            <span className="ms-auto tabular-nums shrink-0 flex items-center gap-2">
+              {uploadProgress.total > 0
+                ? `${Math.round((uploadProgress.loaded / uploadProgress.total) * 100)}%`
+                : "…"}
+              <button
+                onClick={onCancelUpload}
+                className="text-xs text-destructive hover:text-destructive/80 underline"
+              >
+                {t("cancel")}
+              </button>
+            </span>
+          </div>
+          <div className="h-1 bg-primary/20 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-primary rounded-full transition-all duration-300"
+              style={{ width: uploadProgress.total > 0
+                ? `${(uploadProgress.loaded / uploadProgress.total) * 100}%`
+                : '0%' }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* File list */}
+      <div className="flex-1 min-h-0 flex relative">
+        {/* Narrow-pane backdrop for the overlay folder tree */}
+        {folderLayout === "sidebar" && isNarrow && narrowSidebarOpen && (
+          <div
+            className="absolute inset-0 bg-black/50 z-40"
+            onClick={() => setNarrowSidebarOpen(false)}
+          />
+        )}
+        {/* Folder tree sidebar (when layout is sidebar) */}
+        {folderLayout === "sidebar" && (
+          isNarrow ? (
+            <div
+              className={cn(
+                "absolute inset-y-0 left-0 z-50",
+                "transform transition-transform duration-300 ease-in-out",
+                !narrowSidebarOpen && "-translate-x-full"
+              )}
+              onClick={(e) => {
+                // Auto-close when the user taps a folder name. Chevrons stay
+                // open so they can expand/collapse without dismissing.
+                const target = e.target as HTMLElement;
+                const btn = target.closest('button');
+                if (btn && !btn.querySelector('svg.tabler-icon-chevron-right, svg.tabler-icon-chevron-down')) {
+                  setNarrowSidebarOpen(false);
+                }
+              }}
+            >
+              <FolderTreeSidebar
+                currentPath={currentPath}
+                onNavigate={onNavigate}
+                listByParentId={listByParentId}
+                width={288}
+                canShare={canShare}
+                onShare={handleTreeShare}
+              />
+            </div>
+          ) : (
+            <>
+              <FolderTreeSidebar
+                currentPath={currentPath}
+                onNavigate={onNavigate}
+                listByParentId={listByParentId}
+                width={sidebarWidth}
+                isResizing={isResizing}
+                canShare={canShare}
+                onShare={handleTreeShare}
+              />
+              <ResizeHandle
+                onResizeStart={() => { dragStartWidth.current = sidebarWidth; setIsResizing(true); }}
+                onResize={(delta) => setSidebarWidth(Math.max(180, Math.min(400, dragStartWidth.current + delta)))}
+                onResizeEnd={() => {
+                  setIsResizing(false);
+                  localStorage.setItem("files-sidebar-width", String(sidebarWidth));
+                }}
+                onDoubleClick={() => { setSidebarWidth(256); localStorage.setItem("files-sidebar-width", "256"); }}
+              />
+            </>
+          )
+        )}
+        {/* Favorites & Recent sidebar (when layout is inline) */}
+        {folderLayout === "inline" && (favorites.length > 0 || recentFiles.length > 0) && (
+          <div className="w-48 border-e border-border bg-background overflow-y-auto shrink-0 hidden lg:block">
+            {favorites.length > 0 && (
+              <div className="p-3">
+                <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2 flex items-center gap-1">
+                  <Star className="w-3 h-3" />
+                  {t("favorites")}
+                </h4>
+                <div className="space-y-0.5">
+                  {favorites.map((fav) => (
+                    <button
+                      key={fav}
+                      onClick={() => onNavigate(fav)}
+                      className={cn(
+                        "w-full flex items-center gap-2 px-2 py-1.5 rounded text-sm hover:bg-muted transition-colors text-start",
+                        currentPath === fav && "bg-muted font-medium"
+                      )}
+                    >
+                      <Folder className="w-3.5 h-3.5 text-blue-500 shrink-0" />
+                      <span className="truncate">{fav === '/' ? t("breadcrumb_root") : fav.split('/').pop()}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+            {recentFiles.length > 0 && (
+              <div className="p-3 border-t border-border">
+                <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2 flex items-center gap-1">
+                  <Clock className="w-3 h-3" />
+                  {t("recent")}
+                </h4>
+                <div className="space-y-0.5">
+                  {recentFiles.slice(0, 10).map((recent) => (
+                    <button
+                      key={recent.id}
+                      className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-sm hover:bg-muted transition-colors text-start"
+                      title={recent.name}
+                    >
+                      <File className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                      <span className="truncate">{recent.name}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+        <div
+          ref={scrollAreaRef}
+          className="flex-1 min-w-0 overflow-y-auto relative"
+          onMouseDown={handleMarqueeMouseDown}
+        >
+        {isLoading && resources.length === 0 ? (
+          <table className="w-full text-sm">
+            <thead className="bg-muted/50 sticky top-0 z-10">
+              <tr className="border-b border-border">
+                <th className="text-start px-4 py-2 font-medium text-muted-foreground">
+                  <div className="flex items-center gap-3">
+                    <div className="w-4 h-4" />
+                    {t("name")}
+                  </div>
+                </th>
+                <th className="text-start px-4 py-2 font-medium text-muted-foreground hidden md:table-cell w-24">{t("size")}</th>
+                <th className="text-start px-4 py-2 font-medium text-muted-foreground hidden lg:table-cell w-44">{t("modified")}</th>
+                <th className="w-10 px-2 py-2" />
+              </tr>
+            </thead>
+            <tbody>
+              <SkeletonRow />
+              <SkeletonRow />
+              <SkeletonRow />
+              <SkeletonRow />
+              <SkeletonRow />
+              <SkeletonRow />
+            </tbody>
+          </table>
+        ) : accountPickerMode && accountFolders && accountFolders.length > 0 && onSelectAccount ? (
+          /* ======= ACCOUNT PICKER (Pro mode root) ======= */
+          <div className="p-4">
+            <div
+              className="grid gap-3"
+              style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(11rem, 1fr))' }}
+            >
+              {accountFolders.map((acc) => (
+                <button
+                  key={`__account__:${acc.accountId}`}
+                  onClick={() => onSelectAccount(acc.accountId)}
+                  title={acc.email}
+                  className="flex items-center gap-3 p-3 rounded-lg border border-border hover:bg-muted/50 transition-colors text-start min-w-0"
+                >
+                  <Avatar
+                    name={acc.label}
+                    email={acc.email}
+                    size="md"
+                    fallbackColor={acc.avatarColor}
+                    className="shrink-0"
+                  />
+                  <div className="min-w-0 flex flex-col">
+                    <span className="truncate text-sm font-medium">{acc.label || acc.email}</span>
+                    {acc.label && acc.label !== acc.email && (
+                      <span className="truncate text-xs text-muted-foreground">{acc.email}</span>
+                    )}
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : accountPickerMode ? (
+          <div className="flex items-center justify-center h-full">
+            <p className="text-sm text-muted-foreground">{t("no_accounts")}</p>
+          </div>
+        ) : resources.length === 0 && sharedFolders.length === 0 && !searchQuery && currentPath === '/' ? (
+          <FileUploadArea
+            onUpload={async (files: File[]) => {
+              setIsUploading(true);
+              try {
+                await onUploadFiles(files);
+              } finally {
+                setIsUploading(false);
+              }
+            }}
+            onUploadFolder={async (files: File[]) => {
+              setIsUploading(true);
+              try {
+                await onUploadFolder(files);
+              } finally {
+                setIsUploading(false);
+              }
+            }}
+            onCreateFolder={() => setShowNewFolder(true)}
+            onCreateTextFile={() => setShowNewTextFile(true)}
+          />
+        ) : viewMode === "grid" ? (
+          /* ======= GRID VIEW ======= */
+          <div className="p-4" role="grid" aria-label={t("file_list")}>
+            {currentPath !== '/' && !searchQuery && (
+              <div
+                className={cn(
+                  "inline-flex flex-col items-center gap-2 p-3 rounded-lg cursor-pointer transition-colors w-28",
+                  dragTarget === '..' ? "bg-primary/5 ring-1 ring-primary/40" : "hover:bg-muted/50"
+                )}
+                onClick={handleNavigateUp}
+                onDragOver={(e) => {
+                  if (e.dataTransfer.types.includes("application/x-file-names")) {
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = "move";
+                    setDragTarget('..');
+                  }
+                }}
+                onDragLeave={() => setDragTarget(null)}
+                onDrop={async (e) => {
+                  e.preventDefault();
+                  setDragTarget(null);
+                  const raw = e.dataTransfer.getData("application/x-file-names");
+                  if (!raw) return;
+                  const names: string[] = JSON.parse(raw);
+                  await onMoveToParent(names);
+                }}
+              >
+                <Folder className="w-10 h-10 text-muted-foreground" />
+                <span className="text-xs text-muted-foreground truncate w-full text-center">..</span>
+              </div>
+            )}
+            {displayResources.length === 0 && sharedFolders.length === 0 && searchQuery ? (
+              <p className="px-4 py-8 text-center text-muted-foreground text-sm">{t("no_results")}</p>
+            ) : displayResources.length === 0 ? null : (
+              <div
+                className="grid grid-cols-[repeat(auto-fill,minmax(7rem,1fr))] gap-2"
+                onContextMenu={(e) => {
+                  if ((e.target as HTMLElement).closest('[data-resource]')) return;
+                  e.preventDefault();
+                  setEmptyContextMenu({ x: e.clientX, y: e.clientY });
+                }}
+              >
+                {displayResources.map((resource) => (
+                  <div
+                    key={resource.id}
+                    data-resource={resource.name}
+                    draggable
+                    onDragStart={(e) => {
+                      const names = selectedResources.has(resource.name) ? [...selectedResources] : [resource.name];
+                      e.dataTransfer.setData("application/x-file-names", JSON.stringify(names));
+                      e.dataTransfer.effectAllowed = "move";
+                    }}
+                    onDragOver={(e) => {
+                      if (resource.isDirectory) {
+                        e.preventDefault();
+                        e.dataTransfer.dropEffect = "move";
+                        setDragTarget(resource.name);
+                      }
+                    }}
+                    onDragLeave={() => setDragTarget(null)}
+                    onDrop={async (e) => {
+                      e.preventDefault();
+                      setDragTarget(null);
+                      if (!resource.isDirectory) return;
+                      const raw = e.dataTransfer.getData("application/x-file-names");
+                      if (!raw) return;
+                      const names: string[] = JSON.parse(raw);
+                      if (names.includes(resource.name)) return;
+                      await onMoveToFolder(names, resource.name);
+                    }}
+                    className={cn(
+                      "flex flex-col items-center gap-2 p-3 rounded-lg cursor-pointer transition-colors relative group",
+                      selectedResources.has(resource.name)
+                        ? "bg-primary/10 ring-1 ring-primary/30"
+                        : dragTarget === resource.name
+                          ? "bg-primary/5 ring-1 ring-primary/40"
+                          : "hover:bg-muted/50",
+                      clipboard?.mode === "cut" && clipboard.names.includes(resource.name) && "opacity-50"
+                    )}
+                    onClick={(e) => handleResourceClick(resource, e)}
+                    onDoubleClick={() => handleResourceDoubleClick(resource)}
+                    onContextMenu={(e) => handleContextMenu(e, resource.name)}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selectedResources.has(resource.name)}
+                      onChange={() => onToggleSelect(resource.name)}
+                      className="w-3.5 h-3.5 rounded border-border accent-primary cursor-pointer absolute top-2 left-2 opacity-0 group-hover:opacity-100 data-[checked=true]:opacity-100"
+                      data-checked={selectedResources.has(resource.name)}
+                      onClick={(e) => e.stopPropagation()}
+                    />
+                    {showThumbnails && isImageFile(resource.name)
+                      ? <Thumbnail name={resource.name} getImageUrl={getImageUrl} size="lg" />
+                      : getGridIcon(resource)}
+                    <span className="text-xs truncate w-full text-center flex items-center justify-center gap-1" title={resource.name}>
+                      <span className="truncate">{resource.name}</span>
+                      <ShareBadge resource={resource} t={t} />
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {sharedFolders.length > 0 && (
+              <section aria-label={t("shared_with_me")} className={cn(displayResources.length > 0 && "mt-4")}>
+                <h4 className="px-1 mb-2 text-xs font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1.5">
+                  <Share2 className="w-3 h-3" />
+                  {t("shared_with_me")}
+                </h4>
+                <div className="grid grid-cols-[repeat(auto-fill,minmax(7rem,1fr))] gap-2">
+                  {sharedFolders.map((resource) => (
+                    <button
+                      key={resource.id}
+                      type="button"
+                      onClick={() => openSharedFolder(resource)}
+                      title={resource.ownerName ? t("shared_by", { name: resource.ownerName }) : resource.name}
+                      className="flex flex-col items-center gap-2 p-3 rounded-lg cursor-pointer transition-colors hover:bg-muted/50"
+                    >
+                      {getGridIcon(resource)}
+                      <span className="text-xs truncate w-full text-center flex items-center justify-center gap-1">
+                        <span className="truncate">{resource.name}</span>
+                        <ShareBadge resource={resource} t={t} />
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </section>
+            )}
+          </div>
+        ) : (
+          /* ======= LIST VIEW ======= */
+          <table
+            aria-label={t("file_list")}
+            className="w-full text-sm"
+            onContextMenu={(e) => {
+              if ((e.target as HTMLElement).closest('tr[data-resource]')) return;
+              e.preventDefault();
+              setEmptyContextMenu({ x: e.clientX, y: e.clientY });
+            }}
+          >
+            <thead className="bg-muted/50 sticky top-0 z-10">
+              <tr className="border-b border-border">
+                <th className="text-start px-4 py-2 font-medium text-muted-foreground">
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="checkbox"
+                      checked={allSelected}
+                      ref={(el) => { if (el) el.indeterminate = someSelected; }}
+                      onChange={() => allSelected ? onClearSelection() : onSelectAll()}
+                      className="w-4 h-4 rounded border-border accent-primary cursor-pointer"
+                      onClick={(e) => e.stopPropagation()}
+                    />
+                    <button onClick={() => handleSortClick("name")} className="hover:text-foreground transition-colors">
+                      {t("name")}
+                      <SortIndicator column="name" />
+                    </button>
+                  </div>
+                </th>
+                <th className="text-start px-4 py-2 font-medium text-muted-foreground hidden md:table-cell w-24">
+                  <button onClick={() => handleSortClick("size")} className="hover:text-foreground transition-colors">
+                    {t("size")}
+                    <SortIndicator column="size" />
+                  </button>
+                </th>
+                <th className="text-start px-4 py-2 font-medium text-muted-foreground hidden lg:table-cell w-44">
+                  <button onClick={() => handleSortClick("modified")} className="hover:text-foreground transition-colors">
+                    {t("modified")}
+                    <SortIndicator column="modified" />
+                  </button>
+                </th>
+                <th className="w-10 px-2 py-2" />
+              </tr>
+            </thead>
+            <tbody>
+              {currentPath !== '/' && !searchQuery && (
+                <tr
+                  className={cn(
+                    "border-b border-border cursor-pointer transition-colors",
+                    dragTarget === '..' ? "bg-primary/5 ring-1 ring-primary/40" : "hover:bg-muted/50"
+                  )}
+                  onClick={handleNavigateUp}
+                  onDragOver={(e) => {
+                    if (e.dataTransfer.types.includes("application/x-file-names")) {
+                      e.preventDefault();
+                      e.dataTransfer.dropEffect = "move";
+                      setDragTarget('..');
+                    }
+                  }}
+                  onDragLeave={() => setDragTarget(null)}
+                  onDrop={async (e) => {
+                    e.preventDefault();
+                    setDragTarget(null);
+                    const raw = e.dataTransfer.getData("application/x-file-names");
+                    if (!raw) return;
+                    const names: string[] = JSON.parse(raw);
+                    await onMoveToParent(names);
+                  }}
+                >
+                  <td className="px-4 py-2.5">
+                    <div className="flex items-center gap-3">
+                      <div className="w-4 h-4" />
+                      <Folder className="w-5 h-5 text-muted-foreground" />
+                      <span className="text-muted-foreground">..</span>
+                    </div>
+                  </td>
+                  <td className="hidden md:table-cell" />
+                  <td className="hidden lg:table-cell" />
+                  <td />
+                </tr>
+              )}
+              {displayResources.length === 0 && sharedFolders.length === 0 && searchQuery ? (
+                <tr>
+                  <td colSpan={4} className="px-4 py-8 text-center text-muted-foreground text-sm">
+                    {t("no_results")}
+                  </td>
+                </tr>
+              ) : displayResources.map((resource) => (
+                <tr
+                  key={resource.id}
+                  data-resource={resource.name}
+                  aria-selected={selectedResources.has(resource.name)}
+                  draggable
+                  onDragStart={(e) => {
+                    const names = selectedResources.has(resource.name) ? [...selectedResources] : [resource.name];
+                    e.dataTransfer.setData("application/x-file-names", JSON.stringify(names));
+                    e.dataTransfer.effectAllowed = "move";
+                  }}
+                  onDragOver={(e) => {
+                    if (resource.isDirectory) {
+                      e.preventDefault();
+                      e.dataTransfer.dropEffect = "move";
+                      setDragTarget(resource.name);
+                    }
+                  }}
+                  onDragLeave={() => setDragTarget(null)}
+                  onDrop={async (e) => {
+                    e.preventDefault();
+                    setDragTarget(null);
+                    if (!resource.isDirectory) return;
+                    const raw = e.dataTransfer.getData("application/x-file-names");
+                    if (!raw) return;
+                    const names: string[] = JSON.parse(raw);
+                    if (names.includes(resource.name)) return;
+                    await onMoveToFolder(names, resource.name);
+                  }}
+                  className={cn(
+                    "border-b border-border cursor-pointer transition-colors",
+                    selectedResources.has(resource.name)
+                      ? "bg-primary/10"
+                      : dragTarget === resource.name
+                        ? "bg-primary/5 ring-1 ring-primary/40"
+                        : "hover:bg-muted/50",
+                    clipboard?.mode === "cut" && clipboard.names.includes(resource.name) && "opacity-50"
+                  )}
+                  onClick={(e) => handleResourceClick(resource, e)}
+                  onDoubleClick={() => handleResourceDoubleClick(resource)}
+                  onContextMenu={(e) => handleContextMenu(e, resource.name)}
+                >
+                  <td className="px-4 py-2.5">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <input
+                        type="checkbox"
+                        checked={selectedResources.has(resource.name)}
+                        onChange={() => onToggleSelect(resource.name)}
+                        className="w-4 h-4 rounded border-border accent-primary cursor-pointer shrink-0"
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                      {showThumbnails && isImageFile(resource.name)
+                        ? <Thumbnail name={resource.name} getImageUrl={getImageUrl} size="sm" />
+                        : getFileIcon(resource)}
+                      <span className="truncate">{resource.name}</span>
+                      <ShareBadge resource={resource} t={t} />
+                    </div>
+                  </td>
+                  <td className="px-4 py-2.5 text-muted-foreground hidden md:table-cell tabular-nums">
+                    {resource.isDirectory ? "-" : formatFileSize(resource.contentLength)}
+                  </td>
+                  <td className="px-4 py-2.5 text-muted-foreground hidden lg:table-cell tabular-nums">
+                    {formatDate(resource.lastModified)}
+                  </td>
+                  <td className="px-2 py-2.5">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleContextMenu(e, resource.name);
+                      }}
+                      className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+                    >
+                      <MoreVertical className="w-4 h-4" />
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {sharedFolders.length > 0 && (
+                <tr className="border-b border-border bg-muted/30">
+                  <th colSpan={4} scope="rowgroup" className="px-4 py-1.5 text-start text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                    <span className="flex items-center gap-1.5">
+                      <Share2 className="w-3 h-3" />
+                      {t("shared_with_me")}
+                    </span>
+                  </th>
+                </tr>
+              )}
+              {sharedFolders.map((resource) => (
+                <tr
+                  key={resource.id}
+                  className="border-b border-border cursor-pointer transition-colors hover:bg-muted/50"
+                  onClick={() => openSharedFolder(resource)}
+                  title={resource.ownerName ? t("shared_by", { name: resource.ownerName }) : undefined}
+                >
+                  <td className="px-4 py-2.5">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="w-4 h-4 shrink-0" />
+                      {getFileIcon(resource)}
+                      <button
+                        type="button"
+                        className="truncate text-start"
+                        onClick={(e) => { e.stopPropagation(); openSharedFolder(resource); }}
+                      >
+                        {resource.name}
+                      </button>
+                      <ShareBadge resource={resource} t={t} />
+                    </div>
+                  </td>
+                  <td className="px-4 py-2.5 text-muted-foreground hidden md:table-cell">-</td>
+                  <td className="px-4 py-2.5 text-muted-foreground hidden lg:table-cell tabular-nums">
+                    {formatDate(resource.lastModified)}
+                  </td>
+                  <td className="px-2 py-2.5" />
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+
+        {/* Context menu */}
+        {contextMenu && (
+          <div
+            ref={contextMenuRef}
+            role="menu"
+            aria-label={t("context_menu")}
+            className="fixed z-50 bg-background border border-border rounded-lg shadow-lg py-1 min-w-[160px]"
+            style={{ left: contextMenu.x, top: contextMenu.y }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {!resources.find(r => r.name === contextMenu.name)?.isDirectory && isPreviewable(contextMenu.name) && (
+              <button
+                className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted transition-colors text-start"
+                onClick={() => {
+                  if (isImageFile(contextMenu.name)) {
+                    onPreviewImage(contextMenu.name);
+                  } else {
+                    onPreviewFile(contextMenu.name);
+                  }
+                  setContextMenu(null);
+                }}
+              >
+                <ImageIcon className="w-4 h-4" />
+                {t("preview")}
+              </button>
+            )}
+            {!resources.find(r => r.name === contextMenu.name)?.isDirectory && isOfficeEditable?.(contextMenu.name) && onEditFile && (
+              <button
+                className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted transition-colors text-start"
+                onClick={() => {
+                  onEditFile(contextMenu.name);
+                  setContextMenu(null);
+                }}
+              >
+                <SquarePen className="w-4 h-4" />
+                {t("office_edit")}
+              </button>
+            )}
+            {!resources.find(r => r.name === contextMenu.name)?.isDirectory && (
+              <button
+                className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted transition-colors text-start"
+                onClick={() => {
+                  onDownload(contextMenu.name);
+                  setContextMenu(null);
+                }}
+              >
+                <Download className="w-4 h-4" />
+                {t("download")}
+              </button>
+            )}
+            <button
+              className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted transition-colors text-start"
+              onClick={() => {
+                onCut([contextMenu.name]);
+                setContextMenu(null);
+              }}
+            >
+              <Scissors className="w-4 h-4" />
+              {t("cut")}
+            </button>
+            <button
+              className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted transition-colors text-start"
+              onClick={() => {
+                onCopy([contextMenu.name]);
+                setContextMenu(null);
+              }}
+            >
+              <Copy className="w-4 h-4" />
+              {t("copy")}
+            </button>
+            {clipboard && (
+              <button
+                className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted transition-colors text-start"
+                onClick={() => {
+                  onPaste();
+                  setContextMenu(null);
+                }}
+              >
+                <Clipboard className="w-4 h-4" />
+                {t("paste")}
+              </button>
+            )}
+            {!resources.find(r => r.name === contextMenu.name)?.isDirectory && (
+              <button
+                className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted transition-colors text-start"
+                onClick={() => {
+                  onDuplicate(contextMenu.name);
+                  setContextMenu(null);
+                }}
+              >
+                <CopyPlus className="w-4 h-4" />
+                {t("duplicate")}
+              </button>
+            )}
+            {canShare(resources.find(r => r.name === contextMenu.name)) && (
+              <button
+                className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted transition-colors text-start"
+                onClick={() => {
+                  const r = resources.find(res => res.name === contextMenu.name);
+                  if (r) setShareTargetId(r.id);
+                  setContextMenu(null);
+                }}
+              >
+                <Share2 className="w-4 h-4" />
+                {t("share")}
+              </button>
+            )}
+            <div className="h-px bg-border my-1" />
+            <button
+              className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted transition-colors text-start"
+              onClick={() => {
+                onShowDetails(contextMenu.name);
+                setContextMenu(null);
+              }}
+            >
+              <Info className="w-4 h-4" />
+              {t("details")}
+            </button>
+            <button
+              className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted transition-colors text-start"
+              onClick={() => {
+                setRenameTarget(contextMenu.name);
+                setContextMenu(null);
+              }}
+            >
+              <Pencil className="w-4 h-4" />
+              {t("rename")}
+            </button>
+            <button
+              className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted text-destructive transition-colors text-start"
+              onClick={() => {
+                onDelete(contextMenu.name);
+                setContextMenu(null);
+              }}
+            >
+              <Trash2 className="w-4 h-4" />
+              {t("delete")}
+            </button>
+          </div>
+        )}
+
+        {/* Empty-area context menu */}
+        {emptyContextMenu && (
+          <div
+            role="menu"
+            aria-label={t("context_menu")}
+            className="fixed z-50 bg-background border border-border rounded-lg shadow-lg py-1 min-w-[160px]"
+            style={{ left: emptyContextMenu.x, top: emptyContextMenu.y }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted transition-colors text-start"
+              onClick={() => {
+                setShowNewFolder(true);
+                setEmptyContextMenu(null);
+              }}
+            >
+              <FolderPlus className="w-4 h-4" />
+              {t("new_folder")}
+            </button>
+            <button
+              className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted transition-colors text-start"
+              onClick={() => {
+                setShowNewTextFile(true);
+                setEmptyContextMenu(null);
+              }}
+            >
+              <FilePlus className="w-4 h-4" />
+              {t("new_text_file")}
+            </button>
+            <button
+              className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted transition-colors text-start"
+              onClick={() => {
+                fileInputRef.current?.click();
+                setEmptyContextMenu(null);
+              }}
+            >
+              <Upload className="w-4 h-4" />
+              {t("upload")}
+            </button>
+            <button
+              className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted transition-colors text-start"
+              onClick={() => {
+                folderInputRef.current?.click();
+                setEmptyContextMenu(null);
+              }}
+            >
+              <FolderUp className="w-4 h-4" />
+              {t("upload_folder")}
+            </button>
+            {clipboard && (
+              <>
+                <div className="h-px bg-border my-1" />
+                <button
+                  className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted transition-colors text-start"
+                  onClick={() => {
+                    onPaste();
+                    setEmptyContextMenu(null);
+                  }}
+                >
+                  <Clipboard className="w-4 h-4" />
+                  {t("paste")}
+                </button>
+              </>
+            )}
+            <div className="h-px bg-border my-1" />
+            <button
+              className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted transition-colors text-start"
+              onClick={() => {
+                onRefresh();
+                setEmptyContextMenu(null);
+              }}
+            >
+              <RefreshCw className="w-4 h-4" />
+              {t("refresh")}
+            </button>
+          </div>
+        )}
+
+        {/* Breadcrumb dropdown */}
+        {breadcrumbDropdown && (
+          <div
+            role="menu"
+            aria-label={t("breadcrumb_root")}
+            className="fixed z-50 bg-background border border-border rounded-lg shadow-lg py-1 min-w-[180px] max-h-64 overflow-y-auto"
+            style={{ left: breadcrumbDropdown.x, top: breadcrumbDropdown.y }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {breadcrumbDropdown.folders.length === 0 ? (
+              <p className="px-3 py-2 text-sm text-muted-foreground">{t("no_results")}</p>
+            ) : (
+              breadcrumbDropdown.folders.map((folder) => {
+                const folderPath = breadcrumbDropdown.path === '/'
+                  ? `/${folder.name}`
+                  : `${breadcrumbDropdown.path}/${folder.name}`;
+                return (
+                  <button
+                    key={folder.id}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted transition-colors text-start"
+                    onClick={() => {
+                      onNavigate(folderPath, folder.id);
+                      setBreadcrumbDropdown(null);
+                    }}
+                  >
+                    <Folder className="w-4 h-4 text-blue-500 shrink-0" />
+                    <span className="truncate">{folder.name}</span>
+                  </button>
+                );
+              })
+            )}
+          </div>
+        )}
+
+        {/* Marquee selection rectangle */}
+        {marquee && (
+          <div
+            className="absolute border border-primary/50 bg-primary/10 pointer-events-none z-20"
+            style={{
+              left: Math.min(marquee.startX, marquee.currentX),
+              top: Math.min(marquee.startY, marquee.currentY),
+              width: Math.abs(marquee.currentX - marquee.startX),
+              height: Math.abs(marquee.currentY - marquee.startY),
+            }}
+          />
+        )}
+        </div>
+
+        {/* Details sidebar */}
+        {showDetails && detailResource && (
+          <div role="complementary" aria-label={t("details")} className="w-64 border-s border-border bg-background p-4 overflow-y-auto shrink-0 hidden md:block">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-sm font-medium">{t("details")}</h3>
+              <button onClick={onToggleDetails} className="text-muted-foreground hover:text-foreground">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="flex flex-col items-center gap-3 mb-4">
+              {detailResource.isDirectory
+                ? <Folder className="w-12 h-12 text-blue-500" />
+                : getFileIconByName(detailResource.name, "lg")}
+              <p className="text-sm font-medium text-center break-all">{detailResource.name}</p>
+            </div>
+            <dl className="space-y-3 text-sm">
+              <div>
+                <dt className="text-muted-foreground text-xs">{t("type")}</dt>
+                <dd>{detailResource.isDirectory ? t("folder") : (detailResource.contentType || t("file"))}</dd>
+              </div>
+              {!detailResource.isDirectory && (
+                <div>
+                  <dt className="text-muted-foreground text-xs">{t("size")}</dt>
+                  <dd className="tabular-nums">{formatFileSize(detailResource.contentLength)}</dd>
+                </div>
+              )}
+              {detailResource.lastModified && (
+                <div>
+                  <dt className="text-muted-foreground text-xs">{t("modified")}</dt>
+                  <dd className="tabular-nums">{formatDate(detailResource.lastModified)}</dd>
+                </div>
+              )}
+              <div>
+                <dt className="text-muted-foreground text-xs">{t("path")}</dt>
+                <dd className="text-xs break-all font-mono">
+                  {currentPath === "/" ? `/${detailResource.name}` : `${currentPath}/${detailResource.name}`}
+                </dd>
+              </div>
+            </dl>
+          </div>
+        )}
+      </div>
+
+      {/* New folder dialog */}
+      {showNewFolder && (
+        <NewFolderDialog
+          onConfirm={async (name: string) => {
+            await onCreateFolder(name);
+            setShowNewFolder(false);
+          }}
+          onCancel={() => setShowNewFolder(false)}
+          validate={validateFileName}
+        />
+      )}
+
+      {/* New text file dialog */}
+      {showNewTextFile && (
+        <RenameDialog
+          currentName="new-file.txt"
+          title={t("new_text_file")}
+          label={t("file_name")}
+          onConfirm={async (name: string) => {
+            await onCreateTextFile(name);
+            setShowNewTextFile(false);
+          }}
+          onCancel={() => setShowNewTextFile(false)}
+          validate={validateFileName}
+        />
+      )}
+
+      {/* Rename dialog */}
+      {renameTarget && (
+        <RenameDialog
+          currentName={renameTarget}
+          onConfirm={async (newName: string) => {
+            await onRename(renameTarget, newName);
+            setRenameTarget(null);
+          }}
+          onCancel={() => setRenameTarget(null)}
+          validate={validateFileName}
+        />
+      )}
+
+      {/* Share dialog */}
+      {shareTarget && client && onShare && (
+        <ShareCollectionDialog
+          client={client}
+          kind="file"
+          collectionName={shareTarget.name}
+          shareWith={shareTarget.shareWith}
+          ownAccountId={ownAccountId || ""}
+          onShare={async (principalId, rights) => {
+            await onShare(shareTarget.id, principalId, rights as FileNodeRights | null);
+            if (treeShareTarget?.id === shareTarget.id) await reloadTreeShareTarget(shareTarget);
+          }}
+          onClose={() => { setShareTargetId(null); setTreeShareTarget(null); }}
+        />
+      )}
+    </div>
+  );
+}

@@ -1,0 +1,340 @@
+"use client";
+
+import { useState, useCallback, useMemo, useEffect } from "react";
+import { cn } from "@/lib/utils";
+import { useSettingsStore } from "@/stores/settings-store";
+import { useContactStore, getContactPhotoUri } from "@/stores/contact-store";
+import { useConfig } from "@/hooks/use-config";
+import { avatarHooks } from "@/lib/plugin-hooks";
+import { withBasePath } from "@/lib/browser-navigation";
+import { resolveAtprotoAvatar } from "@/lib/atproto-avatar";
+import { IS_LITE } from "@/lib/lite";
+
+const IS_DEV = process.env.NODE_ENV !== "production";
+
+// Known multi-part TLDs where the "main" domain includes one extra label.
+// e.g. "newsletter.example.co.uk" → "example.co.uk", not "co.uk".
+const MULTI_PART_TLDS = new Set([
+  "co.uk", "org.uk", "me.uk", "ac.uk", "gov.uk", "net.uk",
+  "co.jp", "or.jp", "ne.jp", "ac.jp", "go.jp",
+  "co.kr", "or.kr", "go.kr", "ac.kr",
+  "co.in", "net.in", "org.in", "ac.in", "gov.in",
+  "co.nz", "org.nz", "net.nz", "govt.nz", "ac.nz",
+  "co.za", "org.za", "net.za", "gov.za", "ac.za",
+  "com.au", "net.au", "org.au", "edu.au", "gov.au",
+  "com.br", "net.br", "org.br", "edu.br", "gov.br",
+  "com.cn", "net.cn", "org.cn", "gov.cn", "edu.cn",
+  "com.mx", "net.mx", "org.mx", "gob.mx", "edu.mx",
+  "com.ar", "net.ar", "org.ar", "gob.ar", "edu.ar",
+  "com.tw", "net.tw", "org.tw", "edu.tw", "gov.tw",
+  "com.hk", "net.hk", "org.hk", "edu.hk", "gov.hk",
+  "com.sg", "net.sg", "org.sg", "edu.sg", "gov.sg",
+  "com.my", "net.my", "org.my", "edu.my", "gov.my",
+  "com.ph", "net.ph", "org.ph", "edu.ph", "gov.ph",
+  "com.pk", "net.pk", "org.pk", "edu.pk", "gov.pk",
+  "com.ng", "net.ng", "org.ng", "edu.ng", "gov.ng",
+  "co.il", "org.il", "net.il", "ac.il", "gov.il",
+  "co.th", "or.th", "ac.th", "go.th", "in.th",
+  "co.id", "or.id", "ac.id", "go.id", "web.id",
+  "com.tr", "net.tr", "org.tr", "edu.tr", "gov.tr",
+  "com.ua", "net.ua", "org.ua", "edu.ua", "gov.ua",
+  "com.eg", "net.eg", "org.eg", "edu.eg", "gov.eg",
+  "com.sa", "net.sa", "org.sa", "edu.sa", "gov.sa",
+  "co.ke", "or.ke", "ac.ke", "go.ke", "ne.ke",
+]);
+
+/**
+ * Extract the root/registrable domain from a full domain.
+ * e.g. "newsletter.example.com" → "example.com"
+ *      "mail.shop.example.co.uk" → "example.co.uk"
+ *      "example.com" → "example.com"
+ */
+function getRootDomain(domain: string): string {
+  const parts = domain.split(".");
+  if (parts.length <= 2) return domain;
+
+  // Check if the last two parts form a known multi-part TLD
+  const lastTwo = parts.slice(-2).join(".");
+  if (MULTI_PART_TLDS.has(lastTwo)) {
+    // Need at least 3 parts for a valid domain under a multi-part TLD
+    return parts.length >= 3 ? parts.slice(-3).join(".") : domain;
+  }
+
+  // Standard TLD: take last two parts
+  return parts.slice(-2).join(".");
+}
+
+// Module-level cache of domains whose favicons failed to load.
+// Shared across all Avatar instances to avoid re-requesting known-bad domains.
+const failedFaviconDomains = new Set<string>();
+// Personal email domains where the favicon is the mail provider logo, not the sender
+const PERSONAL_DOMAINS = new Set([
+  "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com",
+  "msn.com", "yahoo.com", "yahoo.fr", "yahoo.co.uk", "yahoo.co.jp",
+  "aol.com", "icloud.com", "me.com", "mac.com", "mail.com",
+  "proton.me", "protonmail.com", "pm.me", "tutanota.com", "tuta.com",
+  "zoho.com", "yandex.com", "yandex.ru", "gmx.com", "gmx.net",
+  "fastmail.com", "hey.com", "posteo.de", "mailbox.org",
+  "example.com", "example.org",
+]);
+
+// Deterministic hash for an email string
+function emailHash(email: string): number {
+  let hash = 0;
+  for (let i = 0; i < email.length; i++) {
+    hash = email.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  return Math.abs(hash);
+}
+
+// Dev-only: common first names to infer gender for demo portrait selection
+const FEMALE_NAMES: Set<string> = IS_DEV ? new Set([
+  "alice", "emily", "sarah", "priya", "carol", "anna", "maria", "emma", "olivia",
+  "sophia", "isabella", "mia", "charlotte", "amelia", "harper", "ella", "grace",
+  "chloe", "luna", "lily", "zoey", "hannah", "nora", "riley", "elena", "maya",
+  "claire", "victoria", "natalie", "rachel", "jessica", "jennifer", "lisa",
+  "karen", "nancy", "betty", "sandra", "ashley", "margaret", "dorothy",
+  "julia", "laura", "susan", "andrea", "diana", "marie", "sophie",
+]) : new Set();
+
+const MALE_NAMES: Set<string> = IS_DEV ? new Set([
+  "bob", "marcus", "alex", "david", "james", "john", "robert", "michael",
+  "william", "richard", "joseph", "thomas", "charles", "daniel", "matthew",
+  "anthony", "mark", "steven", "paul", "andrew", "kevin", "brian", "george",
+  "timothy", "jason", "ryan", "jacob", "gary", "eric", "peter", "frank",
+  "samuel", "benjamin", "henry", "patrick", "jack", "noah", "liam", "oliver",
+  "lucas", "ethan", "mason", "logan", "leo", "max", "oscar", "hugo",
+]) : new Set();
+
+function inferGender(name: string | undefined, hash: number): "women" | "men" {
+  if (name) {
+    const firstName = name.trim().split(/\s+/)[0].toLowerCase();
+    if (FEMALE_NAMES.has(firstName)) return "women";
+    if (MALE_NAMES.has(firstName)) return "men";
+  }
+  return hash % 2 === 0 ? "women" : "men";
+}
+
+// Dev-only: custom avatar URLs for specific demo senders
+const CUSTOM_AVATARS: Record<string, string> = IS_DEV ? {
+  "newsletter@launchweekly.com": "https://img.freepik.com/premium-vector/swoosh-letter-lw-logo-design-business-company-identity-water-wave-lw-logo-with-modern-trendy_754537-799.jpg?w=360",
+  "hello@launchpad.example": "https://img.freepik.com/premium-vector/swoosh-letter-lw-logo-design-business-company-identity-water-wave-lw-logo-with-modern-trendy_754537-799.jpg?w=360",
+  "news@techdigest.example": "https://img.freepik.com/premium-vector/technology-letter-t-logo-design-template_125964-1249.jpg?w=360",
+  "alice@example.com": "https://randomuser.me/api/portraits/thumb/women/44.jpg",
+  "bob@example.org": "https://randomuser.me/api/portraits/thumb/men/32.jpg",
+  "carol@example.com": "https://randomuser.me/api/portraits/thumb/women/68.jpg",
+} : {};
+
+// Mock-server-only: for personal-domain emails, deterministically pick a
+// randomuser.me portrait. Returns null for ~30% of addresses so not everyone
+// has a photo.
+//
+// The randomuser.me literal is wrapped in an IS_DEV ternary (not just the
+// runtime `devMode` guard) so that a production build folds the whole
+// expression to `null` and strips the external URL from the bundle — no
+// external call to randomuser.me survives in prod (issue #1768).
+function getProfilePictureUrl(email: string, domain: string, devMode: boolean, name?: string): string | null {
+  if (!devMode) return null;
+  if (!PERSONAL_DOMAINS.has(domain)) return null;
+  const h = emailHash(email);
+  if (h % 10 < 3) return null; // ~30% get no photo
+  const gender = inferGender(name, h);
+  const id = h % 100;
+  // IS_DEV gates the randomuser.me literal on the same line so the bundler's
+  // dead-code elimination folds it away in production (issue #1768). Keeping
+  // the ternary on one line lets the prod-bundle test's line-walk find the
+  // `IS_DEV ?` opener above the host reference.
+  return IS_DEV ? `https://randomuser.me/api/portraits/thumb/${gender}/${id}.jpg` : null;
+}
+
+interface AvatarProps {
+  name?: string;
+  email?: string;
+  contactPhotoUri?: string;
+  /**
+   * atproto DID of the account this avatar represents. When present (and not in
+   * demo mode) the member's Bluesky profile photo is resolved from the public
+   * appview and used as the default account avatar, ahead of every other image
+   * source. Fetch failures fall through to the rest of the chain / initials.
+   */
+  did?: string;
+  size?: "sm" | "md" | "lg";
+  className?: string;
+  /** When true, suppress all image sources (favicons, plugin avatars, profile pics, contact photos) and render initials only. */
+  disableImages?: boolean;
+  /** When true, do not fall through to the sender's domain favicon. Use for the user's own account avatar where the mail-provider logo is not meaningful. */
+  disableFavicon?: boolean;
+  /** Background color used when no image source resolves. Overrides the hash-based default. */
+  fallbackColor?: string;
+}
+
+export function Avatar({ name, email, contactPhotoUri, did, size = "md", className, disableImages = false, disableFavicon = false, fallbackColor }: AvatarProps) {
+  const [imgError, setImgError] = useState(false);
+  const [pluginAvatarUrl, setPluginAvatarUrl] = useState<string | null>(null);
+  const [pluginAvatarFailed, setPluginAvatarFailed] = useState(false);
+  const [atprotoAvatarUrl, setAtprotoAvatarUrl] = useState<string | null>(null);
+  const [atprotoAvatarFailed, setAtprotoAvatarFailed] = useState(false);
+  const senderFavicons = useSettingsStore((s) => s.senderFavicons);
+  const contacts = useContactStore((s) => s.contacts);
+  const { devMode, demoMode } = useConfig();
+
+  // Ask plugins (e.g. Gravatar) to resolve an avatar URL for this email address.
+  // Runs whenever email or name changes; resets plugin avatar state on each change.
+  useEffect(() => {
+    setPluginAvatarUrl(null);
+    setPluginAvatarFailed(false);
+    if (!email || avatarHooks.onAvatarResolve.size === 0) return;
+    let cancelled = false;
+    avatarHooks.onAvatarResolve
+      .transform(null as string | null, { email, name })
+      .then((url) => { if (!cancelled) setPluginAvatarUrl(url); })
+      .catch(() => { if (!cancelled) setPluginAvatarFailed(true); });
+    return () => { cancelled = true; };
+  }, [email, name]);
+
+  // Resolve the member's atproto (Bluesky) profile photo from the public
+  // appview when a DID is supplied. Non-blocking and fail-open: on any error
+  // (or absent avatar) we mark it failed and fall through to the rest of the
+  // chain. Skipped entirely in demo mode so the demo never hits the appview.
+  // The resolver caches per-DID, so this does not refetch on every render.
+  useEffect(() => {
+    setAtprotoAvatarUrl(null);
+    setAtprotoAvatarFailed(false);
+    if (!did || demoMode) return;
+    let cancelled = false;
+    resolveAtprotoAvatar(did)
+      .then((url) => {
+        if (cancelled) return;
+        if (url) setAtprotoAvatarUrl(url);
+        else setAtprotoAvatarFailed(true);
+      })
+      .catch(() => { if (!cancelled) setAtprotoAvatarFailed(true); });
+    return () => { cancelled = true; };
+  }, [did, demoMode]);
+
+  // Look up contact photo by email from the contact store
+  const resolvedContactPhoto = useMemo(() => {
+    if (contactPhotoUri) return contactPhotoUri;
+    if (!email) return undefined;
+    const lowerEmail = email.toLowerCase();
+    for (const contact of contacts) {
+      if (!contact.emails) continue;
+      for (const e of Object.values(contact.emails)) {
+        if (e.address.toLowerCase() === lowerEmail) {
+          return getContactPhotoUri(contact);
+        }
+      }
+    }
+    return undefined;
+  }, [contactPhotoUri, email, contacts]);
+
+  const domain = email?.split("@")[1]?.toLowerCase();
+  // Use root domain for favicon lookups (e.g. newsletter.example.com → example.com)
+  const faviconDomain = domain ? getRootDomain(domain) : undefined;
+  const domainFailed = faviconDomain ? failedFaviconDomains.has(faviconDomain) : false;
+
+  const getInitials = () => {
+    if (name) {
+      const parts = name
+        .trim()
+        .split(/\s+/)
+        .map((p) => p.replace(/^[^\p{L}\p{N}]+/u, ""))
+        .filter((p) => p.length > 0);
+      if (parts.length >= 2) {
+        return `${parts[0][0]}${parts[parts.length - 1][0]}`.toUpperCase();
+      }
+      if (parts.length === 1) {
+        return parts[0].slice(0, 2).toUpperCase();
+      }
+      return name.slice(0, 2).toUpperCase();
+    }
+    if (email) {
+      return email[0].toUpperCase();
+    }
+    return "?";
+  };
+
+  const getBackgroundColor = () => {
+    const str = name || email || "";
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      hash = str.charCodeAt(i) + ((hash << 5) - hash);
+    }
+    const hue = Math.abs(hash) % 360;
+    return `hsl(${hue}, 70%, 50%)`;
+  };
+
+  const sizeClasses = {
+    sm: "w-8 h-8 text-xs",
+    md: "w-10 h-10 text-sm",
+    lg: "w-12 h-12 text-base",
+  };
+
+  const profilePic = email && domain ? getProfilePictureUrl(email, domain, devMode, name) : null;
+  // Sender favicons come from the /api/favicon proxy, absent in the static build.
+  const showFavicon =
+    !IS_LITE && !disableFavicon && senderFavicons && faviconDomain && !PERSONAL_DOMAINS.has(faviconDomain) && !imgError && !domainFailed;
+
+  // Priority: [per-app override slot — F8b, not yet implemented] > atproto
+  // profile photo > contact photo > plugin avatar (e.g. Gravatar) > custom
+  // avatar > profile picture > company favicon > initials.
+  // The override slot is intentionally left ahead of the atproto step so a
+  // later per-app avatar upload can precede it without reordering the chain.
+  const customAvatar = devMode && email ? CUSTOM_AVATARS[email.toLowerCase()] : null;
+  const pluginAvatar = pluginAvatarFailed ? null : pluginAvatarUrl;
+  const atprotoAvatar = atprotoAvatarFailed ? null : atprotoAvatarUrl;
+  const photoSrc = atprotoAvatar || resolvedContactPhoto || pluginAvatar || customAvatar || profilePic || null;
+  const faviconSrc = !imgError && !domainFailed && showFavicon ? withBasePath(`/api/favicon?domain=${encodeURIComponent(faviconDomain!)}`) : null;
+  const imgSrc = disableImages ? null : (photoSrc || faviconSrc);
+  const isFavicon = imgSrc !== null && imgSrc === faviconSrc;
+
+  const handleImgError = useCallback(() => {
+    // If the atproto avatar just failed to load, mark it and fall through.
+    if (atprotoAvatar && imgSrc === atprotoAvatar) {
+      setAtprotoAvatarFailed(true);
+      return;
+    }
+    // If the plugin avatar just failed, mark it and fall through to the next source
+    if (pluginAvatar && imgSrc === pluginAvatar) {
+      setPluginAvatarFailed(true);
+      return;
+    }
+    setImgError(true);
+    // If this was a favicon URL (not a contact photo, plugin avatar, custom avatar or profile pic), remember the domain
+    if (faviconDomain && !resolvedContactPhoto && !pluginAvatar && !customAvatar && !profilePic) {
+      failedFaviconDomains.add(faviconDomain);
+    }
+  }, [imgSrc, atprotoAvatar, pluginAvatar, faviconDomain, resolvedContactPhoto, customAvatar, profilePic]);
+
+  return (
+    <div
+      className={cn(
+        "rounded-full flex items-center justify-center font-semibold text-white overflow-hidden",
+        sizeClasses[size],
+        className
+      )}
+      style={{ backgroundColor: imgSrc ? (isFavicon ? "#ffffff" : "transparent") : (fallbackColor ?? getBackgroundColor()) }}
+      title={name || email}
+    >
+      {imgSrc ? (
+        <img
+          src={imgSrc}
+          alt=""
+          className="w-full h-full object-cover"
+          onError={handleImgError}
+          // /api/favicon returns a 1x1 transparent PNG (HTTP 200) when no real
+          // favicon exists, to avoid spamming the DevTools console with 404s.
+          // Detect that sentinel by naturalWidth and fall back to initials.
+          onLoad={(e) => {
+            const img = e.currentTarget;
+            if (isFavicon && img.naturalWidth <= 1) {
+              handleImgError();
+            }
+          }}
+        />
+      ) : (
+        getInitials()
+      )}
+    </div>
+  );
+}

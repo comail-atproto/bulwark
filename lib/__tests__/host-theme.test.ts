@@ -1,0 +1,43 @@
+import { describe, it, expect, afterEach } from 'vitest';
+import { snapshotHostTheme, themeSnapshotToCSS, type ThemeSnapshot } from '../plugin-sandbox/host-theme';
+
+describe('host-theme', () => {
+  describe('themeSnapshotToCSS', () => {
+    it('emits the token values, font, and color-scheme', () => {
+      const snapshot: ThemeSnapshot = {
+        dark: false,
+        fontFamily: 'Inter, sans-serif',
+        vars: { '--color-background': '#ffffff', '--color-foreground': '#0f172a' },
+      };
+      const css = themeSnapshotToCSS(snapshot);
+      expect(css).toContain('--color-background: #ffffff;');
+      expect(css).toContain('--color-foreground: #0f172a;');
+      expect(css).toContain('font-family: Inter, sans-serif;');
+      expect(css).toContain('color-scheme: light;');
+      // Body inherits the theme foreground so unstyled plugin text adapts.
+      expect(css).toContain('color: var(--color-foreground, inherit);');
+      expect(css).toContain('background: transparent;');
+    });
+
+    it('reports a dark color-scheme when dark', () => {
+      const css = themeSnapshotToCSS({ dark: true, fontFamily: 'sans-serif', vars: {} });
+      expect(css).toContain('color-scheme: dark;');
+    });
+  });
+
+  describe('snapshotHostTheme', () => {
+    afterEach(() => {
+      document.documentElement.classList.remove('dark');
+      document.documentElement.removeAttribute('style');
+    });
+
+    it('reads the dark flag and declared tokens off <html>', () => {
+      document.documentElement.classList.add('dark');
+      document.documentElement.style.setProperty('--color-background', '#0a0a0a');
+      const snapshot = snapshotHostTheme();
+      expect(snapshot.dark).toBe(true);
+      expect(snapshot.vars['--color-background']).toBe('#0a0a0a');
+      expect(snapshot.fontFamily).toBeTruthy();
+    });
+  });
+});

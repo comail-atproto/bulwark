@@ -1,0 +1,955 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  font-size: var(--font-size-base);
+
+  --color-border: #e2e8f0;
+  --color-input: #e2e8f0;
+  --color-ring: #94a3b8;
+  --color-background: #ffffff;
+  --color-foreground: #0f172a;
+  --color-primary: #3b82f6;
+  --color-primary-foreground: #ffffff;
+  --color-secondary: #f8fafc;
+  --color-secondary-foreground: #0f172a;
+  --color-muted: #f1f5f9;
+  --color-muted-foreground: #64748b;
+  --color-accent: #dbeafe;
+  --color-accent-foreground: #1e40af;
+  --color-destructive: #ef4444;
+  --color-destructive-foreground: #ffffff;
+  --color-popover: #ffffff;
+  --color-popover-foreground: #0f172a;
+
+  /* Sidebar */
+  --color-sidebar: #f8fafc;
+  --color-sidebar-foreground: #0f172a;
+  --color-sidebar-border: #e2e8f0;
+  --color-sidebar-accent: #f1f5f9;
+  --color-sidebar-accent-foreground: #0f172a;
+
+  /* Card */
+  --color-card: #ffffff;
+  --color-card-foreground: #0f172a;
+
+  /* Semantic status colors */
+  --color-success: #22c55e;
+  --color-success-foreground: #ffffff;
+  --color-warning: #eab308;
+  --color-warning-foreground: #ffffff;
+  --color-info: #3b82f6;
+  --color-info-foreground: #ffffff;
+
+  /* Selection states */
+  --color-selection: #dbeafe;
+  --color-selection-foreground: #1e40af;
+
+  /* Unread indicator */
+  --color-unread: #3b82f6;
+
+  /* Chart colors */
+  --color-chart-1: #3b82f6;
+  --color-chart-2: #22c55e;
+  --color-chart-3: #f59e0b;
+  --color-chart-4: #ef4444;
+  --color-chart-5: #8b5cf6;
+
+  /* Settings variables */
+  --font-size-base: 16px;
+  --list-item-height: 48px;
+  --transition-duration: 0.2s;
+
+  /* Density spacing variables (defaults = regular) */
+  --density-item-py: 12px;
+  --density-item-gap: 12px;
+  --density-header-py: 12px;
+  --density-card-p: 16px;
+  --density-sidebar-py: 4px;
+}
+
+.dark {
+  --color-border: rgba(128, 128, 128, 0.3);
+  --color-input: #262626;
+  --color-ring: #d4d4d4;
+  --color-background: #0a0a0a;
+  --color-foreground: #fafafa;
+  --color-primary: #fafafa;
+  --color-primary-foreground: #171717;
+  --color-secondary: #262626;
+  --color-secondary-foreground: #fafafa;
+  --color-muted: #262626;
+  --color-muted-foreground: #a3a3a3;
+  --color-accent: #1e3a8a;
+  --color-accent-foreground: #dbeafe;
+  --color-destructive: #ef4444;
+  --color-destructive-foreground: #fafafa;
+  --color-popover: #1c1c1c;
+  --color-popover-foreground: #fafafa;
+
+  /* Sidebar */
+  --color-sidebar: #0a0a0a;
+  --color-sidebar-foreground: #fafafa;
+  --color-sidebar-border: #262626;
+  --color-sidebar-accent: #1a1a1a;
+  --color-sidebar-accent-foreground: #fafafa;
+
+  /* Card */
+  --color-card: #141414;
+  --color-card-foreground: #fafafa;
+
+  /* Semantic status colors */
+  --color-success: #16a34a;
+  --color-success-foreground: #ffffff;
+  --color-warning: #ca8a04;
+  --color-warning-foreground: #ffffff;
+  --color-info: #60a5fa;
+  --color-info-foreground: #ffffff;
+
+  /* Selection states */
+  --color-selection: rgba(59, 130, 246, 0.25);
+  --color-selection-foreground: #93c5fd;
+
+  /* Unread indicator */
+  --color-unread: #60a5fa;
+
+  /* Chart colors */
+  --color-chart-1: #60a5fa;
+  --color-chart-2: #4ade80;
+  --color-chart-3: #fbbf24;
+  --color-chart-4: #f87171;
+  --color-chart-5: #a78bfa;
+}
+
+@theme inline {
+  --color-border: var(--color-border);
+  --color-input: var(--color-input);
+  --color-ring: var(--color-ring);
+  --color-background: var(--color-background);
+  --color-foreground: var(--color-foreground);
+  --color-primary: var(--color-primary);
+  --color-primary-foreground: var(--color-primary-foreground);
+  --color-secondary: var(--color-secondary);
+  --color-secondary-foreground: var(--color-secondary-foreground);
+  --color-muted: var(--color-muted);
+  --color-muted-foreground: var(--color-muted-foreground);
+  --color-accent: var(--color-accent);
+  --color-accent-foreground: var(--color-accent-foreground);
+  --color-destructive: var(--color-destructive);
+  --color-destructive-foreground: var(--color-destructive-foreground);
+  --color-popover: var(--color-popover);
+  --color-popover-foreground: var(--color-popover-foreground);
+  --color-sidebar: var(--color-sidebar);
+  --color-sidebar-foreground: var(--color-sidebar-foreground);
+  --color-sidebar-border: var(--color-sidebar-border);
+  --color-sidebar-accent: var(--color-sidebar-accent);
+  --color-sidebar-accent-foreground: var(--color-sidebar-accent-foreground);
+  --color-card: var(--color-card);
+  --color-card-foreground: var(--color-card-foreground);
+  --color-success: var(--color-success);
+  --color-success-foreground: var(--color-success-foreground);
+  --color-warning: var(--color-warning);
+  --color-warning-foreground: var(--color-warning-foreground);
+  --color-info: var(--color-info);
+  --color-info-foreground: var(--color-info-foreground);
+  --color-selection: var(--color-selection);
+  --color-selection-foreground: var(--color-selection-foreground);
+  --color-unread: var(--color-unread);
+  --color-chart-1: var(--color-chart-1);
+  --color-chart-2: var(--color-chart-2);
+  --color-chart-3: var(--color-chart-3);
+  --color-chart-4: var(--color-chart-4);
+  --color-chart-5: var(--color-chart-5);
+}
+
+* {
+  border-color: var(--color-border);
+}
+
+body {
+  background-color: var(--color-background);
+  color: var(--color-foreground);
+  font-family:
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    Roboto,
+    "Helvetica Neue",
+    Arial,
+    "Noto Sans Thai",
+    "Leelawadee UI",
+    Tahoma,
+    sans-serif;
+  font-feature-settings:
+    "rlig" 1,
+    "calt" 1;
+}
+
+/* Native <select> option lists are painted by the browser, not by the
+   Tailwind classes on the control, so they only honour color-scheme and an
+   explicit option colour. Themes whose --color-muted is translucent (Aurora
+   Glass dark: rgba(255,255,255,0.05)) composited to a light popup with
+   near-white text (#999). Pin options to the popover tokens, which every
+   theme defines as an opaque surface, and let dark themes ask the browser
+   for a dark popup where option colours are ignored (Safari). */
+option {
+  background-color: var(--color-popover);
+  color: var(--color-popover-foreground);
+}
+
+/* The group labels (the From dropdown's accounts) are painted the same way.
+   Without colours of their own they kept the control's text colour on the
+   popup's base, which a transparent control leaves light: in dark themes,
+   light text on a white bar. */
+optgroup {
+  background-color: var(--color-popover);
+  color: var(--color-popover-foreground);
+}
+
+.dark select {
+  color-scheme: dark;
+}
+
+/* Tailwind v4's preflight no longer gives buttons a pointer cursor, so most
+   controls showed the arrow. Give everything clickable the pointer again, and
+   disabled controls not-allowed, as the components that style it themselves
+   already do. This sits in the base layer so a cursor utility on a component
+   (cursor-grab, cursor-text, disabled:cursor-default) still wins. */
+@layer base {
+  button:not(:disabled),
+  select:not(:disabled),
+  input:is([type="checkbox"], [type="radio"], [type="color"]):not(:disabled),
+  summary,
+  [role="button"]:not([aria-disabled="true"]),
+  [role="tab"]:not([aria-disabled="true"]),
+  [role="switch"]:not([aria-disabled="true"]),
+  [role="checkbox"]:not([aria-disabled="true"]),
+  [role="radio"]:not([aria-disabled="true"]),
+  [role="option"]:not([aria-disabled="true"]),
+  [role="menuitem"]:not([aria-disabled="true"]),
+  [role="menuitemcheckbox"]:not([aria-disabled="true"]),
+  [role="menuitemradio"]:not([aria-disabled="true"]) {
+    cursor: pointer;
+  }
+
+  button:disabled,
+  select:disabled,
+  input:is([type="checkbox"], [type="radio"], [type="color"]):disabled,
+  [role="button"][aria-disabled="true"],
+  [role="tab"][aria-disabled="true"],
+  [role="switch"][aria-disabled="true"],
+  [role="checkbox"][aria-disabled="true"],
+  [role="radio"][aria-disabled="true"],
+  [role="option"][aria-disabled="true"],
+  [role="menuitem"][aria-disabled="true"],
+  [role="menuitemcheckbox"][aria-disabled="true"],
+  [role="menuitemradio"][aria-disabled="true"] {
+    cursor: not-allowed;
+  }
+}
+
+/* Minimalist scrollbar */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-muted-foreground) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background-color: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: var(--color-muted-foreground);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--color-foreground);
+}
+
+/* Enhanced Email Content Styling */
+
+.email-content-wrapper {
+  min-width: 100%;
+}
+
+/* Forces light-theme CSS variables inside the email content area, so when
+   "Always Show Emails in Light Mode" is enabled in dark theme the surrounding
+   sender info / attachments / plain-text body don't end up with light text
+   on a white background. */
+.email-content-light {
+  --color-background: #ffffff;
+  --color-foreground: #0f172a;
+  --color-muted: #f1f5f9;
+  --color-muted-foreground: #64748b;
+  --color-border: #e2e8f0;
+  --color-card: #ffffff;
+  --color-card-foreground: #0f172a;
+  --color-popover: #ffffff;
+  --color-popover-foreground: #0f172a;
+  --color-secondary: #f8fafc;
+  --color-secondary-foreground: #0f172a;
+  --color-accent: #dbeafe;
+  --color-accent-foreground: #1e40af;
+  --color-input: #e2e8f0;
+}
+
+.email-content-light .email-content-text a {
+  color: #2563eb;
+}
+
+.email-content-text {
+  padding: 1rem 1.25rem;
+}
+
+@media (max-width: 640px) {
+  .email-content-text {
+    padding-left: 0.75rem;
+    padding-right: 0.75rem;
+  }
+}
+
+.email-content-text a {
+  color: #2563eb;
+  text-decoration: underline;
+}
+
+.dark .email-content-text a {
+  color: #60a5fa;
+}
+
+.email-content {
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
+    Arial, sans-serif;
+  font-size: 0.9375rem;
+  line-height: 1.6;
+  color: var(--color-foreground);
+  max-width: none;
+  overflow-wrap: break-word;
+  word-wrap: break-word;
+  padding: 1rem 1.25rem;
+}
+
+/* Remove padding for rich HTML emails with table-based layouts */
+.email-content:has(> table) {
+  padding: 0;
+}
+
+.email-content p {
+  margin: 0.75rem 0;
+}
+
+.email-content a {
+  color: var(--color-primary);
+  text-decoration: none;
+  transition: color 0.2s;
+}
+
+.email-content a:hover {
+  text-decoration: underline;
+  color: var(--color-accent-foreground);
+}
+
+.email-content img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 0.375rem;
+  margin: 1rem 0;
+  display: block;
+}
+
+.email-content blockquote {
+  border-left: 3px solid var(--color-border);
+  padding-left: 1rem;
+  margin: 1rem 0;
+  color: var(--color-muted-foreground);
+  font-style: italic;
+}
+
+.email-content pre {
+  background-color: var(--color-muted);
+  border: 1px solid var(--color-border);
+  border-radius: 0.375rem;
+  padding: 1rem;
+  font-family: "SF Mono", Monaco, Menlo, Consolas, monospace;
+  font-size: 0.875rem;
+  overflow-x: auto;
+  margin: 1rem 0;
+}
+
+.email-content code {
+  background-color: var(--color-muted);
+  padding: 0.125rem 0.375rem;
+  border-radius: 0.25rem;
+  font-family: "SF Mono", Monaco, Menlo, Consolas, monospace;
+  font-size: 0.875rem;
+  color: var(--color-destructive);
+}
+
+.email-content h1,
+.email-content h2,
+.email-content h3,
+.email-content h4 {
+  margin-top: 1.5rem;
+  margin-bottom: 0.75rem;
+  font-weight: 600;
+  line-height: 1.25;
+  color: var(--color-foreground);
+}
+
+.email-content h1 {
+  font-size: 1.5rem;
+}
+.email-content h2 {
+  font-size: 1.25rem;
+}
+.email-content h3 {
+  font-size: 1.125rem;
+}
+.email-content h4 {
+  font-size: 1rem;
+}
+
+.email-content ul,
+.email-content ol {
+  margin: 1rem 0;
+  padding-left: 1.75rem;
+}
+
+.email-content li {
+  margin: 0.375rem 0;
+  line-height: 1.6;
+}
+
+.email-content ul li {
+  list-style-type: disc;
+}
+
+.email-content ol li {
+  list-style-type: decimal;
+}
+
+/* Reply quoted HTML - preserves original inline styles/colors */
+.email-reply-quote {
+  overflow-wrap: break-word;
+  word-wrap: break-word;
+  max-width: none;
+}
+
+.email-reply-quote p {
+  margin: 0.5rem 0;
+}
+
+.email-reply-quote img {
+  max-width: 100%;
+  height: auto;
+}
+
+.email-reply-quote a {
+  text-decoration: underline;
+}
+
+/* Only style tables that are actual data tables, not layout tables */
+.email-content table.data-table,
+.email-content table[border="1"] {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 1rem 0;
+  font-size: 0.875rem;
+}
+
+.email-content table.data-table th,
+.email-content table.data-table td,
+.email-content table[border="1"] th,
+.email-content table[border="1"] td {
+  padding: 0.625rem;
+  border: 1px solid var(--color-border);
+  text-align: left;
+}
+
+.email-content table.data-table th,
+.email-content table[border="1"] th {
+  background-color: var(--color-muted);
+  font-weight: 600;
+  color: var(--color-foreground);
+}
+
+/* Reset styles for layout tables (commonly used in HTML emails) */
+.email-content table {
+  border-collapse: collapse;
+  border-spacing: 0;
+}
+
+/* Let HTML email's own styles take precedence */
+.email-content table:not(.data-table):not([border="1"]) {
+  border: initial;
+}
+
+.email-content table:not(.data-table):not([border="1"]) td,
+.email-content table:not(.data-table):not([border="1"]) th {
+  border: initial;
+  padding: initial;
+}
+
+.email-content hr {
+  border: none;
+  border-top: 1px solid var(--color-border);
+  margin: 1.5rem 0;
+}
+
+/* Email thread quoted text */
+.email-content .quoted-text {
+  border-left: 3px solid var(--color-border);
+  padding-left: 1rem;
+  margin: 1rem 0;
+  color: var(--color-muted-foreground);
+  opacity: 0.8;
+}
+
+/* Toast animations */
+@keyframes toast-enter {
+  from {
+    transform: translateX(calc(100% + 1.25rem));
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes toast-exit {
+  from {
+    transform: translateX(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateX(calc(100% + 1.25rem));
+    opacity: 0;
+  }
+}
+
+@keyframes toast-progress {
+  from {
+    width: 100%;
+  }
+  to {
+    width: 0%;
+  }
+}
+
+.toast-enter {
+  animation: toast-enter 0.32s cubic-bezier(0.21, 1.02, 0.73, 1) forwards;
+}
+
+.toast-exit {
+  animation: toast-exit 0.28s cubic-bezier(0.06, 0.71, 0.55, 1) forwards;
+}
+
+/* Mobile Responsive Utilities */
+
+/* Safe area insets for notched devices (iPhone X+, etc.) */
+.safe-area-inset-top {
+  padding-top: env(safe-area-inset-top);
+}
+
+.safe-area-inset-bottom {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+.safe-area-inset-left {
+  padding-left: env(safe-area-inset-left);
+}
+
+.safe-area-inset-right {
+  padding-right: env(safe-area-inset-right);
+}
+
+/* Minimum touch targets (44x44px recommended by Apple HIG) */
+.touch-target {
+  min-height: 44px;
+  min-width: 44px;
+}
+
+/* Prevent text selection on mobile for UI elements */
+.no-select {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/* Smooth transitions for view switching */
+.view-transition {
+  transition:
+    transform 0.3s ease-in-out,
+    opacity 0.3s ease-in-out;
+}
+
+/* Hide scrollbar on mobile while keeping functionality */
+@media (max-width: 767px) {
+  .mobile-scroll-hidden::-webkit-scrollbar {
+    display: none;
+  }
+
+  .mobile-scroll-hidden {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+}
+
+.scroll-hidden::-webkit-scrollbar {
+  display: none;
+}
+
+.scroll-hidden {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Mobile backdrop blur support */
+@supports (backdrop-filter: blur(8px)) {
+  .mobile-backdrop {
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+  }
+}
+
+/* Prevent overscroll bounce on iOS */
+.no-overscroll {
+  overscroll-behavior: none;
+}
+
+/* iOS Safari zooms the viewport whenever a focused field computes below 16px,
+ * and leaves the page zoomed and panned once the keyboard closes (#838). Every
+ * field here is text-sm (0.875rem), so no --font-size-base setting escapes it:
+ * small 12.25px, medium 14px, large 15.75px. The viewport meta deliberately
+ * omits maximum-scale so pinch zoom keeps working, which leaves CSS as the
+ * only place to put the floor.
+ *
+ * max() raises the small fields to 16px while letting the "Large" setting go
+ * past it (18px) rather than pinning every field to the threshold, and
+ * pointer: coarse keeps desktop typography untouched. Checkbox and radio are
+ * excluded because their box is font-relative in Safari; the :not() chain also
+ * lifts specificity above .text-sm, so no !important is needed.
+ *
+ * Quoted replies are exempt by construction: they render inside a shadow root
+ * (components/email/quoted-html.ts) so they match the sent mail 1:1, and page
+ * CSS cannot reach in. */
+@media (pointer: coarse) {
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  textarea,
+  select,
+  [contenteditable="true"] {
+    font-size: max(16px, 1rem);
+  }
+}
+
+/* Shake animation (for rejected input) */
+@keyframes shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  20%,
+  60% {
+    transform: translateX(-4px);
+  }
+  40%,
+  80% {
+    transform: translateX(4px);
+  }
+}
+
+.animate-shake {
+  animation: shake 0.4s ease-in-out;
+}
+
+/* Fade in animation (for popovers) */
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.2s ease-out;
+}
+
+/* Slide in from right animation (for mobile views) */
+@keyframes slide-in-from-right {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+.animate-slide-in-from-right {
+  animation: slide-in-from-right 0.3s ease-out;
+}
+
+/* Slide in from left animation (for sidebar) */
+@keyframes slide-in-from-left {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+.animate-slide-in-from-left {
+  animation: slide-in-from-left 0.3s ease-out;
+}
+
+/* Calendar swipe animations (subtler slide for view transitions) */
+@keyframes cal-slide-in-right {
+  from {
+    opacity: 0;
+    transform: translateX(30%);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes cal-slide-in-left {
+  from {
+    opacity: 0;
+    transform: translateX(-30%);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.animate-slide-in-right {
+  animation: cal-slide-in-right 0.25s ease-out;
+}
+
+.animate-slide-in-left {
+  animation: cal-slide-in-left 0.25s ease-out;
+}
+
+/* Reduced motion: respect user OS preference */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Disable backdrop-filter on mobile for performance */
+@media (max-width: 767px) {
+  .mobile-backdrop {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+}
+
+/* TipTap Rich Text Editor */
+.tiptap {
+  outline: none;
+}
+
+.tiptap p {
+  margin: 0.25rem 0;
+}
+
+.tiptap h1 {
+  font-size: 1.5rem;
+  font-weight: 700;
+  margin: 0.5rem 0;
+}
+
+.tiptap h2 {
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin: 0.5rem 0;
+}
+
+.tiptap ul {
+  list-style-type: disc;
+  padding-inline-start: 1.5rem;
+  margin: 0.25rem 0;
+}
+
+.tiptap ol {
+  list-style-type: decimal;
+  padding-inline-start: 1.5rem;
+  margin: 0.25rem 0;
+}
+
+.tiptap li {
+  margin: 0.125rem 0;
+}
+
+.tiptap blockquote {
+  border-inline-start: 3px solid var(--color-border);
+  padding-inline-start: 1rem;
+  margin: 0.5rem 0;
+  color: var(--color-muted-foreground);
+}
+
+.tiptap pre {
+  background-color: var(--color-muted);
+  border: 1px solid var(--color-border);
+  border-radius: 0.375rem;
+  padding: 0.75rem;
+  font-family: monospace;
+  font-size: 0.875rem;
+  overflow-x: auto;
+  margin: 0.5rem 0;
+}
+
+.tiptap code {
+  background-color: var(--color-muted);
+  padding: 0.125rem 0.25rem;
+  border-radius: 0.25rem;
+  font-family: monospace;
+  font-size: 0.875rem;
+}
+
+.tiptap a {
+  color: var(--color-primary);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.tiptap img {
+  max-width: 100%;
+  height: auto;
+}
+
+.tiptap hr {
+  border: none;
+  border-top: 1px solid var(--color-border);
+  margin: 1rem 0;
+}
+
+.tiptap p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: inline-start;
+  color: var(--color-muted-foreground);
+  pointer-events: none;
+  height: 0;
+}
+
+.tiptap .ProseMirror-selectednode img {
+  outline: none;
+}
+
+.tiptap table {
+  border-collapse: collapse;
+  margin: 0.5rem 0;
+  table-layout: fixed;
+  width: 100%;
+  overflow: hidden;
+}
+
+.tiptap table td,
+.tiptap table th {
+  border: 1px solid var(--color-border);
+  padding: 0.375rem 0.5rem;
+  vertical-align: top;
+  position: relative;
+  min-width: 1em;
+}
+
+.tiptap table th {
+  background-color: var(--color-muted) !important;
+  color: var(--color-foreground) !important;
+  font-weight: 600;
+  text-align: left;
+}
+
+.tiptap table p {
+  margin: 0;
+}
+
+.tiptap table .selectedCell::after {
+  background: rgba(99, 102, 241, 0.15);
+  content: "";
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  z-index: 2;
+}
+
+.tiptap table .column-resize-handle {
+  background-color: var(--color-primary);
+  bottom: -2px;
+  pointer-events: none;
+  position: absolute;
+  right: -2px;
+  top: 0;
+  width: 4px;
+}
+
+.tiptap.resize-cursor {
+  cursor: col-resize;
+}
+
+/* Smooth halo applied to a setting row when the user clicks a sub-result in
+   the settings search. The element bg + a 10px box-shadow fill the row plus
+   a 10px ring of the same tint, then a 2px outline sits exactly at the outer
+   edge. Uses the primary theme color so it adapts to light/dark. */
+@keyframes settings-search-pulse {
+  0% {
+    background-color: color-mix(in srgb, var(--color-primary) 0%, transparent);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-primary) 0%, transparent);
+    outline-color: color-mix(in srgb, var(--color-primary) 0%, transparent);
+  }
+  30% {
+    background-color: color-mix(in srgb, var(--color-primary) 12%, transparent);
+    box-shadow: 0 0 0 10px color-mix(in srgb, var(--color-primary) 12%, transparent);
+    outline-color: color-mix(in srgb, var(--color-primary) 60%, transparent);
+  }
+  100% {
+    background-color: color-mix(in srgb, var(--color-primary) 0%, transparent);
+    box-shadow: 0 0 0 10px color-mix(in srgb, var(--color-primary) 0%, transparent);
+    outline-color: color-mix(in srgb, var(--color-primary) 0%, transparent);
+  }
+}
+
+.settings-search-highlight {
+  outline: 2px solid transparent;
+  outline-offset: 10px;
+  border-radius: 8px;
+  animation: settings-search-pulse 1.6s ease-in-out forwards;
+}
+
+/* RTL: mirror directional icons (chevrons/arrows) so prev/next, back/forward,
+   and panel-collapse affordances point the correct way in right-to-left layouts.
+   Tabler emits a `tabler-icon-<name>` class per icon, so we target the
+   directional ones only — vertical chevrons (up/down) are intentionally left. */
+[dir="rtl"] .tabler-icon-chevron-left,
+[dir="rtl"] .tabler-icon-chevron-right,
+[dir="rtl"] .tabler-icon-chevrons-left,
+[dir="rtl"] .tabler-icon-chevrons-right,
+[dir="rtl"] .tabler-icon-arrow-left,
+[dir="rtl"] .tabler-icon-arrow-right,
+[dir="rtl"] .tabler-icon-arrow-big-left,
+[dir="rtl"] .tabler-icon-arrow-big-right,
+[dir="rtl"] .tabler-icon-layout-sidebar-left,
+[dir="rtl"] .tabler-icon-layout-sidebar-right {
+  transform: scaleX(-1);
+}
