@@ -1,0 +1,496 @@
+import { render, screen } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import React from 'react';
+import { EmailComposer } from '../email-composer';
+import { useSettingsStore } from '@/stores/settings-store';
+import { useAuthStore } from '@/stores/auth-store';
+import { useAccountStore } from '@/stores/account-store';
+
+// ─── Heavy component mocks (mirrors recipient-paste.test.tsx) ─────────────────
+
+const editorProps = vi.hoisted(() => ({ mentionCandidates: [] as Array<{ label: string; email: string }> }));
+
+vi.mock('@/components/email/rich-text-editor', () => ({
+  RichTextEditor: (props: { mentionCandidates?: Array<{ label: string; email: string }> }) => {
+    editorProps.mentionCandidates = props.mentionCandidates ?? [];
+    return React.createElement('div', { 'data-testid': 'rich-text-editor' });
+  },
+}));
+
+vi.mock('@/components/plugins/plugin-slot', () => ({ PluginSlot: () => null }));
+vi.mock('@/components/identity/sub-address-helper', () => ({ SubAddressHelper: () => null }));
+vi.mock('@/components/templates/template-picker', () => ({ TemplatePicker: () => null }));
+vi.mock('@/components/templates/template-form', () => ({ TemplateForm: () => null }));
+vi.mock('@/components/files/file-preview-modal', () => ({ FilePreviewModal: () => null }));
+vi.mock('@/hooks/use-focus-trap', () => ({
+  useFocusTrap: () => ({ ref: { current: null } }),
+}));
+// Mutable so one test can turn the Pro cross-account identity list on; the
+// real hook namespaces every id as `<localAccountId>::<identityId>`.
+const proIdentities = vi.hoisted(() => ({
+  enabled: false,
+  groups: [] as unknown[],
+  allIdentities: [] as { id: string; email: string; name: string }[],
+}));
+
+vi.mock('@/hooks/use-pro-multi-account-identities', () => ({
+  useProMultiAccountIdentities: () => proIdentities,
+  stripCrossAccountIdentityPrefix: (id: string) => {
+    const at = id.indexOf('::');
+    return at === -1
+      ? { localAccountId: null, rawId: id }
+      : { localAccountId: id.slice(0, at), rawId: id.slice(at + 2) };
+  },
+}));
+
+// ─── Store mocks ──────────────────────────────────────────────────────────────
+
+vi.mock('@/stores/auth-store', () => {
+  const state = {
+    client: null,
+    identities: [],
+    primaryIdentity: null,
+    isAuthenticated: false,
+    isDemoMode: false,
+    activeAccountId: null,
+    connectionLost: false,
+    getClientForAccount: () => undefined,
+    getAllConnectedClients: () => new Map(),
+    syncIdentities: () => {},
+    refreshIdentities: async () => {},
+  };
+  const hook = (sel?: (s: typeof state) => unknown) =>
+    typeof sel === 'function' ? sel(state) : state;
+  hook.getState = () => state;
+  hook.setState = (p: Partial<typeof state>) => Object.assign(state, p);
+  return { useAuthStore: hook };
+});
+
+vi.mock('@/stores/identity-store', () => {
+  const state = {
+    identities: [
+      { id: 'id-me', email: 'me@example.com', name: 'Me' },
+      { id: 'id-info', email: 'info@example.com', name: 'Info' },
+    ],
+    defaultIdentityId: 'id-me',
+  };
+  const hook = (sel?: (s: typeof state) => unknown) =>
+    typeof sel === 'function' ? sel(state) : state;
+  hook.getState = () => state;
+  hook.setState = (p: Partial<typeof state>) => Object.assign(state, p);
+  return { useIdentityStore: hook };
+});
+
+vi.mock('@/stores/account-store', () => {
+  const state = {
+    accounts: [] as { id: string; email: string; isConnected: boolean }[],
+    getAccountById: (id: string) => state.accounts.find((a) => a.id === id),
+  };
+  const hook = (sel?: (s: typeof state) => unknown) =>
+    typeof sel === 'function' ? sel(state) : state;
+  hook.getState = () => state;
+  hook.setState = (p: Partial<typeof state>) => Object.assign(state, p);
+  return { useAccountStore: hook };
+});
+
+vi.mock('@/stores/email-store', () => {
+  const state = {
+    draftSaveEnabled: false,
+    sendRawEmail: async () => ({ sent: true }),
+  };
+  const hook = (sel?: (s: typeof state) => unknown) =>
+    typeof sel === 'function' ? sel(state) : state;
+  hook.getState = () => state;
+  hook.setState = (p: Partial<typeof state>) => Object.assign(state, p);
+  return { useEmailStore: hook };
+});
+
+vi.mock('@/stores/settings-store', () => {
+  const state = {
+    timeFormat: '24h',
+    plainTextMode: false,
+    subAddressDelimiter: '+',
+    autoSelectReplyIdentity: false,
+    replyIdentityMatch: 'domain',
+    attachmentReminderEnabled: false,
+    recipientMentionsEnabled: true,
+    attachmentReminderKeywords: [],
+    sendDelaySeconds: 0,
+    signaturePosition: 'above_quote',
+    signatureSeparatorEnabled: false,
+    requestReadReceiptDefault: false,
+    addTrustedSender: () => {},
+    trustedSendersAddressBook: null,
+  };
+  const hook = (sel?: (s: typeof state) => unknown) =>
+    typeof sel === 'function' ? sel(state) : state;
+  hook.getState = () => state;
+  hook.setState = (p: Partial<typeof state>) => Object.assign(state, p);
+  return { useSettingsStore: hook };
+});
+
+vi.mock('@/stores/contact-store', () => {
+  const state = {
+    contacts: [],
+    getAutocomplete: async () => [],
+    addToTrustedSendersBook: async () => {},
+  };
+  const hook = (sel?: (s: typeof state) => unknown) =>
+    typeof sel === 'function' ? sel(state) : state;
+  hook.getState = () => state;
+  hook.setState = (p: Partial<typeof state>) => Object.assign(state, p);
+  return { useContactStore: hook };
+});
+
+vi.mock('@/stores/template-store', () => {
+  const state = { templates: [], addTemplate: async () => {} };
+  const hook = (sel?: (s: typeof state) => unknown) =>
+    typeof sel === 'function' ? sel(state) : state;
+  hook.getState = () => state;
+  hook.setState = (p: Partial<typeof state>) => Object.assign(state, p);
+  return { useTemplateStore: hook };
+});
+
+// ─── Misc dependency mocks ────────────────────────────────────────────────────
+
+vi.mock('@/stores/toast-store', () => ({
+  toast: { info: () => {}, error: () => {}, success: () => {} },
+}));
+
+vi.mock('@/lib/plugin-hooks', () => ({
+  emailHooks: {
+    onComposerOpen: { call: async () => [] },
+    onRecipientChange: { call: async () => [] },
+    getRecipientSuggestions: { call: async () => [] },
+    onSend: { call: async () => [] },
+    beforeSend: { call: async () => [] },
+    onRecipientChipsChange: { transform: async (chips: unknown) => chips },
+  },
+  contactHooks: {
+    search: { call: async () => [] },
+  },
+}));
+
+vi.mock('@/lib/email-sanitization', () => ({
+  sanitizeSignatureHtml: (v: string) => v,
+  sanitizeEmailHtml: (v: string) => v,
+  parseHtmlSafely: (html: string) => new DOMParser().parseFromString(html, 'text/html'),
+}));
+
+vi.mock('@/lib/email-threading', () => ({
+  computeReplyThreadingHeaders: () => ({ inReplyTo: [], references: [] }),
+}));
+vi.mock('@/lib/signature-utils', () => ({
+  appendPlainTextSignature: (body: string) => body,
+  getPlainTextSignature: () => '',
+}));
+vi.mock('@/lib/sub-addressing', () => ({ generateSubAddress: () => '' }));
+vi.mock('@/lib/debug', () => ({ debug: () => {} }));
+vi.mock('@/components/email/quoted-html', () => ({
+  buildQuotedHtmlBlock: () => '',
+  serializeEditorContent: () => '',
+}));
+vi.mock('@/lib/template-utils', () => ({ substitutePlaceholders: (s: string) => s }));
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+const RECEIVED = {
+  from: [{ email: 'bob@other.com', name: 'Bob' }],
+  to: [{ email: 'me@example.com', name: 'Me' }, { email: 'carol@other.com', name: 'Carol' }],
+  cc: [{ email: 'dave@other.com', name: 'Dave' }],
+  subject: 'Hello',
+};
+
+/** The same conversation, but the message opened is the one we sent back. */
+const SELF_SENT = {
+  from: [{ email: 'me@example.com', name: 'Me' }],
+  to: [{ email: 'bob@other.com', name: 'Bob' }],
+  cc: [{ email: 'carol@other.com', name: 'Carol' }],
+  subject: 'Re: Hello',
+};
+
+/** Delivered to an aliased/shared mailbox the user DOES hold an identity for. */
+const RECEIVED_SHARED = {
+  from: [{ email: 'bob@other.com', name: 'Bob' }],
+  to: [{ email: 'info@example.com', name: 'Info' }],
+  subject: 'Question for the team inbox',
+};
+
+/** The shared-mailbox shape: the team address in To, our own in Cc. */
+const RECEIVED_SHARED_WITH_US_IN_CC = {
+  from: [{ email: 'bob@other.com', name: 'Bob' }],
+  to: [{ email: 'info@example.com', name: 'Info' }],
+  cc: [{ email: 'me@example.com', name: 'Me' }],
+  subject: 'Question for the team inbox',
+};
+
+/** Delivered to a same-domain address that is NOT one of our identities -
+ *  the domain catch-all shape that rewrites the From header. */
+const RECEIVED_CATCH_ALL = {
+  from: [{ email: 'bob@other.com', name: 'Bob' }],
+  to: [{ email: 'colleague@example.com', name: 'A Colleague' }],
+  subject: 'Sent to a colleague on our domain',
+};
+
+/** Chip labels currently shown in a recipient row, in order. Chips are the
+ *  draggable spans inside the row; next-intl is mocked to return the key, so
+ *  the Cc row is found via its "cc_label" caption. */
+const chipsIn = (row: HTMLElement) =>
+  Array.from(row.querySelectorAll('[draggable]')).map((el) => el.textContent?.trim());
+
+const toChips = () => chipsIn(screen.getByTestId('composer-to'));
+const ccChips = () => chipsIn(screen.getByText('cc_label').parentElement as HTMLElement);
+
+const identitySelect = () => screen.getByTestId('composer-from') as HTMLSelectElement;
+
+const setAutoSelect = (on: boolean) =>
+  (useSettingsStore as unknown as { setState: (p: Record<string, unknown>) => void })
+    .setState({ autoSelectReplyIdentity: on });
+
+describe('composer reply addressing', () => {
+  beforeEach(() => { vi.clearAllMocks(); setAutoSelect(false); });
+
+  it('addresses a reply to the sender of a received message', () => {
+    render(<EmailComposer mode="reply" replyTo={RECEIVED} />);
+    expect(toChips()).toEqual(['Bob (bob@other.com)']);
+  });
+
+  it('reply-all keeps the other recipients but not our own address', () => {
+    render(<EmailComposer mode="replyAll" replyTo={RECEIVED} />);
+    expect(toChips()).toEqual(['Bob (bob@other.com)', 'Carol (carol@other.com)']);
+    expect(ccChips()).toEqual(['Dave (dave@other.com)']);
+  });
+
+  // #703: replying to our own message inside a thread used to address the
+  // reply back to ourselves instead of continuing the conversation.
+  it('addresses a reply to our own message to the original recipient', () => {
+    render(<EmailComposer mode="reply" replyTo={SELF_SENT} />);
+    expect(toChips()).toEqual(['Bob (bob@other.com)']);
+  });
+
+  it('reply-all on our own message restores the original To and Cc', () => {
+    render(<EmailComposer mode="replyAll" replyTo={SELF_SENT} />);
+    expect(toChips()).toEqual(['Bob (bob@other.com)']);
+    expect(ccChips()).toEqual(['Carol (carol@other.com)']);
+  });
+
+  it('sends the reply to our own message from the identity that sent it', () => {
+    render(<EmailComposer mode="reply" replyTo={{ ...SELF_SENT, from: [{ email: 'info@example.com', name: 'Info' }] }} />);
+    expect(identitySelect().value).toBe('id-info');
+  });
+
+  // Own-identity matching is unconditional: it only chooses which of the
+  // user's OWN addresses sends, so it carries no impersonation risk. Shipping
+  // it behind an off-by-default setting meant a shared mailbox always replied
+  // as the account owner.
+  it('replies from the address that received the original', () => {
+    render(<EmailComposer mode="reply" replyTo={RECEIVED_SHARED} />);
+    expect(identitySelect().value).toBe('id-info');
+  });
+
+  it('forwards from the address that received the original', () => {
+    render(<EmailComposer mode="forward" replyTo={RECEIVED_SHARED} />);
+    expect(identitySelect().value).toBe('id-info');
+  });
+
+  // Being copied on a message addressed to the team must not make it reply as
+  // us: the identity list is ordered login-first, so resolving by identity
+  // order rather than by To/Cc/Bcc rank would pick `id-me` here.
+  it('replies from the To address even when our own identity is in Cc', () => {
+    render(<EmailComposer mode="reply" replyTo={RECEIVED_SHARED_WITH_US_IN_CC} />);
+    expect(identitySelect().value).toBe('id-info');
+  });
+
+  // Deliberate boundary: a NEW message is still resolved only when the setting
+  // is on. `composeFromAccountEmail` falls back to the account's login address,
+  // frozen at first login, so preselecting unconditionally would override a
+  // user-chosen default sender identity (#507) on every new message.
+  it('leaves a new message on the primary identity while the setting is off', () => {
+    render(<EmailComposer mode="compose" composeFromAccountEmail="info@example.com" />);
+    expect(identitySelect().value).toBe('id-me');
+  });
+
+  // The catch-all From REWRITE is a different behaviour and stays opt-in: it
+  // puts an address the user has NOT configured into From, and on a multi-user
+  // domain that address can be a colleague's.
+  it('does not rewrite From to a same-domain non-identity while the setting is off', () => {
+    render(<EmailComposer mode="reply" replyTo={RECEIVED_CATCH_ALL} />);
+    expect(screen.queryByDisplayValue('colleague@example.com')).toBeNull();
+    expect(identitySelect().value).toBe('id-me');
+  });
+
+  // A forward introduces the rewritten From to a recipient the user just
+  // typed, who has no way to tell it is not really from that person - so
+  // forwards never take the rewrite, even when it is enabled.
+  // Control: the opt-in path itself still works on a reply, so the two tests
+  // above are proving the gate, not a broken resolver.
+  it('rewrites From to the catch-all address on a reply when the setting is on', () => {
+    setAutoSelect(true);
+    try {
+      render(<EmailComposer mode="reply" replyTo={RECEIVED_CATCH_ALL} />);
+      expect(screen.getByDisplayValue('colleague@example.com')).toBeTruthy();
+    } finally {
+      setAutoSelect(false);
+    }
+  });
+
+  // #1000: on a domain whose other addresses are distribution lists rather
+  // than catch-all aliases, the setting can stay on but limited to configured
+  // identities, so a reply to list@ gets no From override.
+  it('does not rewrite From when matching is limited to exact addresses', () => {
+    const settings = useSettingsStore as unknown as { setState: (p: Record<string, unknown>) => void };
+    settings.setState({ autoSelectReplyIdentity: true, replyIdentityMatch: 'exact' });
+    try {
+      render(<EmailComposer mode="reply" replyTo={RECEIVED_CATCH_ALL} />);
+      expect(screen.queryByDisplayValue('colleague@example.com')).toBeNull();
+      expect(identitySelect().value).toBe('id-me');
+    } finally {
+      settings.setState({ autoSelectReplyIdentity: false, replyIdentityMatch: 'domain' });
+    }
+  });
+
+  it('never rewrites From on a forward, even with the setting on', () => {
+    setAutoSelect(true);
+    try {
+      render(<EmailComposer mode="forward" replyTo={RECEIVED_CATCH_ALL} />);
+      expect(screen.queryByDisplayValue('colleague@example.com')).toBeNull();
+    } finally {
+      setAutoSelect(false);
+    }
+  });
+
+  // `composerClient` follows the selected identity, so auto-selecting an
+  // identity from another connected account would send this forward's inherited
+  // blobIds - and its autosaved draft - to a server that has never seen them.
+  // The From dropdown still offers that identity for manual selection.
+  it('never auto-selects an identity from another account', () => {
+    proIdentities.enabled = true;
+    proIdentities.allIdentities = [
+      { id: 'local-1::id-me', email: 'me@example.com', name: 'Me' },
+      { id: 'local-1::id-info', email: 'info@example.com', name: 'Info' },
+      { id: 'local-2::id-pers', email: 'personal@elsewhere.net', name: 'Personal' },
+    ];
+    (useAuthStore as unknown as { setState: (p: Record<string, unknown>) => void })
+      .setState({ activeAccountId: 'local-1' });
+    try {
+      render(
+        <EmailComposer
+          mode="forward"
+          replyTo={{
+            from: [{ email: 'bob@other.com', name: 'Bob' }],
+            to: [{ email: 'personal@elsewhere.net', name: 'Personal' }],
+            subject: 'Fwd',
+          }}
+        />,
+      );
+      expect(identitySelect().value).not.toBe('local-2::id-pers');
+    } finally {
+      proIdentities.enabled = false;
+      proIdentities.allIdentities = [];
+    }
+  });
+
+  // #1104: a message opened from the Unified Inbox, or from a non-active
+  // account's folders, arrived on another connected account. Its blobIds and
+  // thread live there, so that account's identities are the ones to use.
+  describe('message held by another connected account', () => {
+    const accountStore = useAccountStore as unknown as { setState: (p: Record<string, unknown>) => void };
+    const ALL = [
+      { id: 'local-1::id-me', email: 'me@example.com', name: 'Me' },
+      { id: 'local-1::id-info', email: 'info@example.com', name: 'Info' },
+      { id: 'local-2::id-login', email: 'login@elsewhere.net', name: 'Login' },
+      { id: 'local-2::id-alias', email: 'alias@elsewhere.net', name: 'Alias' },
+    ];
+    const TO_ALIAS = {
+      from: [{ email: 'bob@other.com', name: 'Bob' }],
+      to: [{ email: 'alias@elsewhere.net' }],
+      subject: 'Hi',
+    };
+    const TO_LIST = {
+      from: [{ email: 'bob@other.com', name: 'Bob' }],
+      to: [{ email: 'list@lists.example.org' }],
+      subject: 'Newsletter',
+    };
+
+    beforeEach(() => {
+      proIdentities.enabled = true;
+      proIdentities.allIdentities = ALL;
+      (useAuthStore as unknown as { setState: (p: Record<string, unknown>) => void })
+        .setState({ activeAccountId: 'local-1' });
+      // The active login's address is not its default identity (#507).
+      accountStore.setState({
+        accounts: [
+          { id: 'local-1', email: 'info@example.com', isConnected: true },
+          { id: 'local-2', email: 'login@elsewhere.net', isConnected: true },
+        ],
+      });
+    });
+
+    afterEach(() => {
+      proIdentities.enabled = false;
+      proIdentities.allIdentities = [];
+      accountStore.setState({ accounts: [] });
+    });
+
+    it('replies from the address on that account that received it', () => {
+      render(<EmailComposer mode="reply" replyTo={{ ...TO_ALIAS, accountId: 'local-2' }} />);
+      expect(identitySelect().value).toBe('local-2::id-alias');
+    });
+
+    it('forwards from that account when none of its addresses received it', () => {
+      render(<EmailComposer mode="forward" replyTo={{ ...TO_LIST, accountId: 'local-2' }} />);
+      expect(identitySelect().value).toBe('local-2::id-login');
+    });
+
+    it('waits for that account\'s identities instead of keeping the default', () => {
+      proIdentities.allIdentities = ALL.filter((i) => i.id.startsWith('local-1::'));
+      const replyTo = { ...TO_ALIAS, accountId: 'local-2' };
+      const { rerender } = render(<EmailComposer mode="reply" replyTo={replyTo} />);
+      proIdentities.allIdentities = ALL;
+      rerender(<EmailComposer mode="reply" replyTo={replyTo} />);
+      expect(identitySelect().value).toBe('local-2::id-alias');
+    });
+
+    it('keeps the default identity for a message on the active account', () => {
+      render(<EmailComposer mode="reply" replyTo={{ ...TO_LIST, accountId: 'local-1' }} />);
+      expect(identitySelect().value).toBe('local-1::id-me');
+    });
+
+    // A shared folder's messages carry the owner's JMAP id, not a login.
+    it('resolves on the active account when the id is not a connected login', () => {
+      render(<EmailComposer mode="reply" replyTo={{ ...TO_ALIAS, to: [{ email: 'info@example.com' }], accountId: 'owner-jmap-id' }} />);
+      expect(identitySelect().value).toBe('local-1::id-info');
+    });
+  });
+});
+
+describe('composer @-mention candidates', () => {
+  const offered = () => editorProps.mentionCandidates.map((c) => `${c.label} <${c.email}>`);
+
+  it('offers everyone a reply-all addresses, by first name', () => {
+    render(<EmailComposer mode="replyAll" replyTo={RECEIVED} />);
+    expect(offered()).toEqual(['Bob <bob@other.com>', 'Carol <carol@other.com>', 'Dave <dave@other.com>']);
+  });
+
+  // Naming a blind-copied recipient in the text would disclose them.
+  it('never offers Bcc recipients', () => {
+    render(
+      <EmailComposer
+        initialData={{
+          to: 'Max Mustermann <max.mustermann@example.com>',
+          cc: 'eva.weber@example.com',
+          bcc: 'Geheim <geheim@example.com>',
+          subject: '',
+          body: '',
+          showCc: true,
+          showBcc: true,
+          selectedIdentityId: null,
+          subAddressTag: '',
+          mode: 'compose',
+          draftId: null,
+        }}
+      />
+    );
+    expect(offered()).toEqual(['Max <max.mustermann@example.com>', 'Eva <eva.weber@example.com>']);
+  });
+});

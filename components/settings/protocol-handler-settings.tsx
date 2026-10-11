@@ -1,0 +1,108 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import { useTranslations } from "next-intl";
+import { Button } from "@/components/ui/button";
+import { getPathPrefix } from "@/lib/browser-navigation";
+import { useSettingsStore } from "@/stores/settings-store";
+import type { ProtocolOpenMode } from "@/stores/settings-store";
+import { toast } from "@/stores/toast-store";
+import { SettingsSection, SettingItem, Select } from "./settings-section";
+
+type Protocol = "mailto" | "webcal";
+
+function canRegisterProtocolHandler(): boolean {
+  return typeof navigator !== "undefined"
+    && "registerProtocolHandler" in navigator
+    && typeof window !== "undefined"
+    && window.isSecureContext;
+}
+
+function getProtocolHandlerUrl(protocol: Protocol) {
+  return `${window.location.origin}${getPathPrefix()}/protocol/${protocol}?url=%s`;
+}
+
+function registerProtocolHandler(protocol: Protocol) {
+  navigator.registerProtocolHandler(
+    protocol,
+    getProtocolHandlerUrl(protocol),
+  );
+}
+
+interface ProtocolHandlerSettingsProps {
+  supportsCalendar: boolean;
+}
+
+export function ProtocolHandlerSettings({ supportsCalendar }: ProtocolHandlerSettingsProps) {
+  const t = useTranslations("protocol_handlers");
+  const protocolOpenMode = useSettingsStore((state) => state.protocolOpenMode);
+  const updateSetting = useSettingsStore((state) => state.updateSetting);
+  const [supported, setSupported] = useState(false);
+
+  useEffect(() => {
+    setSupported(canRegisterProtocolHandler());
+  }, []);
+
+  const handleOpenModeChange = async (value: string) => {
+    const openMode = value as ProtocolOpenMode;
+
+    if (openMode === "active-session"
+      && typeof window !== "undefined"
+      && "Notification" in window
+      && Notification.permission === "default") {
+      await Notification.requestPermission();
+    }
+
+    updateSetting("protocolOpenMode", openMode);
+  };
+
+  const handleRegister = (protocol: Protocol) => {
+    try {
+      registerProtocolHandler(protocol);
+      toast.success(protocol === "mailto" ? t("mailto_registered") : t("webcal_registered"));
+    } catch {
+      toast.error(t("registration_failed"));
+    }
+  };
+
+  const renderRegistrationControl = (protocol: Protocol) => {
+    return (
+      <Button size="sm" onClick={() => handleRegister(protocol)} disabled={!supported}>
+        {protocol === "mailto" ? t("register_mailto") : t("register_webcal")}
+      </Button>
+    );
+  };
+
+  return (
+    <SettingsSection title={t("title")} description={t("description")}>
+      {!supported && (
+        <div className="rounded-md border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
+          {t("unsupported")}
+        </div>
+      )}
+
+      <SettingItem label={t("mailto_label")} description={t("mailto_description")}>
+        {renderRegistrationControl("mailto")}
+      </SettingItem>
+
+      {supportsCalendar && (
+        <SettingItem label={t("webcal_label")} description={t("webcal_description")}>
+          {renderRegistrationControl("webcal")}
+        </SettingItem>
+      )}
+
+      <SettingItem label={t("protocol_open_mode_label")} description={t("protocol_open_mode_description")}>
+        <Select
+          value={protocolOpenMode}
+          onChange={handleOpenModeChange}
+          options={[
+            { value: "new-tab", label: t("protocol_open_mode_new_tab") },
+            { value: "active-session", label: t("protocol_open_mode_active_session") },
+          ]}
+        />
+      </SettingItem>
+
+      <p className="text-xs text-muted-foreground">{t("browser_note")}</p>
+    </SettingsSection>
+  );
+}

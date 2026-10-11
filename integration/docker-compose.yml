@@ -1,0 +1,79 @@
+name: ${IT_PROJECT:-bulwark-integration}
+
+# Integration-test backend for the Bulwark webmail, bootstrapped with synthetic
+# mailboxes. Webmail and Playwright share Stalwart's network namespace and use
+# separate loopback ports for the app, JMAP and SMTP.
+#
+# Names and host ports are parameterised so a smoke run can use its own project
+# and Docker-assigned ports without colliding with another run on the same host.
+
+services:
+  stalwart:
+    build:
+      context: stalwart
+    container_name: ${IT_STACK_PREFIX:-bulwark-it}-stalwart
+    # JMAP + Webmail + admin on 8080, SMTP submission on 587, IMAP on 143.
+    # All test clients share this namespace and use loopback. Publish each
+    # port here once; IT_*_HOST_PORT=0 asks Docker for an ephemeral host port.
+    ports:
+      - "${IT_STALWART_HOST_PORT:-8025}:8080"
+      - "${IT_SMTP_HOST_PORT:-1025}:587"
+      - "${IT_IMAP_HOST_PORT:-1143}:143"
+      - "${IT_WEBMAIL_HOST_PORT:-3000}:3000"
+    volumes:
+      - stalwart-data:/var/lib/stalwart
+      - stalwart-config:/etc/stalwart
+    environment:
+      STALWART_RECOVERY_ADMIN: ${STALWART_RECOVERY_ADMIN:?set in .env}
+      TEST_ACCOUNT_PASSWORD: ${TEST_ACCOUNT_PASSWORD:?set in .env}
+    healthcheck:
+      # /jmap/session answers 200 only once the account bootstrap has finished
+      # and the server is in normal mode.
+      test: ["CMD-SHELL", "curl -fsS -u alice@example.org:$${TEST_ACCOUNT_PASSWORD} http://127.0.0.1:8080/jmap/session >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+
+  webmail:
+    build:
+      context: ..
+      dockerfile: integration/webmail.Dockerfile
+      # CI selects its disposable guest's network for dependency fetches.
+      network: ${IT_BUILD_NETWORK:-default}
+    container_name: ${IT_STACK_PREFIX:-bulwark-it}-webmail
+    network_mode: service:stalwart
+    volumes:
+      # Admin policy that turns on the cross-account Unified Mailbox feature
+      # gate (off by default), so the multi-account unified sync tests can
+      # exercise it. Read by /api/admin/policy -> usePolicyStore.isFeatureEnabled.
+      - ./webmail-config/policy.json:/app/data/admin/policy.json:ro
+    environment:
+      # Host-browser runs keep the published localhost URL. run-tests.sh sets
+      # the shared loopback URL for the container browser. This also skips
+      # the first-run setup wizard.
+      JMAP_SERVER_URL: ${IT_JMAP_SERVER_URL:-http://localhost:8025}
+      STALWART_FEATURES: "true"
+      APP_NAME: "Bulwark Webmail (Integration)"
+      # Enables "Remember me" / settings-sync cookies. Not required for the
+      # sync tests but harmless and avoids noisy warnings.
+      SESSION_SECRET: integration-not-a-real-secret
+      LOG_LEVEL: info
+    depends_on:
+      stalwart:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      # next dev compiles routes lazily; give the first boot ample runway.
+      start_period: 120s
+    restart: unless-stopped
+
+volumes:
+  stalwart-data:
+    name: ${IT_STACK_PREFIX:-bulwark-it}-stalwart-data
+  stalwart-config:
+    name: ${IT_STACK_PREFIX:-bulwark-it}-stalwart-config

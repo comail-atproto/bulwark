@@ -1,0 +1,130 @@
+import { describe, it, expect, vi } from 'vitest';
+import { parseTnef, isTnefAttachment } from '@/lib/tnef';
+
+vi.mock('@/lib/debug', () => ({
+  debug: { group: () => {}, groupEnd: () => {}, log: () => {}, warn: () => {}, table: () => {} },
+}));
+
+// ── tiny little-endian writer mirroring the parser's BinaryReader ─────────────
+class W {
+  private bytes: number[] = [];
+  u8(n: number) { this.bytes.push(n & 0xff); return this; }
+  u16(n: number) { return this.u8(n).u8(n >>> 8); }
+  u32(n: number) { return this.u8(n).u8(n >>> 8).u8(n >>> 16).u8(n >>> 24); }
+  raw(arr: number[]) { for (const b of arr) this.u8(b); return this; }
+  build() { return new Uint8Array(this.bytes); }
+}
+
+const TNEF_SIGNATURE = 0x223e9f78;
+const LVL_MESSAGE = 0x01;
+const LVL_ATTACHMENT = 0x02;
+const attBody = 0x0002800c;
+const attMAPIProps = 0x00069003;
+const attAttachRenddata = 0x00069002;
+const attAttachData = 0x0006800f;
+const attAttachTitle = 0x00018010;
+const PR_BODY_HTML = 0x1013;
+const PT_STRING8 = 0x001e;
+
+const enc = (s: string) => [...new TextEncoder().encode(s)];
+
+function header(w: W) { return w.u32(TNEF_SIGNATURE).u16(0); }
+
+function record(w: W, level: number, attrID: number, data: number[]) {
+  w.u8(level).u32(attrID).u32(data.length).raw(data).u16(0); // ...data + 2-byte checksum
+  return w;
+}
+
+/** One length-prefixed STRING8 MAPI property block. */
+function mapiStringProp(propID: number, str: string): number[] {
+  const w = new W();
+  w.u32(1); // property count
+  w.u16(PT_STRING8).u16(propID);
+  const val = enc(str);
+  w.u32(1); // value count
+  w.u32(val.length).raw(val);
+  for (let i = 0; i < (4 - (val.length % 4)) % 4; i++) w.u8(0); // pad to 4
+  return [...w.build()];
+}
+
+describe('parseTnef', () => {
+  it('returns an empty result for data smaller than 6 bytes', () => {
+    expect(parseTnef(new Uint8Array([1, 2, 3]))).toEqual({ body: null, htmlBody: null, attachments: [] });
+  });
+
+  it('returns an empty result for an invalid signature', () => {
+    const buf = new W().u32(0xdeadbeef).u16(0).build();
+    expect(parseTnef(buf)).toEqual({ body: null, htmlBody: null, attachments: [] });
+  });
+
+  it('extracts a plain-text body from an attBody attribute', () => {
+    const w = header(new W());
+    record(w, LVL_MESSAGE, attBody, enc('Hello body'));
+    const r = parseTnef(w.build());
+    expect(r.body).toBe('Hello body');
+    expect(r.htmlBody).toBeNull();
+    expect(r.attachments).toEqual([]);
+  });
+
+  it('extracts an HTML body from PR_BODY_HTML in MAPI props', () => {
+    const w = header(new W());
+    record(w, LVL_MESSAGE, attMAPIProps, mapiStringProp(PR_BODY_HTML, '<b>hi</b>\0'));
+    const r = parseTnef(w.build());
+    expect(r.htmlBody).toBe('<b>hi</b>'); // trailing NUL stripped
+  });
+
+  it('assembles an attachment from renddata + title + data', () => {
+    const w = header(new W());
+    record(w, LVL_ATTACHMENT, attAttachRenddata, [0, 0]); // start attachment
+    record(w, LVL_ATTACHMENT, attAttachTitle, enc('file.txt\0'));
+    record(w, LVL_ATTACHMENT, attAttachData, [1, 2, 3, 4]);
+    const r = parseTnef(w.build());
+    expect(r.attachments).toHaveLength(1);
+    expect(r.attachments[0].name).toBe('file.txt');
+    expect(r.attachments[0].mimeType).toBe('application/octet-stream');
+    expect([...r.attachments[0].data]).toEqual([1, 2, 3, 4]);
+  });
+
+  it('stops at a truncated attribute (declared length exceeds remaining)', () => {
+    // sig + header, then an attribute header claiming 999 bytes with no payload.
+    const w = header(new W());
+    w.u8(LVL_MESSAGE).u32(attBody).u32(999);
+    const r = parseTnef(w.build());
+    expect(r).toEqual({ body: null, htmlBody: null, attachments: [] });
+  });
+
+  it.each([
+    ['multi-valued STRING8', 0x101e],
+    ['multi-valued unknown fixed type', 0x1099],
+  ])('returns at once for a %s property claiming 0xFFFFFFFF values', (_label, propType) => {
+    // 31 bytes: one MAPI prop whose value count asks for 2^32 values, followed
+    // by two bytes that are too short to hold even one.
+    const mapi = new W().u32(1).u16(propType).u16(0x0001).u32(0xffffffff).raw([0, 0]).build();
+    const w = header(new W());
+    record(w, LVL_MESSAGE, attMAPIProps, [...mapi]);
+    record(w, LVL_MESSAGE, attMAPIProps, [...mapi]);
+    record(w, LVL_MESSAGE, attMAPIProps, [...mapi]);
+
+    const start = performance.now();
+    const r = parseTnef(w.build());
+    expect(performance.now() - start).toBeLessThan(100);
+    expect(r).toEqual({ body: null, htmlBody: null, attachments: [] });
+  });
+});
+
+describe('isTnefAttachment', () => {
+  it('matches winmail.dat by name (case-insensitive)', () => {
+    expect(isTnefAttachment('winmail.dat')).toBe(true);
+    expect(isTnefAttachment('WinMail.DAT')).toBe(true);
+  });
+
+  it('matches the ms-tnef MIME types', () => {
+    expect(isTnefAttachment('x', 'application/ms-tnef')).toBe(true);
+    expect(isTnefAttachment('x', 'application/vnd.ms-tnef')).toBe(true);
+  });
+
+  it('returns false for ordinary attachments and missing values', () => {
+    expect(isTnefAttachment('document.pdf', 'application/pdf')).toBe(false);
+    expect(isTnefAttachment()).toBe(false);
+  });
+});

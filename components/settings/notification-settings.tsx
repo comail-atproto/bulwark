@@ -1,0 +1,508 @@
+"use client";
+
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { useTranslations } from 'next-intl';
+import { useSettingsStore } from '@/stores/settings-store';
+import { SettingsSection, SettingItem, ToggleSwitch, Select } from './settings-section';
+import { playNotificationSound, NOTIFICATION_SOUNDS } from '@/lib/notification-sound';
+import type { NotificationSoundChoice } from '@/lib/notification-sound';
+import { Button } from '@/components/ui/button';
+import { Loader2, RefreshCw, Volume2, XCircle } from '@/components/icons';
+import { usePolicyStore } from '@/stores/policy-store';
+import { useAuthStore } from '@/stores/auth-store';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { useConfirmDialog } from '@/hooks/use-confirm-dialog';
+import {
+  WebPushUnsupportedError,
+  disableWebPush,
+  enableWebPush,
+  getWebPushDeviceClientId,
+  isWebPushEnabled,
+  isWebPushSupported,
+  listPushDevices,
+  revokePushDevice,
+  serverSupportsEmailPush,
+} from '@/lib/web-push';
+import type { PushDevice } from '@/lib/web-push';
+import { IS_LITE } from '@/lib/lite';
+import {
+  resolveActiveRelayUrl,
+  resolvePushRelayOptions,
+} from '@/lib/push-relays';
+import { withBasePath } from '@/lib/browser-navigation';
+
+async function registerAccessApprovalPush(subscriptionId: string): Promise<void> {
+  const response = await fetch(withBasePath('/api/access-approvals/push-subscriptions'), {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ subscriptionId }),
+  });
+  if (response.status === 401 || response.status === 404) return;
+  if (!response.ok) throw new Error('Access-approval push registration failed');
+}
+
+async function unregisterAccessApprovalPush(subscriptionId: string): Promise<void> {
+  await fetch(
+    withBasePath(`/api/access-approvals/push-subscriptions/${encodeURIComponent(subscriptionId)}`),
+    { method: 'DELETE', credentials: 'include' },
+  ).catch(() => undefined);
+}
+
+type PushStatus =
+  | { kind: 'idle' }
+  | { kind: 'busy' }
+  | { kind: 'enabled' }
+  | { kind: 'unsupported' }
+  | { kind: 'error'; message: string };
+
+type DevicesState =
+  | { kind: 'idle' }
+  | { kind: 'loading' }
+  | { kind: 'loaded'; devices: PushDevice[] }
+  | { kind: 'error' };
+
+export function NotificationSettings() {
+  const t = useTranslations('settings.notifications');
+  const {
+    emailNotificationsEnabled,
+    emailNotificationSound,
+    notificationSoundChoice,
+    pushNotifyInboxOnly,
+    calendarNotificationsEnabled,
+    calendarNotificationSound,
+    calendarInvitationParsingEnabled,
+    pushRelayUrl,
+    updateSetting,
+  } = useSettingsStore();
+  const { isSettingLocked, isSettingHidden } = usePolicyStore();
+  const policy = usePolicyStore((s) => s.policy);
+  const pushRelayLocked = policy.pushRelayUrlLocked === true;
+  const client = useAuthStore((s) => s.client);
+  const username = useAuthStore((s) => s.username);
+  const { dialogProps: confirmDialogProps, confirm: confirmDialog } = useConfirmDialog();
+
+  const supported = typeof window !== 'undefined' && isWebPushSupported();
+  // "Inbox only" is enforced by the server's emailPush filter; without that
+  // capability (Stalwart < 0.16.16) the toggle would do nothing.
+  const inboxOnlyAvailable = supported && !!client && serverSupportsEmailPush(client);
+  const [pushStatus, setPushStatus] = useState<PushStatus>(
+    supported ? { kind: 'idle' } : { kind: 'unsupported' },
+  );
+  const [devices, setDevices] = useState<DevicesState>({ kind: 'idle' });
+  const [revokingId, setRevokingId] = useState<string | null>(null);
+
+  // Relay URLs come from admin policy only - users pick one of the offered
+  // relays, they never type a URL.
+  const relayOptions = resolvePushRelayOptions(policy);
+  const activeRelayUrl = resolveActiveRelayUrl(policy, pushRelayUrl);
+  const relayChoiceFixed = pushRelayLocked || relayOptions.length < 2;
+  const activeRelayLabel =
+    relayOptions.find((option) => option.url === activeRelayUrl)?.label ?? activeRelayUrl;
+
+  const busy = pushStatus.kind === 'busy';
+
+  useEffect(() => {
+    if (!supported) return;
+    if (!client) return;
+    const accountId = client.getAccountId();
+    if (!accountId) return;
+    let cancelled = false;
+    const refreshStatus = async () => {
+      try {
+        const enabled = await isWebPushEnabled(accountId);
+        if (!cancelled) {
+          setPushStatus(enabled ? { kind: 'enabled' } : { kind: 'idle' });
+        }
+      } catch {
+        if (!cancelled) setPushStatus({ kind: 'idle' });
+      }
+    };
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void refreshStatus();
+    };
+    if (pushStatus.kind === 'busy' || pushStatus.kind === 'error') return;
+    void refreshStatus();
+    window.addEventListener('focus', onVisible);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('focus', onVisible);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [supported, client, pushStatus.kind]);
+
+  // The device list is worth loading even when push is off on this browser -
+  // revoking a stale registration left on another device is exactly what you
+  // come here for.
+  const refreshDevices = useCallback(async () => {
+    if (!client) return;
+    setDevices({ kind: 'loading' });
+    try {
+      setDevices({ kind: 'loaded', devices: await listPushDevices({ client, relayBaseUrl: activeRelayUrl }) });
+    } catch {
+      setDevices({ kind: 'error' });
+    }
+  }, [client, activeRelayUrl]);
+
+  useEffect(() => {
+    void refreshDevices();
+  }, [refreshDevices]);
+
+  const pushEnabled = pushStatus.kind === 'enabled';
+  // In the static Lite build push is off by design (no service worker, see
+  // components/service-worker-registration.tsx), not a browser limitation.
+  const statusDescription = pushStatus.kind === 'unsupported'
+    ? (IS_LITE ? t('push.status_lite') : `${t('push.status_unsupported')} ${t('push.ios_hint')}`)
+    : busy
+      ? t('push.status_busy')
+      : pushEnabled
+        ? t('push.status_active')
+        : t('push.status_inactive');
+
+  // `forceRecreate` is what the Re-register button is for: without it the enable
+  // path just refreshes the existing subscription's expiry, so a registration
+  // holding stale shared-mailbox access survives the round trip (#841).
+  const handleEnablePush = async (forceRecreate = false) => {
+    if (!client) {
+      setPushStatus({ kind: 'error', message: 'Sign in first' });
+      return;
+    }
+    setPushStatus({ kind: 'busy' });
+    try {
+      await enableWebPush({
+        client,
+        relayBaseUrl: activeRelayUrl,
+        accountLabel: username ?? undefined,
+        forceRecreate,
+        inboxOnly: pushNotifyInboxOnly,
+      });
+      const deviceClientId = getWebPushDeviceClientId(client.getAccountId());
+      if (!deviceClientId) throw new Error('Push device registration is missing');
+      await registerAccessApprovalPush(deviceClientId);
+      setPushStatus({ kind: 'enabled' });
+    } catch (err) {
+      if (err instanceof WebPushUnsupportedError) {
+        setPushStatus({ kind: 'unsupported' });
+        return;
+      }
+      setPushStatus({
+        kind: 'error',
+        message: err instanceof Error ? err.message : 'Failed to enable push',
+      });
+    } finally {
+      await refreshDevices();
+    }
+  };
+
+  // Flipping "Inbox only" only writes the setting; the server-side JMAP push
+  // filter stays stale until the next app launch runs resyncWebPush. When push
+  // is already on for this device, re-run the enable flow now so the toggle
+  // takes effect immediately instead of "on next restart". The ref seeds to the
+  // mounted value so this never fires on mount or on an unrelated re-render.
+  const lastSyncedInboxOnly = useRef(pushNotifyInboxOnly);
+  useEffect(() => {
+    if (lastSyncedInboxOnly.current === pushNotifyInboxOnly) return;
+    lastSyncedInboxOnly.current = pushNotifyInboxOnly;
+    // Push off on this device: enabling it later builds the filter from the
+    // current setting, so there's nothing to re-sync now.
+    if (!client || pushStatus.kind !== 'enabled') return;
+
+    let cancelled = false;
+    setPushStatus({ kind: 'busy' });
+    void enableWebPush({
+      client,
+      relayBaseUrl: activeRelayUrl,
+      accountLabel: username ?? undefined,
+      inboxOnly: pushNotifyInboxOnly,
+    })
+      .then(() => { if (!cancelled) setPushStatus({ kind: 'enabled' }); })
+      .catch((err) => {
+        if (cancelled) return;
+        if (err instanceof WebPushUnsupportedError) {
+          setPushStatus({ kind: 'unsupported' });
+          return;
+        }
+        setPushStatus({
+          kind: 'error',
+          message: err instanceof Error ? err.message : 'Failed to update push filter',
+        });
+      })
+      .finally(() => { if (!cancelled) void refreshDevices(); });
+    return () => { cancelled = true; };
+    // Only the setting flip should trigger a re-sync. client / relay / username
+    // are read live from the recreated closure; depending on pushStatus.kind
+    // here would re-fire the effect on the busy->enabled transition it causes
+    // and cancel its own in-flight call (leaving the row stuck on "Working").
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pushNotifyInboxOnly]);
+
+  const handleDisablePush = async () => {
+    if (!client) return;
+    const confirmed = await confirmDialog({
+      title: t('push.confirm_disable_title'),
+      message: t('push.confirm_disable_message'),
+      confirmText: t('push.disable'),
+      variant: 'destructive',
+    });
+    if (!confirmed) return;
+    setPushStatus({ kind: 'busy' });
+    try {
+      const deviceClientId = getWebPushDeviceClientId(client.getAccountId());
+      if (deviceClientId) await unregisterAccessApprovalPush(deviceClientId);
+      await disableWebPush({ client, relayBaseUrl: activeRelayUrl });
+      setPushStatus({ kind: 'idle' });
+    } catch (err) {
+      setPushStatus({
+        kind: 'error',
+        message: err instanceof Error ? err.message : 'Failed to disable push',
+      });
+    } finally {
+      await refreshDevices();
+    }
+  };
+
+  const handleRevokeDevice = async (device: PushDevice) => {
+    if (!client) return;
+    const confirmed = await confirmDialog({
+      title: t('push.confirm_revoke_title'),
+      message: device.isThisDevice
+        ? t('push.confirm_revoke_message_this')
+        : t('push.confirm_revoke_message'),
+      confirmText: t('push.revoke'),
+      variant: 'destructive',
+    });
+    if (!confirmed) return;
+    setRevokingId(device.id);
+    try {
+      await revokePushDevice({ client, device, relayBaseUrl: activeRelayUrl });
+      if (device.isThisDevice) setPushStatus({ kind: 'idle' });
+    } catch (err) {
+      setPushStatus({
+        kind: 'error',
+        message: err instanceof Error ? err.message : 'Failed to revoke device',
+      });
+    } finally {
+      setRevokingId(null);
+      await refreshDevices();
+    }
+  };
+
+  // Spelled out rather than interpolated so the translation-coverage test can
+  // see every key that reaches next-intl.
+  const relayStatusLabel = (status: PushDevice['relayStatus']) => {
+    if (status === 'active') return t('push.device_status_active');
+    if (status === 'inactive') return t('push.device_status_inactive');
+    return t('push.device_status_unknown');
+  };
+
+  const soundOptions = NOTIFICATION_SOUNDS.map((s) => ({
+    value: s.id,
+    label: t(`sounds.${s.id}`),
+  }));
+
+  return (
+    <div className="space-y-8">
+      <SettingsSection title={t('push.title')} description={t('push.description')}>
+        <SettingItem label={t('push.enable')} description={statusDescription}>
+          <div className="flex items-center gap-2">
+            {pushEnabled && (
+              <Button variant="ghost" size="sm" onClick={() => void handleEnablePush(true)} disabled={busy}>
+                {t('push.reenable')}
+              </Button>
+            )}
+            <ToggleSwitch
+              checked={pushEnabled}
+              onChange={(checked) => void (checked ? handleEnablePush() : handleDisablePush())}
+              disabled={busy || pushStatus.kind === 'unsupported' || !client}
+            />
+          </div>
+        </SettingItem>
+
+        <SettingItem
+          label={t('push.relay_label')}
+          description={pushRelayLocked ? t('push.relay_locked_desc') : t('push.relay_desc')}
+          locked={pushRelayLocked}
+        >
+          {relayChoiceFixed ? (
+            <span className="text-sm text-muted-foreground">{activeRelayLabel}</span>
+          ) : (
+            <Select
+              value={activeRelayUrl}
+              onChange={(value) => updateSetting('pushRelayUrl', value)}
+              options={relayOptions.map((option) => ({ value: option.url, label: option.label }))}
+              disabled={busy || pushStatus.kind === 'unsupported'}
+            />
+          )}
+        </SettingItem>
+
+        {pushStatus.kind === 'error' && (
+          <p role="alert" className="flex items-start gap-1.5 text-xs text-destructive">
+            <XCircle className="w-3.5 h-3.5 mt-px shrink-0" />
+            {pushStatus.message}
+          </p>
+        )}
+      </SettingsSection>
+
+      {client && (
+        <SettingsSection title={t('push.devices_title')} description={t('push.devices_desc')}>
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-xs text-muted-foreground">
+              {devices.kind === 'loading' && t('push.devices_loading')}
+              {devices.kind === 'error' && t('push.devices_error')}
+              {devices.kind === 'loaded' && devices.devices.length === 0 && t('push.devices_empty')}
+            </p>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => void refreshDevices()}
+              disabled={devices.kind === 'loading'}
+            >
+              <RefreshCw className={`w-3.5 h-3.5 mr-1.5 ${devices.kind === 'loading' ? 'animate-spin' : ''}`} />
+              {t('push.devices_refresh')}
+            </Button>
+          </div>
+
+          {devices.kind === 'loaded' && devices.devices.length > 0 && (
+            <ul className="divide-y divide-border rounded-md border border-border">
+              {devices.devices.map((device) => (
+                <li key={device.id} className="flex items-center justify-between gap-3 px-3 py-2.5">
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium truncate">
+                      {device.isThisDevice ? t('push.device_this') : t('push.device_other')}
+                      <span className="ml-1.5 font-mono text-xs font-normal text-muted-foreground">
+                        {device.deviceClientId.slice(0, 8)}
+                      </span>
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {relayStatusLabel(device.relayStatus)}
+                      {device.expires
+                        ? ` · ${t('push.device_expires', { date: new Date(device.expires).toLocaleDateString() })}`
+                        : ''}
+                    </p>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="shrink-0 text-destructive hover:text-destructive"
+                    onClick={() => void handleRevokeDevice(device)}
+                    disabled={revokingId !== null}
+                  >
+                    {revokingId === device.id && <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />}
+                    {t('push.revoke')}
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </SettingsSection>
+      )}
+
+      <SettingsSection title={t('sound_selection.title')} description={t('sound_selection.description')}>
+        <SettingItem
+          label={t('sound_selection.choose')}
+          description={t('sound_selection.choose_desc')}
+        >
+          <div className="flex items-center gap-2">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8"
+              onClick={() => playNotificationSound(notificationSoundChoice)}
+              title={t('test_sound')}
+            >
+              <Volume2 className="w-4 h-4" />
+            </Button>
+            <Select
+              value={notificationSoundChoice}
+              onChange={(value) => {
+                const choice = value as NotificationSoundChoice;
+                updateSetting('notificationSoundChoice', choice);
+                playNotificationSound(choice);
+              }}
+              options={soundOptions}
+            />
+          </div>
+        </SettingItem>
+      </SettingsSection>
+
+      <SettingsSection title={t('email.title')} description={t('email.description')}>
+        {!isSettingHidden('emailNotificationsEnabled') && (
+        <SettingItem
+          label={t('email.enabled')}
+          description={t('email.enabled_desc')}
+          locked={isSettingLocked('emailNotificationsEnabled')}
+        >
+          <ToggleSwitch
+            checked={emailNotificationsEnabled}
+            onChange={(checked) => updateSetting('emailNotificationsEnabled', checked)}
+          />
+        </SettingItem>
+        )}
+
+        <SettingItem
+          label={t('email.sound')}
+          description={t('email.sound_desc')}
+        >
+          <ToggleSwitch
+            checked={emailNotificationSound}
+            onChange={(checked) => updateSetting('emailNotificationSound', checked)}
+            disabled={!emailNotificationsEnabled}
+          />
+        </SettingItem>
+
+        {inboxOnlyAvailable && !isSettingHidden('pushNotifyInboxOnly') && (
+        <SettingItem
+          label={t('email.inbox_only')}
+          description={t('email.inbox_only_desc')}
+          locked={isSettingLocked('pushNotifyInboxOnly')}
+        >
+          <ToggleSwitch
+            checked={pushNotifyInboxOnly}
+            onChange={(checked) => updateSetting('pushNotifyInboxOnly', checked)}
+            disabled={!emailNotificationsEnabled}
+          />
+        </SettingItem>
+        )}
+      </SettingsSection>
+
+      <SettingsSection title={t('calendar.title')} description={t('calendar.description')}>
+        {!isSettingHidden('calendarNotificationsEnabled') && (
+        <SettingItem
+          label={t('calendar.enabled')}
+          description={t('calendar.enabled_desc')}
+          locked={isSettingLocked('calendarNotificationsEnabled')}
+        >
+          <ToggleSwitch
+            checked={calendarNotificationsEnabled}
+            onChange={(checked) => updateSetting('calendarNotificationsEnabled', checked)}
+          />
+        </SettingItem>
+        )}
+
+        <SettingItem
+          label={t('calendar.sound')}
+          description={t('calendar.sound_desc')}
+        >
+          <ToggleSwitch
+            checked={calendarNotificationSound}
+            onChange={(checked) => updateSetting('calendarNotificationSound', checked)}
+            disabled={!calendarNotificationsEnabled}
+          />
+        </SettingItem>
+
+        <SettingItem
+          label={t('calendar.invitation_parsing')}
+          description={t('calendar.invitation_parsing_desc')}
+        >
+          <ToggleSwitch
+            checked={calendarInvitationParsingEnabled}
+            onChange={(checked) => updateSetting('calendarInvitationParsingEnabled', checked)}
+          />
+        </SettingItem>
+      </SettingsSection>
+
+      <ConfirmDialog {...confirmDialogProps} />
+    </div>
+  );
+}

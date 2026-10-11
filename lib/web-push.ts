@@ -1,0 +1,838 @@
+// Browser-side Web Push setup. Mirrors the React Native flow in
+// repos/react-native/src/lib/push-notifications.ts so the relay sees the same
+// shape from both clients - the only differences are which native API
+// produces the push token (PushManager.subscribe here, FCM there) and which
+// register endpoint we hit on the relay.
+
+import type { IJMAPClient } from '@/lib/jmap/client-interface';
+import type { EmailPushConfig, Mailbox } from '@/lib/jmap/types';
+import { DEFAULT_RELAY_BASE_URL } from '@/lib/push-relays';
+import { IS_LITE } from '@/lib/lite';
+
+// Per-account keys: a single browser may be signed in to multiple accounts,
+// each with its own JMAP PushSubscription and its own relay record. Scoping
+// the deviceClientId per account is what makes per-account notifications work
+// at all - the relay keys subscriptions on subscriptionId (= deviceClientId),
+// so a globally-shared key meant re-registering account B overwrote A.
+const DEVICE_CLIENT_ID_PREFIX = 'bulwark.push.deviceClientId.v1.';
+const SUBSCRIPTION_ID_PREFIX = 'bulwark.push.subscriptionId.v1.';
+const RELAY_BASE_URL_PREFIX = 'bulwark.push.relayBaseUrl.v1.';
+
+function deviceClientIdKey(accountId: string): string {
+  return DEVICE_CLIENT_ID_PREFIX + accountId;
+}
+
+function subscriptionIdKey(accountId: string): string {
+  return SUBSCRIPTION_ID_PREFIX + accountId;
+}
+
+function relayBaseUrlKey(accountId: string): string {
+  return RELAY_BASE_URL_PREFIX + accountId;
+}
+
+const BASE_PATH = (process.env.NEXT_PUBLIC_BASE_PATH ?? '').replace(/\/+$/, '');
+const SW_SCOPE = `${BASE_PATH}/`;
+const SW_URL = `${BASE_PATH}/sw.js`;
+
+// Re-exported for callers that already import the relay default from here.
+// The relay list itself lives in lib/push-relays.ts.
+export { DEFAULT_RELAY_BASE_URL };
+
+// Match the mobile app's lifetime hint. The JMAP server may clamp this down.
+const SUBSCRIPTION_EXPIRES_DAYS = 90;
+const SUBSCRIPTION_REFRESH_THRESHOLD_DAYS = 7;
+
+// Only `EmailDelivery` state-changes when new mail is actually delivered.
+// `Email` fires for any mutation (sending, drafting, moving, marking read,
+// deleting) and `Mailbox` fires for mailbox edits - both produced spurious
+// system notifications, so we keep them out of the push subscription.
+// In-app sync uses a separate StateChange channel and is unaffected.
+const PUSH_TYPES = ['EmailDelivery'] as const;
+
+// draft-ietf-jmap-emailpush (Stalwart >= 0.16.16). `EmailDelivery` alone
+// still fires for every ingested message - including spam the server files
+// straight into Junk - because the server can't know which folders a client
+// cares about. With `emailPush` the server evaluates a per-account filter
+// against each new message before pushing and stays silent on a miss, so
+// junk-filed mail never wakes the device. Older servers don't advertise the
+// capability and get the plain EmailDelivery subscription as before.
+export const EMAIL_PUSH_CAPABILITY = 'urn:ietf:params:jmap:emailpush';
+
+// Only ids: the relay stays content-blind and the SW dedupes on them.
+const EMAIL_PUSH_PROPERTIES = ['id', 'threadId'];
+
+function sameTypes(a: readonly string[] | null | undefined, b: readonly string[]): boolean {
+  if (!a || a.length !== b.length) return false;
+  const sortedA = [...a].sort();
+  const sortedB = [...b].sort();
+  return sortedA.every((t, i) => t === sortedB[i]);
+}
+
+export function serverSupportsEmailPush(client: IJMAPClient): boolean {
+  try {
+    return EMAIL_PUSH_CAPABILITY in (client.getCapabilities() ?? {});
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The delivery filter we want on every account the subscription fans out to.
+ *
+ * Default mode: skip anything the spam filter tagged `$junk` and anything
+ * that lives only in a Junk-role mailbox (Sieve `fileinto` doesn't set the
+ * keyword). The two are ANDed so a stale mailbox id - the user deleted and
+ * recreated Junk - degrades to keyword-only filtering rather than letting
+ * everything through.
+ *
+ * Inbox-only mode: same `$junk` keyword guard, but the mailbox condition
+ * requires the message to be IN the account's Inbox rather than merely NOT
+ * in Junk - mail a Sieve rule files into any other folder stays silent. An
+ * account with no Inbox we can see (someone shared a single folder with us)
+ * gets a filter that never matches: leaving it out of the map would make the
+ * server fall back to unfiltered pushes for that account.
+ */
+export async function buildEmailPushConfig(
+  client: IJMAPClient,
+  inboxOnly: boolean,
+): Promise<Record<string, EmailPushConfig>> {
+  const primary = client.getAccountId();
+  // Every account that has any mailbox gets a filter entry - a secondary/shared
+  // account without a Junk-role mailbox still needs one so its subscription
+  // isn't left unfiltered.
+  const accountIds = new Set<string>([primary]);
+  const junkByAccount = new Map<string, string[]>();
+  const inboxByAccount = new Map<string, string>();
+  // In inbox-only mode a swallowed fetch failure would masquerade as "no Inbox
+  // mailbox" below, so let the real error surface; the default mode can still
+  // degrade to keyword-only filtering on a transient miss.
+  const mailboxes = inboxOnly
+    ? await client.getAllMailboxes()
+    : await client.getAllMailboxes().catch(() => [] as Mailbox[]);
+  for (const m of mailboxes) {
+    const accountId = m.accountId || primary;
+    accountIds.add(accountId);
+    // Shared-account mailboxes carry a client-side "<account>:<id>" id;
+    // the server only knows the original.
+    if (m.role === 'junk') {
+      const junk = junkByAccount.get(accountId) ?? [];
+      junk.push(m.originalId ?? m.id);
+      junkByAccount.set(accountId, junk);
+    }
+    if (m.role === 'inbox') inboxByAccount.set(accountId, m.originalId ?? m.id);
+  }
+
+  const config: Record<string, EmailPushConfig> = {};
+  for (const accountId of accountIds) {
+    const junkIds = junkByAccount.get(accountId) ?? [];
+    const conditions: Record<string, unknown>[] = [{ notKeyword: '$junk' }];
+    if (inboxOnly) {
+      const inboxId = inboxByAccount.get(accountId);
+      // The primary account always has an Inbox; missing it means its
+      // Mailbox/get failed, and muting it would be worse than failing loudly.
+      if (!inboxId && accountId === primary) {
+        throw new Error(`No Inbox mailbox found for account ${accountId}; cannot build an inbox-only push filter`);
+      }
+      conditions.push(inboxId ? { inMailbox: inboxId } : { hasKeyword: '$junk' });
+    } else if (junkIds.length > 0) {
+      conditions.push({ inMailboxOtherThan: [...junkIds].sort() });
+    }
+    config[accountId] = {
+      // Always the operator form: that's how the server echoes it back, so a
+      // stored config compares equal to a freshly built one.
+      filter: { operator: 'AND', conditions },
+      properties: [...EMAIL_PUSH_PROPERTIES],
+      urgency: 'high',
+    };
+  }
+  return config;
+}
+
+function normalizeEmailPush(value: unknown): string {
+  const sortKeys = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(sortKeys);
+    if (v && typeof v === 'object') {
+      return Object.keys(v as Record<string, unknown>).sort().reduce<Record<string, unknown>>((acc, k) => {
+        acc[k] = sortKeys((v as Record<string, unknown>)[k]);
+        return acc;
+      }, {});
+    }
+    return v;
+  };
+  return JSON.stringify(sortKeys(value ?? null));
+}
+
+function sameEmailPush(
+  a: Record<string, EmailPushConfig> | null | undefined,
+  b: Record<string, EmailPushConfig>,
+): boolean {
+  if (!a) return false;
+  return normalizeEmailPush(a) === normalizeEmailPush(b);
+}
+
+export interface EnableWebPushParams {
+  client: IJMAPClient;
+  // Optional - falls back to DEFAULT_RELAY_BASE_URL.
+  relayBaseUrl?: string;
+  // Free-form label the relay shows in /metrics; never returned in pushes.
+  accountLabel?: string;
+  // Destroy the recorded server-side subscription and create a brand-new one
+  // instead of refreshing the existing record's expiry. Stalwart binds the set
+  // of accounts a subscription fans out to at creation time, so a subscription
+  // that outlives a permission change keeps pushing for mailboxes the user can
+  // no longer read - recreating is the only client-side remedy (#841).
+  forceRecreate?: boolean;
+  // Scope OS push notifications to Inbox-only mail. Mirrors settings-store's
+  // pushNotifyInboxOnly. Required, not optional: it changes the server-side
+  // delivery filter, so every caller must decide explicitly.
+  inboxOnly: boolean;
+}
+
+export interface EnableWebPushResult {
+  subscriptionId: string;
+}
+
+export class WebPushUnsupportedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WebPushUnsupportedError';
+  }
+}
+
+export function isWebPushSupported(): boolean {
+  if (typeof window === 'undefined') return false;
+  // No service worker is registered in the static Lite build (see
+  // components/service-worker-registration.tsx), so push cannot be enabled.
+  if (IS_LITE) return false;
+  return (
+    'serviceWorker' in navigator &&
+    'PushManager' in window &&
+    'Notification' in window
+  );
+}
+
+function buildRelayUrl(base: string, suffix: string): string {
+  return base.replace(/\/+$/, '') + suffix;
+}
+
+function expiresFromNow(days: number): string {
+  return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
+}
+
+function randomDeviceClientId(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+function getOrCreateDeviceClientId(accountId: string): string {
+  const key = deviceClientIdKey(accountId);
+  const existing = localStorage.getItem(key);
+  if (existing) return existing;
+  const next = randomDeviceClientId();
+  localStorage.setItem(key, next);
+  return next;
+}
+
+function anyOtherAccountHasSubscription(accountId: string): boolean {
+  const skip = subscriptionIdKey(accountId);
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (k && k !== skip && k.startsWith(SUBSCRIPTION_ID_PREFIX)) return true;
+  }
+  return false;
+}
+
+// PushManager.subscribe wants the VAPID public key as a BufferSource.
+// Returning a Uint8Array<ArrayBuffer> (not the wider ArrayBufferLike that
+// includes SharedArrayBuffer) keeps strict TS happy on lib.dom 2024+.
+function urlBase64ToUint8Array(base64Url: string): Uint8Array<ArrayBuffer> {
+  const padding = '='.repeat((4 - (base64Url.length % 4)) % 4);
+  const base64 = (base64Url + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base64);
+  const buffer = new ArrayBuffer(raw.length);
+  const out = new Uint8Array(buffer);
+  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+  return out;
+}
+
+// A browser that doesn't expose the key it subscribed with counts as a
+// mismatch: we can't prove the subscription belongs to this relay.
+function sameKey(existing: ArrayBuffer | null | undefined, expected: Uint8Array): boolean {
+  if (!existing) return false;
+  const bytes = new Uint8Array(existing);
+  if (bytes.length !== expected.length) return false;
+  return bytes.every((byte, i) => byte === expected[i]);
+}
+
+function readPushKey(
+  sub: PushSubscription,
+  name: 'p256dh' | 'auth',
+): string {
+  const raw = sub.getKey(name);
+  if (!raw) throw new Error(`PushSubscription is missing the ${name} key`);
+  // Browsers want application/json over the wire so encode as base64url.
+  let binary = '';
+  const bytes = new Uint8Array(raw);
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function fetchVapidPublicKey(relayBaseUrl: string): Promise<string> {
+  const res = await fetch(buildRelayUrl(relayBaseUrl, '/api/push/vapid-public-key'));
+  if (!res.ok) {
+    if (res.status === 503) {
+      throw new Error('The push relay does not have Web Push configured');
+    }
+    throw new Error(`Failed to fetch VAPID key: ${res.status}`);
+  }
+  const body = (await res.json()) as { publicKey?: string };
+  if (!body.publicKey) throw new Error('Relay returned an empty VAPID key');
+  return body.publicKey;
+}
+
+async function ensurePermission(): Promise<void> {
+  if (Notification.permission === 'granted') return;
+  if (Notification.permission === 'denied') {
+    throw new Error('Notifications are blocked - allow them in browser settings to continue');
+  }
+  const result = await Notification.requestPermission();
+  if (result !== 'granted') {
+    throw new Error('Notification permission was not granted');
+  }
+}
+
+async function ensureServiceWorker(): Promise<ServiceWorkerRegistration> {
+  // The webmail's PWA already registers /sw.js for installability. If it
+  // hasn't been picked up yet (e.g. first load), kick it ourselves so the
+  // push handler is in place.
+  let registration = await navigator.serviceWorker.getRegistration(SW_SCOPE);
+  if (!registration) {
+    registration = await navigator.serviceWorker.register(SW_URL, { scope: SW_SCOPE });
+  }
+  await navigator.serviceWorker.ready;
+  return registration;
+}
+
+async function registerWithRelay(params: {
+  relayBaseUrl: string;
+  subscriptionId: string;
+  // Subset of PushSubscriptionJSON we actually serialise. Inlined so eslint's
+  // no-undef rule (which doesn't know about DOM type-only globals) is happy.
+  subscription: {
+    endpoint: string;
+    keys: { p256dh: string; auth: string };
+  };
+  accountLabel?: string;
+}): Promise<void> {
+  const { endpoint, keys } = params.subscription;
+  if (!endpoint || !keys?.p256dh || !keys?.auth) {
+    throw new Error('Browser returned an incomplete PushSubscription');
+  }
+  const res = await fetch(buildRelayUrl(params.relayBaseUrl, '/api/push/register/web'), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      subscriptionId: params.subscriptionId,
+      subscription: { endpoint, keys: { p256dh: keys.p256dh, auth: keys.auth } },
+      accountLabel: params.accountLabel,
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(`Relay register failed: ${res.status}`);
+  }
+}
+
+/** The relay's view of a subscription - see relayStatusFor. */
+export type PushRelayStatus = 'active' | 'inactive' | 'unknown';
+
+/**
+ * Ask the relay what it knows about a subscription. `inactive` means the relay
+ * recognises the record and it is provably dead - it has never forwarded a push
+ * and isn't freshly registered. `unknown` covers everything we cannot vouch for:
+ * the relay doesn't recognise the id, an older relay without this endpoint, or a
+ * network blip. Callers must treat `unknown` as "leave it alone", never as dead.
+ */
+async function relayStatusFor(
+  relayBaseUrl: string,
+  subscriptionId: string,
+): Promise<PushRelayStatus> {
+  if (!relayBaseUrl || !subscriptionId) return 'unknown';
+  try {
+    const res = await fetch(
+      buildRelayUrl(relayBaseUrl, `/api/push/active/${encodeURIComponent(subscriptionId)}`),
+    );
+    if (!res.ok) return 'unknown';
+    const body = (await res.json()) as { active?: unknown };
+    if (body.active === true) return 'active';
+    if (body.active === false) return 'inactive';
+    return 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+/**
+ * Returns true ONLY when the relay positively reports a subscription inactive,
+ * so we never reap anything we can't confirm is dead. This lets enableWebPush
+ * clear its own abandoned attempts - and dead siblings left by cleared site data
+ * that regenerated the deviceClientId - without disturbing another live device
+ * or the mobile app that shares the account.
+ */
+async function relayReportsDead(
+  relayBaseUrl: string,
+  subscriptionId: string,
+): Promise<boolean> {
+  return (await relayStatusFor(relayBaseUrl, subscriptionId)) === 'inactive';
+}
+
+async function pollVerificationCode(
+  relayBaseUrl: string,
+  subscriptionId: string,
+  timeoutMs = 75_000,
+): Promise<string> {
+  // Stalwart per-account rate-limits PushVerification posts (default 60s).
+  // If there are leftover unverified subscriptions on the account, our new
+  // one queues up behind them - so we wait long enough to clear one verify
+  // window even in the unlucky case.
+  const timeoutAt = Date.now() + timeoutMs;
+  let delay = 400;
+  while (Date.now() < timeoutAt) {
+    const res = await fetch(
+      buildRelayUrl(relayBaseUrl, `/api/push/verify/${encodeURIComponent(subscriptionId)}`),
+    );
+    if (res.ok) {
+      const body = (await res.json()) as { verificationCode?: string | null };
+      if (body.verificationCode) return body.verificationCode;
+    }
+    await new Promise((r) => setTimeout(r, delay));
+    delay = Math.min(delay * 1.5, 2000);
+  }
+  throw new Error('Timed out waiting for PushVerification from the JMAP server');
+}
+
+async function refreshSubscriptionExpires(
+  client: IJMAPClient,
+  sub: {
+    id: string;
+    expires: string | null;
+    types: string[] | null;
+    emailPush?: Record<string, EmailPushConfig> | null;
+  },
+  // null when the server has no emailPush support - leave the property alone.
+  desiredEmailPush: Record<string, EmailPushConfig> | null,
+): Promise<boolean> {
+  const typesNeedUpdate = !sameTypes(sub.types, PUSH_TYPES);
+  // Also re-sync the delivery filter: a subscription created before this
+  // client learned about emailPush has none, and the Junk mailbox id can
+  // change under us.
+  const emailPushNeedsUpdate = desiredEmailPush !== null && !sameEmailPush(sub.emailPush, desiredEmailPush);
+  if (!typesNeedUpdate && !emailPushNeedsUpdate && sub.expires) {
+    const remainingMs = new Date(sub.expires).getTime() - Date.now();
+    const thresholdMs = SUBSCRIPTION_REFRESH_THRESHOLD_DAYS * 24 * 60 * 60 * 1000;
+    if (Number.isFinite(remainingMs) && remainingMs > thresholdMs) return true;
+  }
+  try {
+    const patch: { expires?: string; types?: string[]; emailPush?: Record<string, EmailPushConfig> } = {
+      expires: expiresFromNow(SUBSCRIPTION_EXPIRES_DAYS),
+    };
+    if (typesNeedUpdate) patch.types = [...PUSH_TYPES];
+    if (emailPushNeedsUpdate && desiredEmailPush) patch.emailPush = desiredEmailPush;
+    return await client.updatePushSubscription(sub.id, patch);
+  } catch {
+    return false;
+  }
+}
+
+export async function enableWebPush(
+  params: EnableWebPushParams,
+): Promise<EnableWebPushResult> {
+  if (!isWebPushSupported()) {
+    throw new WebPushUnsupportedError(
+      'This browser does not support Web Push. On iOS the site needs to be installed to the home screen.',
+    );
+  }
+
+  const relayBaseUrl = (params.relayBaseUrl ?? DEFAULT_RELAY_BASE_URL).replace(/\/+$/, '');
+  if (!relayBaseUrl) throw new Error('relayBaseUrl is required');
+
+  await ensurePermission();
+  const registration = await ensureServiceWorker();
+
+  const vapidPublicKey = await fetchVapidPublicKey(relayBaseUrl);
+
+  // Reuse an existing browser PushSubscription when possible - resubscribing
+  // with the same VAPID key produces the same endpoint, but the call still
+  // costs a network round-trip the user can feel.
+  //
+  // Only reuse it if it was made with THIS relay's key. A subscription is
+  // bound to the VAPID key it was created with, so one left over from another
+  // relay (or from before this relay rotated its keys) is rejected by the push
+  // service on every send - Mozilla answers 401 "VAPID public key mismatch" -
+  // while isWebPushEnabled keeps reporting push as on.
+  const applicationServerKey = urlBase64ToUint8Array(vapidPublicKey);
+  // A stale or broken local record makes Firefox reject the lookup itself with
+  // `AbortError: Error retrieving push subscription`, which would abort the
+  // whole enable. There is nothing to reuse in that case, so carry on to
+  // subscribe() and let its own error surface if the push service is really
+  // unreachable.
+  let pushSubscription = await registration.pushManager.getSubscription().catch(() => null);
+  if (
+    pushSubscription
+    && !sameKey(pushSubscription.options?.applicationServerKey, applicationServerKey)
+  ) {
+    // An unsubscribe that fails leaves the old record in place; subscribing
+    // with the right key is what matters, so don't abort the enable for it.
+    await pushSubscription.unsubscribe().catch(() => undefined);
+    pushSubscription = null;
+  }
+  if (!pushSubscription) {
+    pushSubscription = await registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey,
+    });
+  }
+
+  const accountId = params.client.getAccountId();
+  const deviceClientId = getOrCreateDeviceClientId(accountId);
+  const previousRelayBaseUrl = localStorage.getItem(relayBaseUrlKey(accountId));
+  // Builds before the relay key was introduced have no recorded value. Their
+  // existing JMAP subscription was created with the currently selected relay,
+  // so migrate that state in place instead of needlessly destroying it.
+  const relayChanged = previousRelayBaseUrl !== null && previousRelayBaseUrl !== relayBaseUrl;
+
+  await registerWithRelay({
+    relayBaseUrl,
+    subscriptionId: deviceClientId,
+    subscription: {
+      endpoint: pushSubscription.endpoint,
+      keys: {
+        p256dh: readPushKey(pushSubscription, 'p256dh'),
+        auth: readPushKey(pushSubscription, 'auth'),
+      },
+    },
+    accountLabel: params.accountLabel,
+  });
+  localStorage.setItem(relayBaseUrlKey(accountId), relayBaseUrl);
+
+  // Reuse the JMAP-side PushSubscription if the server still has it, just
+  // refreshing the expiry so it doesn't time out between sessions. With
+  // forceRecreate we skip the reuse and destroy it instead: the account set a
+  // Stalwart subscription fans out to is fixed at creation time, so refreshing
+  // `expires` carries stale permissions forward and only a new record picks up
+  // revoked shared-mailbox access (#841).
+  const existingSubs = await params.client.listPushSubscriptions().catch(() => []);
+  const emailPush = serverSupportsEmailPush(params.client)
+    ? await buildEmailPushConfig(params.client, params.inboxOnly)
+    : null;
+  const subIdKey = subscriptionIdKey(accountId);
+  const storedServerId = localStorage.getItem(subIdKey);
+  if (storedServerId) {
+    const match = existingSubs.find((s) => s.id === storedServerId);
+    // A JMAP PushSubscription embeds its callback URL. Reusing it after a
+    // relay migration would leave mail pushes pointed at the old relay.
+    if (match) {
+      if (!relayChanged && !params.forceRecreate) {
+        const refreshed = await refreshSubscriptionExpires(params.client, match, emailPush);
+        if (refreshed) return { subscriptionId: storedServerId };
+      }
+      await params.client.destroyPushSubscription(storedServerId).catch(() => undefined);
+    }
+    // The stored id stays until the replacement is verified below: it is
+    // what tells resyncWebPush this account opted in, so dropping it here
+    // would end recovery for good after one interrupted attempt.
+  }
+
+  // Reap leftover subscriptions that would otherwise starve the new one's
+  // verification. Stalwart emits only one PushVerification per account per ~60s
+  // and picks the oldest unverified subscription, so a single stale straggler
+  // blocks every fresh attempt - the symptom is the confusing "Timed out
+  // waiting for PushVerification" error. We can't read a subscription's
+  // verified state or URL over JMAP (Stalwart hides both), only its
+  // deviceClientId, so we decide what's safe to remove like this:
+  //   - same deviceClientId as ours: a previous attempt from THIS browser,
+  //     always safe to reap.
+  //   - a different deviceClientId: could be another live device or the mobile
+  //     app on this account. Ask the relay whether it's still alive and only
+  //     reap the ones it confirms are dead. Anything live - or anything the
+  //     relay can't vouch for (a different relay, a non-Bulwark client, a
+  //     network blip) - is left untouched.
+  for (const s of existingSubs) {
+    if (s.id === storedServerId) continue;
+    if (s.deviceClientId === deviceClientId) {
+      await params.client.destroyPushSubscription(s.id).catch(() => undefined);
+      continue;
+    }
+    if (await relayReportsDead(relayBaseUrl, s.deviceClientId)) {
+      await params.client.destroyPushSubscription(s.id).catch(() => undefined);
+    }
+  }
+
+  const createJmapSubscription = () => params.client.createPushSubscription({
+    deviceClientId,
+    url: buildRelayUrl(relayBaseUrl, `/api/push/jmap/${encodeURIComponent(deviceClientId)}`),
+    types: [...PUSH_TYPES],
+    expires: expiresFromNow(SUBSCRIPTION_EXPIRES_DAYS),
+    ...(emailPush ? { emailPush } : {}),
+  });
+
+  let serverAssignedId = await createJmapSubscription();
+  let verificationCode: string;
+  try {
+    verificationCode = await pollVerificationCode(relayBaseUrl, deviceClientId);
+  } catch {
+    // Stalwart rate-limits PushVerification delivery per account. A quick
+    // disable/re-enable can therefore create a valid JMAP subscription while
+    // its one verification callback is dropped. The first poll spans the
+    // complete throttle window; after it expires, remove that unverified
+    // attempt, clear any late relay code, and create exactly one fresh attempt.
+    // The retry callback should be immediate, so keep its second wait bounded.
+    await params.client.destroyPushSubscription(serverAssignedId).catch(() => undefined);
+    await registerWithRelay({
+      relayBaseUrl,
+      subscriptionId: deviceClientId,
+      subscription: {
+        endpoint: pushSubscription.endpoint,
+        keys: {
+          p256dh: readPushKey(pushSubscription, 'p256dh'),
+          auth: readPushKey(pushSubscription, 'auth'),
+        },
+      },
+      accountLabel: params.accountLabel,
+    });
+    serverAssignedId = await createJmapSubscription();
+    try {
+      verificationCode = await pollVerificationCode(relayBaseUrl, deviceClientId, 20_000);
+    } catch (error) {
+      await params.client.destroyPushSubscription(serverAssignedId).catch(() => undefined);
+      throw error;
+    }
+  }
+  await params.client.verifyPushSubscription(serverAssignedId, verificationCode);
+  localStorage.setItem(subIdKey, serverAssignedId);
+
+  return { subscriptionId: serverAssignedId };
+}
+
+export interface DisableWebPushParams {
+  client: IJMAPClient;
+  relayBaseUrl?: string;
+}
+
+// Best-effort teardown: clear the JMAP subscription, the relay mapping, and
+// (only when no other accounts still need it) the browser-wide
+// PushSubscription. Any single failure is swallowed so the user always ends
+// up in a "disabled" state locally.
+export async function disableWebPush(params: DisableWebPushParams): Promise<void> {
+  const relayBaseUrl = (params.relayBaseUrl ?? DEFAULT_RELAY_BASE_URL).replace(/\/+$/, '');
+  const accountId = params.client.getAccountId();
+
+  const subIdKey = subscriptionIdKey(accountId);
+  const devIdKey = deviceClientIdKey(accountId);
+  const relayKey = relayBaseUrlKey(accountId);
+
+  const storedServerId = localStorage.getItem(subIdKey);
+  const deviceClientId = localStorage.getItem(devIdKey);
+
+  // Destroy every subscription the server holds for this device, not just the
+  // id we happen to have recorded. A destroy that lost its round-trip, a failed
+  // enable, or site data cleared between sessions can leave a registration this
+  // client no longer tracks - and Stalwart keeps fanning StateChanges out to it
+  // until it expires, so "disable" has to mean gone (#841).
+  const idsToDestroy = new Set<string>();
+  if (storedServerId) idsToDestroy.add(storedServerId);
+  if (deviceClientId) {
+    const existingSubs = await params.client.listPushSubscriptions().catch(() => []);
+    for (const s of existingSubs) {
+      if (s.deviceClientId === deviceClientId) idsToDestroy.add(s.id);
+    }
+  }
+  for (const id of idsToDestroy) {
+    await params.client.destroyPushSubscription(id).catch(() => undefined);
+  }
+  localStorage.removeItem(subIdKey);
+
+  if (deviceClientId && relayBaseUrl) {
+    await fetch(
+      buildRelayUrl(relayBaseUrl, `/api/push/register/${encodeURIComponent(deviceClientId)}`),
+      { method: 'DELETE' },
+    ).catch(() => undefined);
+  }
+  localStorage.removeItem(relayKey);
+  // Keep the deviceClientId around so a later re-enable for this account
+  // reuses the same relay subscriptionId rather than scattering orphans.
+
+  // The browser-wide PushSubscription is shared by every account on this
+  // origin, so only tear it down if no other account is still using it.
+  if (
+    !anyOtherAccountHasSubscription(accountId)
+    && typeof navigator !== 'undefined'
+    && 'serviceWorker' in navigator
+  ) {
+    const registration = await navigator.serviceWorker.getRegistration(SW_SCOPE);
+    const sub = await registration?.pushManager.getSubscription();
+    if (sub) await sub.unsubscribe().catch(() => undefined);
+  }
+}
+
+export interface PushDevice {
+  // The JMAP PushSubscription id - what you destroy to revoke it.
+  id: string;
+  // Client-chosen id the relay keys its endpoint mapping on.
+  deviceClientId: string;
+  expires: string | null;
+  types: string[] | null;
+  // True when this registration belongs to the browser you're looking at.
+  isThisDevice: boolean;
+  relayStatus: PushRelayStatus;
+}
+
+/**
+ * Every push registration the JMAP server holds for this account, annotated
+ * with whether it is this browser and what the relay makes of it.
+ *
+ * Stalwart hides a subscription's url and verified state from clients, so
+ * deviceClientId is the only handle we get. That's enough to spot our own
+ * registration and to ask the relay about the rest - but registrations made
+ * against a different relay, or by a non-Bulwark client, come back `unknown`
+ * rather than dead, and the UI must present them as revocable-but-unclassified.
+ */
+export async function listPushDevices(params: {
+  client: IJMAPClient;
+  relayBaseUrl?: string;
+}): Promise<PushDevice[]> {
+  const relayBaseUrl = (params.relayBaseUrl ?? DEFAULT_RELAY_BASE_URL).replace(/\/+$/, '');
+  const accountId = params.client.getAccountId();
+  const thisDeviceClientId = typeof localStorage === 'undefined'
+    ? null
+    : localStorage.getItem(deviceClientIdKey(accountId));
+
+  const subs = await params.client.listPushSubscriptions();
+  return Promise.all(
+    subs.map(async (s) => ({
+      id: s.id,
+      deviceClientId: s.deviceClientId,
+      expires: s.expires ?? null,
+      types: s.types ?? null,
+      isThisDevice: thisDeviceClientId !== null && s.deviceClientId === thisDeviceClientId,
+      relayStatus: await relayStatusFor(relayBaseUrl, s.deviceClientId),
+    })),
+  );
+}
+
+/**
+ * Revoke one registration. Destroying the JMAP subscription stops the server
+ * fanning StateChanges to it; dropping the relay mapping stops the relay
+ * forwarding anything already in flight and frees the deviceClientId. Revoking
+ * this device runs the full local teardown so the UI doesn't keep claiming push
+ * is on.
+ */
+export async function revokePushDevice(params: {
+  client: IJMAPClient;
+  device: Pick<PushDevice, 'id' | 'deviceClientId' | 'isThisDevice'>;
+  relayBaseUrl?: string;
+}): Promise<void> {
+  const relayBaseUrl = (params.relayBaseUrl ?? DEFAULT_RELAY_BASE_URL).replace(/\/+$/, '');
+
+  if (params.device.isThisDevice) {
+    await disableWebPush({ client: params.client, relayBaseUrl });
+    return;
+  }
+
+  await params.client.destroyPushSubscription(params.device.id);
+  if (relayBaseUrl && params.device.deviceClientId) {
+    await fetch(
+      buildRelayUrl(
+        relayBaseUrl,
+        `/api/push/register/${encodeURIComponent(params.device.deviceClientId)}`,
+      ),
+      { method: 'DELETE' },
+    ).catch(() => undefined);
+  }
+}
+
+export async function isWebPushEnabled(
+  accountId: string,
+  relayBaseUrl?: string,
+): Promise<boolean> {
+  if (!isWebPushSupported()) return false;
+  if (Notification.permission !== 'granted') return false;
+  const registration = await navigator.serviceWorker.getRegistration(SW_SCOPE);
+  if (!registration) return false;
+  const sub = await registration.pushManager.getSubscription();
+  if (sub === null || localStorage.getItem(subscriptionIdKey(accountId)) === null) return false;
+  if (relayBaseUrl) {
+    const expected = relayBaseUrl.replace(/\/+$/, '');
+    if (localStorage.getItem(relayBaseUrlKey(accountId)) !== expected) return false;
+  }
+  return true;
+}
+
+export function getWebPushDeviceClientId(accountId: string): string | null {
+  return typeof localStorage === 'undefined' ? null : localStorage.getItem(deviceClientIdKey(accountId));
+}
+
+// When each account was last re-synced during this page load. Once a day is
+// enough for the drift between sessions (a client update that changed what
+// we subscribe to, a recreated Junk mailbox), but not only once: Stalwart
+// clamps `expires` to 7 days, so a tab or installed app left open for a
+// week would otherwise let the subscription lapse and push stop silently.
+const RESYNC_INTERVAL_MS = 24 * 60 * 60 * 1000;
+// After a failed attempt: soon again, but not on every return to the tab.
+const RESYNC_RETRY_MS = 15 * 60 * 1000;
+const lastResyncAt = new Map<string, number>();
+
+export interface ResyncWebPushParams {
+  client: IJMAPClient;
+  relayBaseUrl?: string;
+  accountLabel?: string;
+  // Mirrors settings-store's pushNotifyInboxOnly - see EnableWebPushParams.
+  inboxOnly: boolean;
+}
+
+/**
+ * Bring an already-enabled push registration up to date without any user
+ * action: refresh its expiry and install/repair the delivery filter. Nothing
+ * here can prompt - it requires a saved opt-in and granted permission -
+ * and every failure is swallowed because the app must not care whether the
+ * background touch-up worked. Returns true when a re-sync actually ran.
+ */
+export async function resyncWebPush(params: ResyncWebPushParams): Promise<boolean> {
+  let accountId: string;
+  try {
+    accountId = params.client.getAccountId();
+  } catch {
+    return false;
+  }
+  if (!accountId) return false;
+  const last = lastResyncAt.get(accountId);
+  if (last !== undefined && Date.now() - last < RESYNC_INTERVAL_MS) return false;
+  try {
+    // The browser may have lost its endpoint while our saved opt-in and
+    // server registration survived. Recreate it through the normal enable
+    // flow instead of skipping the account in that state, which is what
+    // isWebPushEnabled (it requires a live browser subscription) would do.
+    if (!isWebPushSupported() || Notification.permission !== 'granted'
+      || !localStorage.getItem(subscriptionIdKey(accountId))) return false;
+    lastResyncAt.set(accountId, Date.now());
+    await enableWebPush({
+      client: params.client,
+      relayBaseUrl: params.relayBaseUrl,
+      accountLabel: params.accountLabel,
+      inboxOnly: params.inboxOnly,
+    });
+    return true;
+  } catch {
+    // A failed attempt must not wait a day for the next one, nor rerun the
+    // whole enable on every tab focus.
+    lastResyncAt.set(accountId, Date.now() - RESYNC_INTERVAL_MS + RESYNC_RETRY_MS);
+    return false;
+  }
+}
+
+// Test hook: forget which accounts were re-synced during this page load.
+export function resetWebPushResyncState(): void {
+  lastResyncAt.clear();
+}
