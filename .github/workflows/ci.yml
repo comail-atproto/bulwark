@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: comail-big-nix-isolated
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -25,7 +25,12 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run typecheck
-      - run: npx playwright install --with-deps chromium
+      - name: Install the Nix Chromium build
+        run: |
+          browser=$(nix build --no-link --print-out-paths \
+            github:NixOS/nixpkgs/753cc8a3a87467296ddd1fa93f0cc3e81120ee46#chromium)
+          test -x "$browser/bin/chromium"
+          printf 'COMAIL_CHROMIUM_PATH=%s/bin/chromium\n' "$browser" >> "$GITHUB_ENV"
       - run: COMAIL_BROWSER_TESTS=1 npm test
       - run: npx next build --webpack
         env:
