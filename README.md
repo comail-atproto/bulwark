@@ -48,8 +48,8 @@ or the runtime source URL to identify their own complete source.
 
 Report Comail-specific issues in this repository. Contributions will be reviewed
 and deliberately imported into private development before going through the same
-release checks and delay. Contributors remain responsible for correctness,
-licenses, and the required DCO sign-off. AI contributions are allowed.
+release checks and delay. Contributors remain responsible for correctness
+and licenses. AI contributions are allowed.
 
 Report suspected vulnerabilities privately to security@comail.team. Include the
 affected version, reproduction steps using synthetic data, and the impact.

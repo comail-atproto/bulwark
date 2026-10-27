@@ -218,7 +218,7 @@ Start from current `main` and use a feature branch. Keep changes focused and fil
 out the PR template with the reason, resulting behavior, tests and any remaining
 gaps. Link the relevant issue, or explain `No-Issue: <reason>` for a small change.
 Required checks and an approving review must pass before merge. Commits need a
-verified signature and a DCO sign-off (`git commit -s`).
+verified signature.
 
 The required PR sections are What & why, Test evidence, and Deployment impact.
 Other sections, including Change shape, Before / after, and Rollback, are
