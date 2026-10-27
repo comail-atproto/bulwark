@@ -1,0 +1,33 @@
+name: Check contribution policy
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+permissions:
+  contents: read
+concurrency:
+  group: contribution-policy-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  policy:
+    name: contribution-policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Require DCO sign-offs, including bot commits
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-list --count "$BASE_SHA..$HEAD_SHA")" -gt 0
+          missing=$(git log --format='%h %s' --extended-regexp --invert-grep \
+            --grep='^Signed-off-by: [^<>[:space:]][^<>]* <[^<>[:space:]]+@[^<>[:space:]]+>$' "$BASE_SHA..$HEAD_SHA" --)
+          if [[ -n "$missing" ]]; then
+            printf 'Commits missing a DCO sign-off:\n%s\n' "$missing" >&2
+            exit 1
+          fi
