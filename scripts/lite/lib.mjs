@@ -1611,3 +1611,12 @@ export function findSegmentPrefetchDirs(outDir) {
   if (existsSync(outDir)) walk(outDir);
   return found;
 }
+
+export function upstreamRequestUrl(upstream, requestTarget) {
+  const incoming = new URL(requestTarget, upstream);
+  const target = new URL(upstream);
+  target.pathname = incoming.pathname;
+  target.search = incoming.search;
+  target.hash = "";
+  return target;
+}
