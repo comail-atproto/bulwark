@@ -58,6 +58,7 @@ import {
   stalwartRewriteIndex,
   stalwartZipEntryProblems,
   unexpectedApiStrings,
+  upstreamRequestUrl,
   withScriptHashCsp,
 } from '../../scripts/lite/lib.mjs';
 import { collectTestPaths, planRemovals, runPrepare } from '../../scripts/lite/prepare.mjs';
@@ -823,5 +824,17 @@ describe('Stalwart target: postbuild + verify against a fake checkout', () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe('Lite preview proxy', () => {
+  it.each([
+    '/api/test?q=1',
+    'https://other.example.test/api/test?q=1',
+    '//other.example.test/api/test?q=1',
+    'http://user:password@other.example.test/api/test?q=1',
+  ])('keeps %s on the configured upstream', (requestTarget) => {
+    expect(upstreamRequestUrl('http://127.0.0.1:18081', requestTarget).href)
+      .toBe('http://127.0.0.1:18081/api/test?q=1');
   });
 });
