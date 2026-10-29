@@ -24,7 +24,7 @@ import { createServer, request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
 import { extname, join, normalize, resolve } from "node:path";
-import { LITE_SURFACES, collectZipEntries, emulateStalwartRequest, isReservedStalwartSegment, listZipEntries, readZipEntry } from "./lib.mjs";
+import { LITE_SURFACES, collectZipEntries, emulateStalwartRequest, isReservedStalwartSegment, listZipEntries, readZipEntry, upstreamRequestUrl } from "./lib.mjs";
 
 const flags = process.argv.slice(2).filter((a) => a.startsWith("--"));
 const args = process.argv.slice(2).filter((a) => !a.startsWith("--"));
@@ -99,7 +99,7 @@ function loadEntries(source) {
 }
 
 function proxy(req, res, upstream) {
-  const target = new URL(req.url ?? "/", upstream);
+  const target = upstreamRequestUrl(upstream, req.url ?? "/");
   const send = target.protocol === "https:" ? httpsRequest : httpRequest;
   const headers = { ...req.headers, host: target.host };
   const out = send(target, { method: req.method, headers }, (up) => {
