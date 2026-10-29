@@ -247,6 +247,7 @@ export async function deletePlugin(id: string): Promise<boolean> {
 }
 
 export async function getPluginBundle(id: string): Promise<string | null> {
+  if (!SAFE_ID_RE.test(id)) return null;
   const bundlePath = path.join(getPluginsDir(), `${id}.js`);
   try {
     return await readFile(bundlePath, 'utf-8');
@@ -322,6 +323,7 @@ export async function deleteTheme(id: string): Promise<boolean> {
 }
 
 export async function getThemeCSS(id: string): Promise<string | null> {
+  if (!SAFE_ID_RE.test(id)) return null;
   const cssPath = path.join(getThemesDir(), `${id}.css`);
   try {
     return await readFile(cssPath, 'utf-8');
