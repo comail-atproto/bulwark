@@ -1,0 +1,547 @@
+import type { Attachment, Email, Mailbox, MailboxRights, StateChange, AccountStates, CollectionChanges, ShareNotification, BusyPeriod, CalendarParticipantIdentity, CalendarEventNotification, Thread, Identity, EmailAddress, ContactCard, AddressBook, AddressBookRights, VacationResponse, Calendar, CreateCalendarOptions, CalendarRights, CalendarEvent, CalendarEventFilter, CalendarTask, FileNode, FileNodeRights, Principal, PushSubscription, EmailPushConfig, ScheduledEmail, SendEmailResult, SharedAccount } from "./types";
+import type { SieveScript, SieveCapabilities } from "./sieve-types";
+import type { FileNameRules } from "@/lib/file-name-rules";
+import type { SortLevel } from "@/lib/message-list-order";
+
+/** What `migrateKeyword` managed to do. */
+export interface KeywordMigration {
+  /** Messages now carrying the new keyword. */
+  migrated: number;
+  /**
+   * Messages the server refused to update for a reason other than being gone.
+   * Those still carry the old keyword.
+   */
+  refused: number;
+}
+
+export interface KeywordInfo {
+  id: string;
+  name: string;
+  color: string | null;
+  total: number;
+  unread: number;
+  isProviderLabel: boolean;
+  source: 'provider' | 'message';
+}
+
+export interface KeywordDiscoveryResult {
+  keywords: Record<string, number>;
+  labels: KeywordInfo[];
+  scanned: number;
+  total: number;
+  complete: boolean;
+}
+
+/**
+ * Interface defining the public JMAP client contract.
+ *
+ * Both the real `JMAPClient` (network-backed) and `DemoJMAPClient`
+ * (in-memory/browser-only) implement this interface so that stores
+ * and UI code never need to know which one is active.
+ */
+export interface CalendarEventUpdateOptions {
+  /**
+   * Send `sequence` instead of stripping it with the other server-managed
+   * fields. Only for a patch that creates a recurrence override and must carry
+   * the series' sequence (see buildOccurrenceRsvpPatch).
+   */
+  keepSequence?: boolean;
+}
+
+export interface IJMAPClient {
+  // ── Connection lifecycle ──────────────────────────────────────
+  connect(): Promise<void>;
+  disconnect(): void;
+  reconnect(): Promise<void>;
+  ping(): Promise<void>;
+
+  // ── Session / auth accessors ──────────────────────────────────
+  getServerUrl(): string;
+  getAuthHeader(): string;
+  updateAccessToken(token: string): void;
+  upgradeToBearer(accessToken: string, onRefresh?: () => Promise<string | null>): void;
+  enableTotpReauth(basePassword: string, callback: () => Promise<string | null>): void;
+  updateBasicAuth(newPassword: string): void;
+  getAccountId(): string;
+  getUsername(): string;
+
+  // ── Capabilities ──────────────────────────────────────────────
+  getCapabilities(): Record<string, unknown>;
+  hasAccountCapability(capability: string, accountId?: string): boolean;
+  /** FileNode naming rules the server publishes (Stalwart 0.16.6+), if any. */
+  getFileNameRules?(accountId?: string): FileNameRules | null;
+  getMaxSizeUpload(): number;
+  /** RFC 8621 maxSizeAttachmentsPerEmail of the mail account (0 = unknown). */
+  getMaxSizeAttachmentsPerEmail?(): number;
+  getMaxCallsInRequest(): number;
+  getMaxObjectsInGet(): number;
+  getMaxObjectsInSet(): number;
+  getMaxDelayedSend(accountId?: string): number;
+  hasDelayedSend(accountId?: string): boolean;
+  getEventSourceUrl(): string | null;
+  supportsEmailSubmission(): boolean;
+  supportsQuota(): boolean;
+  supportsVacationResponse(): boolean;
+  supportsContacts(): boolean;
+  supportsCalendars(): boolean;
+  supportsSieve(): boolean;
+  supportsFiles(accountId?: string): boolean;
+
+  // ── Push / state ──────────────────────────────────────────────
+  setupPushNotifications(): boolean;
+  closePushNotifications(): void;
+  onConnectionChange(callback: (connected: boolean) => void): void;
+  onRateLimit(callback: (rateLimited: boolean, retryAfterMs: number) => void): void;
+  isRateLimited(): boolean;
+  getRateLimitRemainingMs(): number;
+  onStateChange(callback: (change: StateChange) => void): void;
+  getLastStates(): AccountStates;
+  setLastStates(states: AccountStates): void;
+
+  // ── PushSubscription (RFC 8620 §7.2) ───────────────────────────
+  // Browser-driven Web Push setup: register a relay URL the JMAP server can
+  // forward StateChange events to. Mobile uses the same primitives.
+  listPushSubscriptions(): Promise<PushSubscription[]>;
+  createPushSubscription(params: {
+    deviceClientId: string;
+    url: string;
+    types: string[];
+    expires?: string;
+    // Per-account delivery filter (draft-ietf-jmap-emailpush). Only sent when
+    // the server advertises urn:ietf:params:jmap:emailpush.
+    emailPush?: Record<string, EmailPushConfig>;
+  }): Promise<string>;
+  verifyPushSubscription(id: string, verificationCode: string): Promise<void>;
+  updatePushSubscription(
+    id: string,
+    patch: { expires?: string; types?: string[]; emailPush?: Record<string, EmailPushConfig> | null },
+  ): Promise<boolean>;
+  destroyPushSubscription(id: string): Promise<void>;
+
+  // ── Quota ─────────────────────────────────────────────────────
+  getQuota(): Promise<{ used: number; total: number } | null>;
+
+  // ── Mailboxes ─────────────────────────────────────────────────
+  getMailboxes(accountId?: string): Promise<Mailbox[]>;
+  getAllMailboxes(): Promise<Mailbox[]>;
+  /**
+   * getAllMailboxes plus the Mailbox collection state per account, so the
+   * store can resolve a later push with Mailbox/changes (RFC 8620 §5.2)
+   * instead of re-fetching every folder tree. Optional: clients without it
+   * (demo) always take the full-refresh path.
+   */
+  getAllMailboxesWithState?(): Promise<{ mailboxes: Mailbox[]; states: Record<string, string> }>;
+  /** Mailbox/get restricted to `ids`, mapped like getAllMailboxes (delta patching). */
+  getMailboxesByIds?(ids: string[], accountId?: string): Promise<Mailbox[]>;
+  /** Mailbox/changes since `sinceState`; null when the server cannot compute the delta. */
+  getMailboxChanges?(sinceState: string, accountId?: string, maxChanges?: number): Promise<CollectionChanges | null>;
+  /** Email/changes since `sinceState`; null when the server cannot compute the delta. */
+  getEmailChanges?(sinceState: string, accountId?: string, maxChanges?: number): Promise<CollectionChanges | null>;
+  createMailbox(name: string, parentId?: string, accountId?: string, options?: { role?: string }): Promise<Mailbox>;
+  updateMailbox(mailboxId: string, changes: { name?: string; parentId?: string | null; role?: string | null; sortOrder?: number }, accountId?: string): Promise<void>;
+  // Many folder updates in as few Mailbox/set calls as the server allows.
+  // Refused folders don't stop the rest: returns their ids with the SetError type.
+  updateMailboxes(updates: Record<string, { name?: string; parentId?: string | null; role?: string | null; sortOrder?: number }>, accountId?: string): Promise<Record<string, string>>;
+  // `removeEmails` destroys the folder's messages too (onDestroyRemoveEmails,
+  // RFC 8621 §2.5) instead of failing with mailboxHasEmail.
+  deleteMailbox(mailboxId: string, accountId?: string, options?: { removeEmails?: boolean }): Promise<void>;
+  // CalendarEventNotification (draft-ietf-jmap-calendars §7): invitations,
+  // updates and cancellations made by other participants. Optional.
+  getCalendarEventNotifications?(): Promise<CalendarEventNotification[]>;
+  destroyCalendarEventNotifications?(ids: string[]): Promise<void>;
+  // ParticipantIdentity (draft-ietf-jmap-calendars §6): the addresses the
+  // user organises events as. Optional.
+  getParticipantIdentities?(): Promise<CalendarParticipantIdentity[]>;
+  setDefaultParticipantIdentity?(id: string): Promise<void>;
+  // Free/busy (Principal/getAvailability, principals:availability). Optional.
+  supportsAvailability?(): boolean;
+  getPrincipalAvailability?(principalId: string, utcStart: Date, utcEnd: Date): Promise<BusyPeriod[]>;
+  // ShareNotification (RFC 9670 §3): who shared what with this user. Optional
+  // (demo client).
+  supportsShareNotifications?(): boolean;
+  getShareNotifications?(): Promise<ShareNotification[]>;
+  destroyShareNotifications?(ids: string[]): Promise<void>;
+  // Mailbox sharing (urn:ietf:params:jmap:mail:share). Optional: the demo
+  // client has no principals to share with.
+  supportsMailboxSharing?(accountId?: string): boolean;
+  getMailboxShareWith?(mailboxId: string, accountId?: string): Promise<Record<string, MailboxRights> | null>;
+  setMailboxShare?(mailboxId: string, principalId: string, rights: MailboxRights | null, accountId?: string): Promise<void>;
+
+  // ── Emails ────────────────────────────────────────────────────
+  // `pinnedFirst` sorts emails carrying the $pinned keyword to the top
+  // (server-side hasKeyword sort comparator, RFC 8621), then receivedAt desc.
+  // `extraFilter` is an arbitrary JMAP FilterCondition/FilterOperator ANDed
+  // into the view - used by the message-list category tabs (search-based).
+  // `order` is the user's configured message-list order (#718), applied
+  // server-side after pinned-first; see lib/message-list-order.ts.
+  // `state` is the Email collection state the page was read at (RFC 8620
+  // §5.1), when the client reports it; the store uses it for Email/changes.
+  getEmails(mailboxId?: string, accountId?: string, limit?: number, position?: number, hasKeyword?: string, pinnedFirst?: boolean, extraFilter?: Record<string, unknown>, order?: SortLevel[]): Promise<{ emails: Email[]; hasMore: boolean; total: number; state?: string }>;
+  /**
+   * Sort properties the account's server advertises for Email/query
+   * (`emailQuerySortOptions` in the mail capability, RFC 8621 §1.3), or null
+   * when the server does not say. Used to grey out keyword-based ordering
+   * criteria the server cannot honour.
+   */
+  getEmailQuerySortOptions?(accountId?: string): string[] | null;
+  getEmailsInMailbox(mailboxId: string): Promise<Email[]>;
+  getEmail(emailId: string, accountId?: string): Promise<Email | null>;
+  getSomeEmails(emailsId: string[], accountId?: string): Promise<Email[]>
+  /**
+   * Attachment parts per email id for list-row chips, fetched lazily because
+   * the server reads each full raw message to answer it (#1089). Optional:
+   * clients whose list emails already carry `attachments` need not implement it.
+   */
+  getEmailAttachments?(emailIds: string[], accountId?: string): Promise<Map<string, Attachment[]>>;
+  /**
+   * Total / unread message counts per tag id. `accountId` scopes the count to
+   * a group/shared account reached through this client (defaults to the
+   * client's own account); the store sums it over every account a tag view
+   * spans (#1038). A message filed only in `excludeMailboxIds` (the account's
+   * Trash and Junk, which the tag view leaves out, #1156) is not counted.
+   */
+  getTagCounts(tagIds: string[], accountId?: string, excludeMailboxIds?: string[]): Promise<Record<string, { total: number; unread: number }>>;
+  /**
+   * Enumerate account keywords for extensions. Servers supporting Keyword/get
+   * can return exact counts and provider-label metadata; other servers use the
+   * bounded scan.
+   */
+  getKeywords(options?: {
+    limit?: number;
+    onProgress?: (scanned: number, total: number) => void;
+    signal?: AbortSignal;
+  }): Promise<KeywordDiscoveryResult>;
+  /**
+   * Every keyword currently set on the account's messages and how many of the
+   * walked messages carry it, found by walking the message list - JMAP offers no
+   * way to ask for the keywords in use. `complete` is false when `limit` (or an
+   * abort) ended the walk early, which also makes every count a floor.
+   */
+  discoverKeywords(options?: {
+    limit?: number;
+    onProgress?: (scanned: number, total: number) => void;
+    signal?: AbortSignal;
+  }): Promise<{ keywords: Record<string, number>; scanned: number; total: number; complete: boolean }>;
+  /** Per-tab unread counts for message-list category tabs (filter = resolved tab fragment, null = unfiltered). */
+  getCategoryUnreadCounts(mailboxId: string, tabs: Array<{ id: string; filter: Record<string, unknown> | null }>, accountId?: string): Promise<Record<string, number>>;
+  searchEmails(query: string, mailboxId?: string, accountId?: string, limit?: number, position?: number): Promise<{ emails: Email[]; hasMore: boolean; total: number }>;
+  advancedSearchEmails(
+    filter: Record<string, unknown>,
+    accountId?: string,
+    limit?: number,
+    position?: number,
+  ): Promise<{ emails: Email[]; hasMore: boolean; total: number }>;
+  /**
+   * Lean recipient search for compose autocomplete ("search the server" action):
+   * finds messages in `sentMailboxId` whose to/cc matches `query` and returns
+   * only the matching addresses (fetches just the `to`/`cc` properties - no
+   * bodies or attachments), deduped.
+   */
+  searchSentRecipients(query: string, sentMailboxId: string, accountId?: string, limit?: number): Promise<Array<{ name: string; email: string }>>;
+  /**
+   * Only the named properties (e.g. `header:List-Id:asText`) of the given
+   * messages, plus their `id`. Nothing is namespaced: ids stay as the server
+   * has them.
+   */
+  getEmailFields(emailIds: string[], properties: string[], accountId?: string): Promise<Array<Record<string, unknown>>>;
+  /**
+   * Every message matching `filter`, newest first, with only the named
+   * properties plus `id`. Pages through the whole result up to `limit`
+   * (default 10000).
+   */
+  queryEmailFields(
+    filter: Record<string, unknown>,
+    properties: string[],
+    accountId?: string,
+    limit?: number,
+  ): Promise<Array<Record<string, unknown>>>;
+
+  // ── Email mutations ───────────────────────────────────────────
+  markAsRead(emailId: string, read?: boolean, accountId?: string): Promise<void>;
+  batchMarkAsRead(emailIds: string[], read?: boolean, accountId?: string): Promise<void>;
+  toggleStar(emailId: string, starred: boolean, accountId?: string): Promise<void>;
+  updateEmailKeywords(emailId: string, keywords: Record<string, boolean>, accountId?: string): Promise<void>;
+  setKeyword(emailId: string, keyword: string, accountId?: string): Promise<void>;
+  removeKeyword(emailId: string, keyword: string, accountId?: string): Promise<void>;
+  /** Apply one `keywords/<name>` patch fragment (true=add, null=remove) to many messages in a single Email/set. */
+  batchUpdateKeywords(emailIds: string[], patch: Record<string, boolean | null>, accountId?: string): Promise<void>;
+  /**
+   * Rewrite one keyword to another on every message that carries it, in
+   * batches. Fails outright only when the server refuses the whole call;
+   * per-message refusals are reported in the result, since the messages
+   * migrated alongside them stay migrated.
+   */
+  migrateKeyword(oldKeyword: string, newKeyword: string): Promise<KeywordMigration>;
+  deleteEmail(emailId: string, accountId?: string): Promise<void>;
+  moveToTrash(emailId: string, trashMailboxId: string, accountId?: string, markAsRead?: boolean): Promise<void>;
+  batchDeleteEmails(emailIds: string[], accountId?: string): Promise<void>;
+  batchMoveEmails(emailIds: string[], toMailboxId: string, accountId?: string, markAsRead?: boolean): Promise<void>;
+  batchArchiveEmails(
+    emails: Array<{ id: string; receivedAt: string }>,
+    archiveMailboxId: string,
+    mode: 'single' | 'year' | 'month',
+    existingMailboxes: Mailbox[],
+    accountId?: string,
+  ): Promise<void>;
+  moveEmail(emailId: string, toMailboxId: string, accountId?: string): Promise<void>;
+  emptyMailbox(mailboxId: string, accountId?: string): Promise<number>;
+  moveMailboxContents(fromMailboxId: string, toMailboxId: string, accountId?: string, markAsRead?: boolean): Promise<number>;
+  markMailboxAsRead(mailboxId: string, accountId?: string): Promise<number>;
+  markAllAsRead(excludeMailboxIds?: string[], accountId?: string): Promise<number>;
+  markAsSpam(emailId: string, accountId?: string, markAsRead?: boolean): Promise<void>;
+  undoSpam(emailId: string, originalMailboxId: string, accountId?: string): Promise<void>;
+
+  // ── Threads ───────────────────────────────────────────────────
+  getThread(threadId: string, accountId?: string): Promise<Thread | null>;
+  getThreads(threadIds: string[], accountId?: string): Promise<Thread[]>;
+  getThreadEmails(threadId: string, accountId?: string): Promise<Email[]>;
+
+  // ── Compose / Send ────────────────────────────────────────────
+  createDraft(
+    to: string[],
+    subject: string,
+    body: string,
+    cc?: string[],
+    bcc?: string[],
+    identityId?: string,
+    fromEmail?: string,
+    draftId?: string,
+    attachments?: Array<{ blobId: string; name: string; type: string; size: number; disposition?: 'attachment' | 'inline'; cid?: string }>,
+    fromName?: string,
+    htmlBody?: string,
+    inReplyTo?: string[],
+    references?: string[],
+  ): Promise<string>;
+
+  sendEmail(
+    to: string[],
+    subject: string,
+    body: string,
+    cc?: string[],
+    bcc?: string[],
+    identityId?: string,
+    fromEmail?: string,
+    draftId?: string,
+    fromName?: string,
+    htmlBody?: string,
+    attachments?: Array<{ blobId: string; name: string; type: string; size: number; disposition?: 'attachment' | 'inline'; cid?: string }>,
+    inReplyTo?: string[],
+    references?: string[],
+    delayedUntil?: string,
+    // The SMTP MAIL FROM wanted instead of the identity's address (a From
+    // override). Sent through the identity that owns it when there is one;
+    // a server that refuses it gets the identity's address instead.
+    envelopeMailFrom?: string,
+    // requestDsn / requireTls map to RFC 3461 / RFC 8689 envelope parameters
+    // and need the matching `submissionExtensions` entry (see
+    // supportsSubmissionExtension).
+    options?: { requestReadReceipt?: boolean; requestDsn?: boolean; requireTls?: boolean },
+  ): Promise<SendEmailResult>;
+  /** Whether the submission account advertises an SMTP extension ("DSN", "REQUIRETLS", …). */
+  supportsSubmissionExtension?(extension: string, accountId?: string): boolean;
+
+  importEmail(
+    blobId: string,
+    mailboxIds: Record<string, boolean>,
+    keywords?: Record<string, boolean>,
+    accountId?: string,
+  ): Promise<string | null>;
+
+  sendReadReceipt(params: {
+    to: string;
+    fromEmail: string;
+    fromName?: string;
+    identityId: string;
+    originalMessageId?: string | string[];
+    originalSubject?: string;
+    originalRecipient?: string;
+    automatic?: boolean;
+    accountId?: string;
+    subject?: string;
+    humanText?: string;
+  }): Promise<void>;
+
+  sendRawEmail(blob: Blob, identityId: string, sentMailboxId: string, draftMailboxId?: string, delayedUntil?: string, envelopeRecipients?: string[]): Promise<SendEmailResult>;
+  submitRawEmail(blob: Blob, identityId: string, delayedUntil?: string, envelopeRecipients?: string[]): Promise<SendEmailResult>;
+  getScheduledEmails(limit?: number, position?: number): Promise<{ emails: ScheduledEmail[]; hasMore: boolean; total: number; totalByAccount?: Record<string, number>; nextPosition: number }>;
+  cancelEmailSubmission(submissionId: string, accountId?: string): Promise<void>;
+  rescheduleEmailSubmission(submissionId: string, emailId: string, identityId: string, delayedUntil: string, accountId?: string): Promise<SendEmailResult>;
+  /** `sentMailboxId` is accepted for backwards compatibility but ignored: the message is placed in Drafts only. */
+  restoreEmailToDraft(emailId: string, draftMailboxId: string, sentMailboxId?: string, accountId?: string): Promise<void>;
+
+  sendImipReply(opts: {
+    organizerEmail: string;
+    organizerName?: string;
+    attendeeEmail: string;
+    attendeeName?: string;
+    uid: string;
+    summary?: string;
+    dtStart?: string;
+    dtEnd?: string;
+    timeZone?: string;
+    isAllDay?: boolean;
+    sequence?: number;
+    status: 'ACCEPTED' | 'TENTATIVE' | 'DECLINED';
+    identityId?: string;
+  }): Promise<void>;
+
+  sendImipInvitation(event: CalendarEvent): Promise<void>;
+  sendImipCancellation(event: CalendarEvent): Promise<void>;
+
+  // ── Blobs ─────────────────────────────────────────────────────
+  uploadBlob(
+    file: File,
+    optsOrAccountId?:
+      | string
+      | {
+          accountId?: string;
+          onProgress?: (loaded: number, total: number) => void;
+          signal?: AbortSignal;
+        },
+  ): Promise<{ blobId: string; size: number; type: string }>;
+  getBlobDownloadUrl(blobId: string, name?: string, type?: string, accountId?: string): string;
+  fetchBlob(blobId: string, name?: string, type?: string, accountId?: string): Promise<Blob>;
+  fetchBlobAsObjectUrl(blobId: string, name?: string, type?: string, accountId?: string): Promise<string>;
+  fetchBlobArrayBuffer(blobId: string, name?: string, type?: string, accountId?: string, rangeHeader?: number): Promise<ArrayBuffer>;
+  downloadBlob(blobId: string, name?: string, type?: string, accountId?: string): Promise<void>;
+
+  // ── Identities ────────────────────────────────────────────────
+  getIdentities(): Promise<Identity[]>;
+  createIdentity(
+    name: string,
+    email: string,
+    replyTo?: EmailAddress[] | null,
+    bcc?: EmailAddress[] | null,
+    textSignature?: string | null,
+    htmlSignature?: string | null,
+  ): Promise<Identity>;
+  updateIdentity(
+    identityId: string,
+    updates: {
+      name?: string | null;
+      replyTo?: EmailAddress[] | null;
+      bcc?: EmailAddress[] | null;
+      textSignature?: string | null;
+      htmlSignature?: string | null;
+    },
+  ): Promise<void>;
+  deleteIdentity(identityId: string): Promise<void>;
+
+  // ── Vacation ──────────────────────────────────────────────────
+  getVacationResponse(accountId?: string): Promise<VacationResponse>;
+  setVacationResponse(updates: Partial<VacationResponse>, accountId?: string): Promise<void>;
+
+  // ── Contacts ──────────────────────────────────────────────────
+  getContactsAccountId(): string;
+  getAddressBooks(options?: { throwOnError?: boolean }): Promise<AddressBook[]>;
+  getAllAddressBooks(): Promise<AddressBook[]>;
+  createAddressBook(name: string): Promise<AddressBook>;
+  updateAddressBook(addressBookId: string, updates: Partial<AddressBook>, targetAccountId?: string): Promise<void>;
+  setDefaultAddressBook(addressBookId: string, targetAccountId?: string): Promise<void>;
+  deleteAddressBook(addressBookId: string, targetAccountId?: string, options?: { removeContents?: boolean }): Promise<void>;
+  getContacts(addressBookId?: string, options?: { throwOnError?: boolean }): Promise<ContactCard[]>;
+  getAllContacts(): Promise<ContactCard[]>;
+  getContact(contactId: string, accountId?: string): Promise<ContactCard | null>;
+  createContact(contact: Partial<ContactCard>, targetAccountId?: string): Promise<ContactCard>;
+  updateContact(contactId: string, updates: Partial<ContactCard>, targetAccountId?: string): Promise<void>;
+  deleteContact(contactId: string, targetAccountId?: string): Promise<void>;
+  searchContacts(query: string): Promise<ContactCard[]>;
+
+  // ── Calendars ─────────────────────────────────────────────────
+  getCalendarsAccountId(): string;
+  getCalendars(): Promise<Calendar[]>;
+  getAllCalendars(): Promise<Calendar[]>;
+  getAllCalendarsWithFailures(): Promise<{ calendars: Calendar[]; failedAccountIds: string[] }>;
+  createCalendar(calendar: Partial<Calendar>, targetAccountId?: string, options?: CreateCalendarOptions): Promise<Calendar>;
+  updateCalendar(calendarId: string, updates: Partial<Calendar>, targetAccountId?: string): Promise<void>;
+  setDefaultCalendar(calendarId: string, targetAccountId?: string): Promise<void>;
+  deleteCalendar(calendarId: string, targetAccountId?: string): Promise<void>;
+  getCalendarEvents(calendarIds?: string[], targetAccountId?: string): Promise<CalendarEvent[]>;
+  /** Calendars/events backed by the configured canonical ATProto Space, when the adapter is available. */
+  getAtprotoSpaceCalendars?(): Promise<Calendar[]>;
+  getAtprotoSpaceCalendarEvents?(after: string, before: string): Promise<CalendarEvent[]>;
+  getAtprotoSpacePrincipals?(): Promise<Principal[]>;
+  startAtprotoSpaceCalendarConsent?(): Promise<string>;
+  updateAtprotoSpaceCalendarEvent?(eventId: string, baseRevision: string, updates: Partial<CalendarEvent>): Promise<CalendarEvent>;
+  rsvpAtprotoSpaceCalendarEvent?(eventId: string, baseRevision: string, status: string): Promise<CalendarEvent>;
+  cancelAtprotoSpaceCalendarEvent?(eventId: string, baseRevision: string, calendarId: string): Promise<CalendarEvent>;
+  createAtprotoSpaceCalendarEvent?(calendarId: string, event: Partial<CalendarEvent>, sendSchedulingMessages?: boolean): Promise<CalendarEvent>;
+  shareAtprotoSpaceCalendar?(calendarId: string, principalId: string, rights: CalendarRights | null): Promise<{ status: 'shared' | 'revoked' }>;
+  getCalendarEvent(id: string, targetAccountId?: string): Promise<CalendarEvent | null>;
+  createCalendarEvent(event: Partial<CalendarEvent>, sendSchedulingMessages?: boolean, targetAccountId?: string): Promise<CalendarEvent>;
+  batchCreateCalendarEvents(events: Partial<CalendarEvent>[], targetAccountId?: string): Promise<{ created: CalendarEvent[]; failed: string[]; notCreated: Record<string, { type?: string; description?: string }> }>;
+  updateCalendarEvent(
+    eventId: string,
+    updates: Partial<CalendarEvent>,
+    sendSchedulingMessages?: boolean,
+    targetAccountId?: string,
+    options?: CalendarEventUpdateOptions,
+  ): Promise<void>;
+  deleteCalendarEvent(eventId: string, sendSchedulingMessages?: boolean, targetAccountId?: string): Promise<void>;
+  batchDeleteCalendarEvents(eventIds: string[], targetAccountId?: string): Promise<{ destroyed: string[]; notDestroyed: Record<string, { type?: string; description?: string }> }>;
+  queryCalendarEvents(filter: CalendarEventFilter, sort?: Array<{ property: string; isAscending: boolean }>, limit?: number, targetAccountId?: string): Promise<CalendarEvent[]>;
+  queryAllCalendarEvents(filter: CalendarEventFilter, sort?: Array<{ property: string; isAscending: boolean }>, limit?: number): Promise<CalendarEvent[]>;
+  parseCalendarEvents(accountId: string, blobId: string): Promise<Partial<CalendarEvent>[]>;
+
+  // ── Calendar Tasks ────────────────────────────────────────────
+  getCalendarTasks(calendarIds?: string[], targetAccountId?: string): Promise<CalendarTask[]>;
+  createCalendarTask(task: Partial<CalendarTask>, targetAccountId?: string): Promise<CalendarTask>;
+  updateCalendarTask(taskId: string, updates: Partial<CalendarTask>, targetAccountId?: string): Promise<void>;
+  deleteCalendarTask(taskId: string, targetAccountId?: string): Promise<void>;
+
+  // ── Sharing (RFC 9670 Principals) ─────────────────────────────
+  supportsPrincipals(): boolean;
+  getPrincipals(targetAccountId?: string): Promise<Principal[]>;
+  setCalendarShare(calendarId: string, principalId: string, rights: CalendarRights | null, targetAccountId?: string): Promise<void>;
+  setAddressBookShare(addressBookId: string, principalId: string, rights: AddressBookRights | null, targetAccountId?: string): Promise<void>;
+  setFileNodeShare(fileNodeId: string, principalId: string, rights: FileNodeRights | null, targetAccountId?: string): Promise<void>;
+
+  // ── Accounts (primary + shared/group) ────────────────────────
+  getSharedAccounts(): SharedAccount[];
+
+  // ── Sieve / Filters ──────────────────────────────────────────
+  getSieveAccountId(): string;
+  getSieveAccounts(): { id: string; name: string; isPrimary: boolean }[];
+  getSieveCapabilities(accountId?: string): SieveCapabilities | null;
+  getSieveScripts(accountId?: string): Promise<SieveScript[]>;
+  getSieveScriptContent(blobId: string, accountId?: string): Promise<string>;
+  createSieveScript(name: string, content: string, activate?: boolean, accountId?: string): Promise<SieveScript>;
+  updateSieveScript(scriptId: string, content: string, activate?: boolean, accountId?: string): Promise<void>;
+  deleteSieveScript(scriptId: string, accountId?: string): Promise<void>;
+  activateSieveScript(scriptId: string, accountId?: string): Promise<void>;
+  /** Leave the account with no active script. */
+  deactivateSieveScript(accountId?: string): Promise<void>;
+  validateSieveScript(content: string, accountId?: string): Promise<{ isValid: boolean; errors?: string[] }>;
+
+  // ── Files (WebDAV / FileNode) ─────────────────────────────────
+  getFilesAccountId(): string;
+  probeFileNodeSupport(): Promise<boolean>;
+  listFileNodes(parentId: string | null): Promise<FileNode[]>;
+  listAllFileNodes(): Promise<FileNode[]>;
+  listAllFileNodesAcrossAccounts(): Promise<FileNode[]>;
+  getFileNodes(ids: string[] | null, properties?: string[]): Promise<FileNode[]>;
+  createFileDirectory(name: string, parentId: string | null): Promise<FileNode>;
+  createFileNode(name: string, blobId: string, type: string, size: number, parentId: string | null): Promise<FileNode>;
+  updateFileNode(id: string, updates: Partial<Pick<FileNode, 'name' | 'parentId'>>): Promise<void>;
+  updateFileNodes(updates: Record<string, Partial<Pick<FileNode, 'name' | 'parentId'>>>): Promise<{ updated: string[]; notUpdated: Record<string, string> }>;
+  destroyFileNodes(ids: string[]): Promise<{ destroyed: string[]; notDestroyed: string[] }>;
+  copyFileNode(id: string, newName: string, parentId: string | null): Promise<FileNode>;
+
+  // ── S/MIME raw-email helpers ──────────────────────────────────
+  /**
+   * Upload a raw message and import it (Email/import). `receivedAt` keeps the
+   * original date when a message is carried over from another account;
+   * without it the server stamps the import time.
+   */
+  importRawEmail(blob: Blob, mailboxIds: Record<string, boolean>, keywords?: Record<string, boolean>, accountId?: string, receivedAt?: string): Promise<string>;
+  submitEmail(emailId: string, identityId: string): Promise<void>;
+  /**
+   * Server-side move of one email across accounts reachable through THIS client
+   * (JMAP `Email/copy` + destroy-original). Used for delegated/shared folders,
+   * where the two accounts share a client but a client can't stage a blob in a
+   * delegated account (so the blob copy+import path doesn't work). Returns the
+   * new email id in the destination account. `keepOriginal` makes it a plain
+   * copy: the source message is left where it is.
+   */
+  copyEmailAcrossAccounts(emailId: string, fromAccountId: string, toAccountId: string, destMailboxId: string, options?: { keepOriginal?: boolean }): Promise<string>;
+}

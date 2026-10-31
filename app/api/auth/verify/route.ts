@@ -1,0 +1,109 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { logger } from '@/lib/logger';
+import { JmapAuthVerificationError, verifyJmapAuth } from '@/lib/auth/verify-jmap-auth';
+import { configManager } from '@/lib/admin/config-manager';
+import { isPublicHttpUrl } from '@/lib/security/url-guard';
+import { parseJmapServers, resolveTrustedJmapUrl } from '@/lib/admin/jmap-servers';
+import { rejectCrossOriginRequest } from '@/lib/security/same-origin';
+import { getClientIP } from '@/lib/admin/session';
+import { reserveVerifyProbe } from '@/lib/auth/verify-budget';
+
+/**
+ * Server-side credential pre-check for the login form (#969): a password
+ * (Basic auth), or the access token of a token login (Bearer auth).
+ *
+ * When the browser itself probes the JMAP session URL with wrong credentials,
+ * the server answers 401 + `WWW-Authenticate: Basic`, and on a same-origin
+ * deployment (JMAP reverse-proxied under the webmail's own host) the browser
+ * pops its native "This site requires authentication" dialog before the
+ * login form can show its own error. Probing from here first means a wrong
+ * password never reaches the browser as a 401 with a Basic challenge: the
+ * answer comes back as JSON from our own origin.
+ *
+ * The result is only *authoritative* for a definitive upstream 401. Anything
+ * else - the JMAP server unreachable from this container, a timeout, 5xx, a
+ * TOTP challenge (402), an unconfigured or disallowed URL - is reported as
+ * `inconclusive` so the browser-side connect keeps handling it exactly as
+ * before. Some deployments can't resolve the JMAP host from inside the
+ * container at all; those must keep logging in.
+ */
+export type VerifyResult = 'ok' | 'unauthorized' | 'inconclusive';
+
+function respond(result: VerifyResult) {
+  return NextResponse.json({ result }, { headers: { 'Cache-Control': 'no-store' } });
+}
+
+export async function POST(request: NextRequest) {
+  // CSRF gate (GHSA-qvr9-m8cq-7wvg): cookies written here are SameSite=Lax,
+  // so a cross-site top-level POST would otherwise reach this handler.
+  const crossOrigin = rejectCrossOriginRequest(request);
+  if (crossOrigin) return crossOrigin;
+  try {
+    const body = await request.json().catch(() => null);
+    const serverUrl = body?.serverUrl;
+    const username = body?.username;
+    const password = body?.password;
+    const token = body?.token;
+    const hasPassword = typeof username === 'string' && typeof password === 'string' && !!username && !!password;
+    const hasToken = typeof token === 'string' && !!token;
+    if (typeof serverUrl !== 'string' || !serverUrl || hasPassword === hasToken) {
+      return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
+    }
+
+    await configManager.ensureLoaded();
+    const oauthEnabled = configManager.get<boolean>('oauthEnabled', false);
+    const oauthOnly = configManager.get<boolean>('oauthOnly', false);
+    if (oauthEnabled && oauthOnly) {
+      return respond('inconclusive');
+    }
+
+    // Same upstream pinning as /api/auth/session: an unauthenticated caller
+    // must not be able to point this route at arbitrary internal hosts.
+    const configuredServerUrl =
+      configManager.get<string>('jmapServerUrl', '') ||
+      process.env.JMAP_SERVER_URL ||
+      process.env.NEXT_PUBLIC_JMAP_SERVER_URL ||
+      '';
+    const allowCustomEndpoint = configManager.get<boolean>('allowCustomJmapEndpoint', false);
+    const serverList = parseJmapServers(configManager.get<unknown>('jmapServers', []));
+    const trustedUrl = resolveTrustedJmapUrl(serverUrl, configuredServerUrl, serverList);
+
+    let upstreamUrl: string;
+    let upstreamTrusted: boolean;
+    if (trustedUrl) {
+      upstreamUrl = trustedUrl;
+      upstreamTrusted = true;
+    } else if (allowCustomEndpoint && (await isPublicHttpUrl(serverUrl))) {
+      upstreamUrl = serverUrl;
+      upstreamTrusted = false;
+    } else {
+      return respond('inconclusive');
+    }
+
+    // Wrong passwords tried from here count against this server's address
+    // upstream; over budget the browser probes the JMAP server itself.
+    const refund = reserveVerifyProbe(getClientIP(request));
+    if (!refund) return respond('inconclusive');
+
+    const authHeader = hasToken
+      ? `Bearer ${token}`
+      : 'Basic ' + Buffer.from(username + ':' + password).toString('base64');
+    try {
+      await verifyJmapAuth(upstreamUrl, authHeader, { trusted: upstreamTrusted });
+      refund();
+      return respond('ok');
+    } catch (error) {
+      if (error instanceof JmapAuthVerificationError && error.upstreamStatus === 401) {
+        return respond('unauthorized');
+      }
+      refund();
+      logger.debug('Login pre-check inconclusive', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+      return respond('inconclusive');
+    }
+  } catch (error) {
+    logger.error('Login pre-check error', { error: error instanceof Error ? error.message : 'Unknown error' });
+    return respond('inconclusive');
+  }
+}

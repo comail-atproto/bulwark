@@ -1,0 +1,2010 @@
+"use client";
+
+import { Suspense, useState, useEffect, useRef, useCallback } from "react";
+import { useRouter } from "@/i18n/navigation";
+import { useParams, useSearchParams } from "next/navigation";
+import { useTranslations } from "next-intl";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { useAuthStore, consumeSignedOut } from "@/stores/auth-store";
+import { useAccountStore } from "@/stores/account-store";
+import { useThemeStore } from "@/stores/theme-store";
+import { useShallow } from "zustand/react/shallow";
+import { useConfig } from "@/hooks/use-config";
+import { useMenuNavigation } from "@/hooks/use-menu-navigation";
+import { apiFetch, getPathPrefix, toRouterPath, withBasePath } from "@/lib/browser-navigation";
+import { cn } from "@/lib/utils";
+import { AlertCircle, Loader2, X, Info, Eye, EyeOff, LogIn, Sun, Moon, Monitor, Check, Shield, Play, Copy, KeyRound } from "@/components/icons";
+import { type OAuthMetadata } from "@/lib/oauth/discovery";
+import { generateCodeVerifier, generateCodeChallenge, generateState } from "@/lib/oauth/pkce";
+import { HandleCombobox } from "@/components/atproto/handle-combobox";
+import { resolveHandle } from "@/lib/atproto/handle";
+import { DEFAULT_OAUTH_SCOPES } from "@/lib/oauth/scopes";
+import { useUpdateStore, selectBanner } from "@/stores/update-store";
+import { buildVersionLines } from "@/lib/version-display";
+import { offersOwnOAuth, type PublicJmapServerEntry } from "@/lib/admin/jmap-servers";
+import { IS_LITE, getLiteInjectedClientId } from "@/lib/lite";
+import { getLiteClientId, probeLiteTokenLogin } from "@/lib/auth/lite-tokens";
+import {
+  LITE_OAUTH_AVAILABLE,
+  getLiteOAuthRedirectUri,
+  liteDiscoverOAuth,
+  saveLiteOAuthFlow,
+  type LiteOAuthDiscovery,
+} from "@/lib/auth/lite-oauth";
+import { toAsciiDomain } from "@/lib/idn";
+
+/** The domain of a complete address (`user@example.com`), or '' while it is still being typed. */
+function completeAddressDomain(username: string): string {
+  const match = /^[^@\s]+@([^@\s]+\.[^@\s.]+)$/.exec(username.trim());
+  return match ? match[1].toLowerCase() : "";
+}
+
+/** Compare domains in ASCII form, so `bücher.de` matches a configured `xn--bcher-kva.de` and back. */
+function domainKey(domain: string): string {
+  return toAsciiDomain(domain) ?? domain.trim().toLowerCase();
+}
+
+function findServerByDomain(servers: PublicJmapServerEntry[], email: string | undefined): PublicJmapServerEntry | undefined {
+  if (!email || !email.includes("@")) return undefined;
+  const domain = email.split("@")[1]?.trim();
+  if (!domain) return undefined;
+  const key = domainKey(domain);
+  return servers.find((s) => (s.domains ?? []).some((d) => domainKey(d) === key));
+}
+
+const APP_VERSION = process.env.NEXT_PUBLIC_APP_VERSION || "0.0.0";
+const GIT_COMMIT = process.env.NEXT_PUBLIC_GIT_COMMIT || "unknown";
+
+const THEME_OPTIONS = [
+  { value: "light" as const, icon: Sun, label: "Light" },
+  { value: "dark" as const, icon: Moon, label: "Dark" },
+  { value: "system" as const, icon: Monitor, label: "System" },
+];
+
+function VersionBadge() {
+  const [copied, setCopied] = useState(false);
+  const banner = useUpdateStore(useShallow(selectBanner));
+  const startPolling = useUpdateStore((s) => s.startPolling);
+
+  useEffect(() => { startPolling(); }, [startPolling]);
+
+  const versionLines = buildVersionLines({
+    version: APP_VERSION,
+    build: GIT_COMMIT,
+    isProd: process.env.NODE_ENV === "production",
+    latest: banner?.latest ?? undefined,
+  });
+  const versionInfo = versionLines
+    .map((line) => `${line.label}: ${line.value}`)
+    .join("\n");
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(versionInfo).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+
+  const isRed = banner?.variant === "red";
+  const triggerText = !banner
+    ? `v${APP_VERSION}`
+    : banner.severity === "security"
+      ? "Security update available"
+      : banner.severity === "deprecated"
+        ? "Version no longer supported"
+        : "New version available";
+
+  const triggerColor = !banner
+    ? "text-muted-foreground/40"
+    : isRed
+      ? "text-red-600/80 dark:text-red-400/80 hover:text-red-600 dark:hover:text-red-400"
+      : "text-amber-600/80 dark:text-amber-400/80 hover:text-amber-600 dark:hover:text-amber-400";
+
+  const triggerClass = cn(
+    "peer text-center text-xs transition-colors",
+    triggerColor,
+    banner?.url ? "cursor-pointer underline-offset-2 hover:underline" : "cursor-default",
+  );
+
+  const trigger = banner?.url ? (
+    <a href={banner.url} target="_blank" rel="noopener noreferrer" className={triggerClass}>
+      {triggerText}
+    </a>
+  ) : (
+    <p className={triggerClass}>{triggerText}</p>
+  );
+
+  return (
+    <div className="relative inline-flex justify-center">
+      {trigger}
+      <div className="absolute bottom-full start-0 mb-1.5 px-3 py-2 rounded-md bg-popover text-popover-foreground text-xs shadow-md border border-border invisible opacity-0 peer-hover:visible peer-hover:opacity-100 hover:visible hover:opacity-100 transition-opacity whitespace-nowrap z-10 before:absolute before:inset-x-0 before:top-full before:h-1.5">
+        <div className="flex items-center gap-2">
+          <div className="space-y-0.5">
+            {versionLines.map((line) => (
+              <p key={line.label}>{line.label}: <span className="font-medium">{line.value}</span></p>
+            ))}
+            {banner?.advisory && (
+              <p className="text-red-500 dark:text-red-400">{banner.advisory}</p>
+            )}
+          </div>
+          <button
+            onClick={handleCopy}
+            className="p-1 rounded hover:bg-muted transition-colors"
+            aria-label="Copy version info"
+          >
+            {copied ? <Check className="w-3.5 h-3.5 text-green-500" /> : <Copy className="w-3.5 h-3.5" />}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Only redirect targets matching this scheme are honored by the mobile
+// handoff path. Without the check the login page becomes an open redirector
+// that funnels password and token material to any caller-supplied URL.
+const MOBILE_REDIRECT_SCHEME = "bulwarkmobile://";
+
+function LoginPageContent() {
+  const router = useRouter();
+  const t = useTranslations("login");
+  const params = useParams();
+  const searchParams = useSearchParams();
+  const isAddAccountMode = searchParams.get("mode") === "add-account";
+
+  // When the mobile app launches the webmail in a browser tab it tacks on
+  // these params. We grab them once at mount and stash them in a ref so any
+  // login path that completes (password or OAuth) can hand control back to
+  // the app instead of routing into /mail.
+  const rawMobileRedirectUri = searchParams.get("mobile_redirect_uri") ?? "";
+  const rawMobileState = searchParams.get("mobile_state") ?? "";
+  const mobileRedirectUri = rawMobileRedirectUri.startsWith(MOBILE_REDIRECT_SCHEME)
+    ? rawMobileRedirectUri
+    : "";
+  const mobileState = mobileRedirectUri ? rawMobileState : "";
+  const isMobileHandoff = Boolean(mobileRedirectUri);
+  const { login, loginWithToken, loginDemo, isLoading, error, clearError, isAuthenticated } = useAuthStore();
+  const { theme, setTheme, initializeTheme } = useThemeStore(useShallow((s) => ({ theme: s.theme, setTheme: s.setTheme, initializeTheme: s.initializeTheme })));
+  const { appName, jmapServerUrl: configuredServerUrl, oauthEnabled, oauthOnly, oauthClientId: globalOauthClientId, oauthIssuerUrl: globalOauthIssuerUrl, oauthScopes, rememberMeEnabled, devMode, demoMode, loginLogoLightUrl, loginLogoDarkUrl, loginCompanyName, loginImprintUrl, loginPrivacyPolicyUrl, loginWebsiteUrl, sourceCodeUrl: configSourceCodeUrl, loginLogoMaxHeight, loginLogoMaxWidth, loginShowHeading, loginShowSubtitle, loginShowTotp, loginShowTokenLogin, loginShowVersion, isLoading: configLoading, error: configError, autoSsoEnabled, atprotoLoginUrl, embeddedMode: _embeddedMode, allowCustomJmapEndpoint, jmapServers, jmapServerAutoPickByDomain } = useConfig();
+  const resolvedTheme = useThemeStore((s) => s.resolvedTheme);
+
+  // Login logo sizing: when a max height/width is configured, drop the fixed
+  // 64×64 box so the logo (e.g. a wide wordmark) can render at its true size.
+  const hasLogoSize = Boolean(loginLogoMaxHeight || loginLogoMaxWidth);
+  const loginLogoStyle = hasLogoSize
+    ? { maxHeight: loginLogoMaxHeight || undefined, maxWidth: loginLogoMaxWidth || undefined }
+    : undefined;
+
+  const [formData, setFormData] = useState({
+    username: "",
+    password: "",
+  });
+  const [jmapEndpoint, setJmapEndpoint] = useState("");
+  const [selectedServerId, setSelectedServerId] = useState<string | null>(null);
+  const [domainAutoLocked, setDomainAutoLocked] = useState(false);
+
+  const hasServerList = jmapServers.length > 0;
+  const selectedServer = hasServerList
+    ? jmapServers.find((s) => s.id === selectedServerId) ?? jmapServers[0]
+    : undefined;
+
+  // Effective values: per-server overrides win, then global config.
+  const serverUrl = selectedServer?.url || configuredServerUrl;
+  const effectiveOauthClientId = selectedServer?.oauth?.clientId || globalOauthClientId;
+  // A selected server discovers against itself unless it has its own issuer;
+  // the global issuer only applies without a server list (#952).
+  const effectiveOauthIssuerUrl = selectedServer
+    ? selectedServer.oauth?.issuerUrl || selectedServer.url
+    : globalOauthIssuerUrl;
+  // A server entry that names its own OAuth client and button label signs in
+  // with OAuth even while OAuth is off globally: a Gmail bridge next to a
+  // password server.
+  const serverOauthEnabled = oauthEnabled || offersOwnOAuth(selectedServer);
+  const [totpCode, setTotpCode] = useState("");
+  const [showTotpField, setShowTotpField] = useState(false);
+  // Access-token sign-in (Bearer auth) in place of username and password.
+  // The mobile hand-off passes a password on to the app, so it has none.
+  const [tokenMode, setTokenMode] = useState(false);
+  const [accessToken, setAccessToken] = useState("");
+  const signInWithToken = tokenMode && loginShowTokenLogin && !isMobileHandoff;
+  const [rememberMe, setRememberMe] = useState(false);
+  // Lite (no server session): "remember me" needs Stalwart's token login on the
+  // target server. Probe it once per URL and hide the box when it is missing;
+  // those sessions then only last as long as the tab (lib/auth/lite-tokens.ts).
+  const [liteTokenLoginSupported, setLiteTokenLoginSupported] = useState<boolean | null>(null);
+  const [sessionExpired, setSessionExpired] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  const [shakeError, setShakeError] = useState(false);
+  const [showThemeMenu, setShowThemeMenu] = useState(false);
+
+  const [savedUsernames, setSavedUsernames] = useState<string[]>([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [filteredSuggestions, setFilteredSuggestions] = useState<string[]>([]);
+  const [selectedSuggestionIndex, setSelectedSuggestionIndex] = useState(-1);
+  const [oauthMetadata, setOauthMetadata] = useState<OAuthMetadata | null>(null);
+  const [oauthDiscoveryDone, setOauthDiscoveryDone] = useState(false);
+  const [oauthLoading, setOauthLoading] = useState(false);
+  const [demoLoading, setDemoLoading] = useState(false);
+  // Handle typed into the atproto sign-in box. Forwarded to the relay as
+  // ?handle= so it can skip its own handle-entry form and jump straight to
+  // the member's PDS OAuth. The relay does the resolve/normalize server-side.
+  const [atprotoHandle, setAtprotoHandle] = useState("");
+  // Inline error shown when resolveHandle positively rejects the typed handle
+  // before we redirect to OAuth. Cleared on every edit.
+  const [atprotoHandleError, setAtprotoHandleError] = useState(false);
+  const [atprotoResolving, setAtprotoResolving] = useState(false);
+
+  const suggestionsRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const justSelectedSuggestion = useRef(false);
+  const totpInputRef = useRef<HTMLInputElement>(null);
+  const tokenInputRef = useRef<HTMLInputElement>(null);
+  const prevError = useRef<string | null>(null);
+  const themeMenuRef = useRef<HTMLDivElement>(null);
+  const themeButtonRef = useRef<HTMLButtonElement>(null);
+  const closeThemeMenu = useCallback(() => setShowThemeMenu(false), []);
+  const { menuRef: themeListRef, onKeyDown: onThemeMenuKeyDown } = useMenuNavigation<HTMLDivElement>({
+    open: showThemeMenu,
+    onClose: closeThemeMenu,
+    triggerRef: themeButtonRef,
+  });
+  // Captured by handleSubmit when in mobile handoff mode; consumed by the
+  // isAuthenticated effect to build the deep-link fragment.
+  const mobileHandoffPayloadRef = useRef<{ server_url: string; username: string; password: string } | null>(null);
+
+  useEffect(() => {
+    initializeTheme();
+  }, [initializeTheme]);
+
+  const probeTarget = hasServerList
+    ? selectedServer?.url ?? ""
+    : (allowCustomJmapEndpoint ? jmapEndpoint : serverUrl) || "";
+  useEffect(() => {
+    if (!IS_LITE || !probeTarget) return;
+    let cancelled = false;
+    // Debounced: the custom endpoint field fires per keystroke.
+    const timer = setTimeout(() => {
+      probeLiteTokenLogin(probeTarget).then((supported) => {
+        if (!cancelled) setLiteTokenLoginSupported(supported);
+      });
+    }, 500);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [probeTarget]);
+  const showRememberMe = rememberMeEnabled && (!IS_LITE || liteTokenLoginSupported !== false);
+
+  // Lite on Stalwart: which provider signs the typed account in
+  // (lib/auth/lite-oauth.ts). A domain Stalwart delegates to an external
+  // OpenID provider has no password to check, so the form turns into the SSO
+  // button for it. The answer depends on the domain, so it is kept while the
+  // local part is edited, and only asked for once the address is complete
+  // (the endpoint is rate limited).
+  const [liteOAuthByDomain, setLiteOAuthByDomain] = useState<{ domain: string; discovery: LiteOAuthDiscovery | null } | null>(null);
+  const [liteOAuthFailed, setLiteOAuthFailed] = useState(false);
+  const liteDomain = LITE_OAUTH_AVAILABLE && !signInWithToken ? completeAddressDomain(formData.username) : "";
+  const liteAccount = liteDomain ? formData.username.trim() : "";
+  useEffect(() => {
+    if (!liteAccount || !probeTarget) return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      liteDiscoverOAuth(probeTarget, liteAccount, controller.signal).then((discovery) => {
+        if (!controller.signal.aborted) setLiteOAuthByDomain({ domain: completeAddressDomain(liteAccount), discovery });
+      });
+    }, 600);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [probeTarget, liteAccount]);
+  const liteSsoRequired = liteDomain !== "" && liteOAuthByDomain?.domain === liteDomain && liteOAuthByDomain.discovery?.external === true;
+  // The admin gave the Application an OAuth client: offer SSO next to the form.
+  const liteSsoOffered = LITE_OAUTH_AVAILABLE && !liteSsoRequired && getLiteInjectedClientId() !== "";
+
+  useEffect(() => {
+    if (serverUrl) {
+      document.title = appName;
+    }
+  }, [appName, serverUrl]);
+
+  useEffect(() => {
+    if (serverUrl && !jmapEndpoint) {
+      setJmapEndpoint(serverUrl);
+    }
+  }, [serverUrl, jmapEndpoint]);
+
+  // Initialize selected server when the server list arrives. Picks the first
+  // entry; the auto-pick effect below may override based on the email domain.
+  useEffect(() => {
+    if (!hasServerList) return;
+    if (selectedServerId && jmapServers.some((s) => s.id === selectedServerId)) return;
+    setSelectedServerId(jmapServers[0].id);
+  }, [hasServerList, jmapServers, selectedServerId]);
+
+  // Auto-pick by email domain. Locks the dropdown to the matched server until
+  // the user clears the email or types a domain we don't recognize.
+  useEffect(() => {
+    if (!jmapServerAutoPickByDomain || !hasServerList) return;
+    const match = findServerByDomain(jmapServers, formData.username);
+    if (match) {
+      if (selectedServerId !== match.id) setSelectedServerId(match.id);
+      setDomainAutoLocked(true);
+    } else {
+      setDomainAutoLocked(false);
+    }
+  }, [jmapServerAutoPickByDomain, hasServerList, jmapServers, formData.username, selectedServerId]);
+
+  useEffect(() => {
+    try {
+      if (sessionStorage.getItem('session_expired') === 'true') {
+        setSessionExpired(true);
+        sessionStorage.removeItem('session_expired');
+      }
+    } catch { /* sessionStorage unavailable */ }
+  }, []);
+
+  useEffect(() => {
+    if (error && error !== prevError.current) {
+      setShakeError(true);
+      const timer = setTimeout(() => setShakeError(false), 400);
+      return () => clearTimeout(timer);
+    }
+    prevError.current = error;
+  }, [error]);
+
+  // Auto-show and focus TOTP field when server requires it
+  useEffect(() => {
+    if (error === 'totp_required') {
+      setShowTotpField(true);
+      setTimeout(() => totpInputRef.current?.focus(), 100);
+    }
+  }, [error]);
+
+  useEffect(() => {
+    if (!serverUrl) return;
+    const saved = localStorage.getItem("webmail_usernames");
+    if (saved) {
+      try {
+        const usernames = JSON.parse(saved);
+        setSavedUsernames(usernames);
+      } catch {
+        console.error("Failed to parse saved usernames");
+      }
+    }
+  }, [serverUrl]);
+
+  useEffect(() => {
+    if (isAuthenticated && !isAddAccountMode) {
+      // Mobile handoff: the password path completes here once the auth store
+      // flips isAuthenticated. Hand the verified credentials back to the
+      // mobile app instead of pushing to /mail. handleSubmit captured the
+      // values needed for the fragment.
+      if (isMobileHandoff && mobileHandoffPayloadRef.current) {
+        const fragment = new URLSearchParams({
+          flow: "password",
+          ...mobileHandoffPayloadRef.current,
+          state: mobileState,
+        });
+        window.location.replace(`${mobileRedirectUri}#${fragment.toString()}`);
+        return;
+      }
+      let redirectTo = '/';
+      try {
+        const saved = sessionStorage.getItem('redirect_after_login');
+        if (saved) {
+          sessionStorage.removeItem('redirect_after_login');
+          redirectTo = saved;
+        }
+      } catch { /* ignore */ }
+      router.push(toRouterPath(redirectTo));
+    }
+  }, [isAuthenticated, router, isAddAccountMode, isMobileHandoff, mobileRedirectUri, mobileState]);
+
+  useEffect(() => {
+    clearError();
+  }, [formData, clearError]);
+
+  useEffect(() => {
+    if (!serverUrl) return;
+    if (justSelectedSuggestion.current) {
+      justSelectedSuggestion.current = false;
+      return;
+    }
+
+    if (formData.username && savedUsernames.length > 0) {
+      const filtered = savedUsernames.filter(username =>
+        username.toLowerCase().includes(formData.username.toLowerCase())
+      );
+      setFilteredSuggestions(filtered);
+      setShowSuggestions(filtered.length > 0);
+    } else if (formData.username === "" && savedUsernames.length > 0) {
+      setFilteredSuggestions(savedUsernames);
+      setShowSuggestions(false);
+    } else {
+      setShowSuggestions(false);
+    }
+    setSelectedSuggestionIndex(-1);
+  }, [formData.username, savedUsernames, serverUrl]);
+
+  useEffect(() => {
+    if (!serverUrl) return;
+    const handleClickOutside = (event: MouseEvent) => {
+      if (suggestionsRef.current && !suggestionsRef.current.contains(event.target as Node) &&
+          inputRef.current && !inputRef.current.contains(event.target as Node)) {
+        setShowSuggestions(false);
+      }
+      if (themeMenuRef.current && !themeMenuRef.current.contains(event.target as Node)) {
+        setShowThemeMenu(false);
+      }
+    };
+
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [serverUrl]);
+
+  useEffect(() => {
+    if (!serverOauthEnabled || !serverUrl) return;
+    setOauthDiscoveryDone(false);
+    setOauthMetadata(null);
+    const controller = new AbortController();
+    // Discover via our own origin rather than fetching the IdP's /.well-known/*
+    // documents directly from the browser. A direct cross-origin discovery
+    // fetch is subject to CORS, and providers like Authentik serve those
+    // documents without Access-Control-Allow-Origin, so the browser blocks the
+    // response and login breaks (issue #382). The proxy runs discovery server
+    // side where CORS does not apply.
+    const query = selectedServer?.id ? `?server_id=${encodeURIComponent(selectedServer.id)}` : "";
+    apiFetch(`/api/auth/oauth/metadata${query}`, { signal: controller.signal })
+      .then(async (res) => (res.ok ? ((await res.json()) as OAuthMetadata) : null))
+      .then((metadata) => {
+        setOauthMetadata(metadata);
+        setOauthDiscoveryDone(true);
+      })
+      .catch((err) => {
+        if (err?.name === "AbortError") return;
+        setOauthMetadata(null);
+        setOauthDiscoveryDone(true);
+      });
+    return () => controller.abort();
+  }, [serverOauthEnabled, serverUrl, effectiveOauthIssuerUrl, selectedServer?.id]);
+
+  // Auto-SSO: when enabled with OAUTH_ONLY, skip the login page entirely
+  const ssoError = searchParams.get("sso_error");
+  const autoSsoTriggered = useRef(false);
+  // Read once per mount: a ref survives the effect re-runs, the flag does not.
+  const signedOutOnPurpose = useRef<boolean | null>(null);
+
+  const startServerSideSso = useCallback(async () => {
+    setOauthLoading(true);
+    try {
+      const prefix = getPathPrefix(params.locale as string);
+      const redirectUri = `${window.location.origin}${prefix}/${params.locale}/auth/callback`;
+      // In mobile-handoff mode the callback page needs to know it should
+      // redirect into the app rather than into /mail. Stash the params in
+      // sessionStorage so the same-tab callback can read them - the SSO
+      // pending cookie carries the authoritative copy server-side too.
+      if (isMobileHandoff) {
+        try {
+          sessionStorage.setItem("mobile_redirect_uri", mobileRedirectUri);
+          sessionStorage.setItem("mobile_state", mobileState);
+        } catch { /* sessionStorage unavailable */ }
+      }
+      const res = await apiFetch('/api/auth/sso/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          redirect_uri: redirectUri,
+          locale: params.locale,
+          server_id: selectedServer?.id,
+          ...(isMobileHandoff
+            ? { mobile_redirect_uri: mobileRedirectUri, mobile_state: mobileState }
+            : {}),
+        }),
+      });
+
+      if (!res.ok) {
+        setOauthLoading(false);
+        return;
+      }
+
+      const { authorize_url } = await res.json();
+
+      // Navigate to the authorize URL
+      const isIframe = (() => { try { return window.self !== window.top; } catch { return true; } })();
+      if (isIframe) {
+        // In an iframe, try top-level navigation
+        try {
+          window.top!.location.href = authorize_url;
+        } catch {
+          // Cross-origin restriction - fall back to current frame
+          window.location.href = authorize_url;
+        }
+      } else {
+        window.location.href = authorize_url;
+      }
+    } catch {
+      setOauthLoading(false);
+    }
+  }, [params.locale, selectedServer?.id, isMobileHandoff, mobileRedirectUri, mobileState]);
+
+  useEffect(() => {
+    // After signing out, show the login page rather than signing straight
+    // back in through a provider session that outlived the sign-out (#905).
+    if (signedOutOnPurpose.current === null) signedOutOnPurpose.current = consumeSignedOut();
+    if (signedOutOnPurpose.current) return;
+    if (!autoSsoEnabled || !oauthOnly || !oauthDiscoveryDone || !oauthMetadata) return;
+    if (ssoError || isAddAccountMode || isAuthenticated) return;
+    if (autoSsoTriggered.current) return;
+    // With a multi-server list the target isn't implied - auto-redirecting
+    // would silently pin every user to the first entry and make the picker
+    // unreachable. Let them choose and press the button instead (issue #799).
+    if (jmapServers.length > 1) return;
+
+    // Guard against redirect loops
+    try {
+      if (sessionStorage.getItem("sso_attempted")) return;
+      sessionStorage.setItem("sso_attempted", "1");
+      // Clear the flag after 30 seconds so retries are possible
+      setTimeout(() => { try { sessionStorage.removeItem("sso_attempted"); } catch { /* ignore */ } }, 30000);
+    } catch { /* sessionStorage unavailable */ }
+
+    autoSsoTriggered.current = true;
+    startServerSideSso();
+  }, [autoSsoEnabled, oauthOnly, oauthDiscoveryDone, oauthMetadata, ssoError, isAddAccountMode, isAuthenticated, jmapServers.length, startServerSideSso]);
+
+  const handleThemeSelect = useCallback((newTheme: "light" | "dark" | "system") => {
+    setTheme(newTheme);
+    setShowThemeMenu(false);
+  }, [setTheme]);
+
+  const handleAtprotoLogin = useCallback(async () => {
+    if (!atprotoLoginUrl) return;
+    // Forward the typed handle so the relay skips its own handle-entry form
+    // and goes straight to the member's PDS OAuth. searchParams.set URL-
+    // encodes; the relay trims, strips a leading @, and resolves -> DID
+    // (or accepts a raw did:) server-side.
+    const h = atprotoHandle.trim().replace(/^@/, "");
+
+    // Pre-validate against the public AppView before we round-trip through the
+    // relay/OAuth. A typo would otherwise only surface late at the PDS password
+    // step. This is strictly fail-open: only a positive rejection ("invalid")
+    // blocks the redirect. An unreachable AppView, a 5xx, or a handle on a
+    // non-bsky PDS all resolve to "unknown" and proceed to plain submit.
+    if (h) {
+      setAtprotoResolving(true);
+      const result = await resolveHandle(h);
+      setAtprotoResolving(false);
+      if (result.status === "invalid") {
+        setAtprotoHandleError(true);
+        return;
+      }
+    }
+
+    // Preserve any mobile handoff params so the relay's public login flow can
+    // bounce straight back into the app after atproto OAuth completes.
+    const returnUrl = new URL(atprotoLoginUrl);
+    if (mobileRedirectUri) {
+      returnUrl.searchParams.set("mobile_redirect_uri", mobileRedirectUri);
+      returnUrl.searchParams.set("mobile_state", mobileState);
+    }
+    if (h) returnUrl.searchParams.set("handle", h);
+    window.location.href = returnUrl.toString();
+  }, [atprotoLoginUrl, mobileRedirectUri, mobileState, atprotoHandle]);
+
+  if (configLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-background to-muted/30">
+        <div className="w-full max-w-sm mx-auto px-4 text-center" role="status">
+          <Loader2 className="w-8 h-8 animate-spin text-primary mx-auto" />
+          <span className="sr-only">{t("loading")}</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (configError) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-background to-muted/30">
+        <div className="w-full max-w-md mx-auto px-4 text-center">
+          <div className="rounded-2xl border border-border/60 bg-background/80 backdrop-blur-sm shadow-xl p-8">
+            <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-red-500/10 mb-5">
+              <AlertCircle className="w-8 h-8 text-red-500" />
+            </div>
+            <h1 className="text-xl font-semibold text-foreground mb-2">{t("config_error.title")}</h1>
+            <p className="text-muted-foreground text-sm leading-relaxed">
+              {t("config_error.fetch_failed")}
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!serverUrl && !demoMode && !allowCustomJmapEndpoint) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-background to-muted/30">
+        <div className="w-full max-w-md mx-auto px-4 text-center">
+          <div className="rounded-2xl border border-border/60 bg-background/80 backdrop-blur-sm shadow-xl p-8">
+            <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-red-500/10 mb-5">
+              <AlertCircle className="w-8 h-8 text-red-500" />
+            </div>
+            <h1 className="text-xl font-semibold text-foreground mb-2">{t("config_error.title")}</h1>
+            <p className="text-muted-foreground text-sm leading-relaxed">
+              {t("config_error.server_not_configured")}
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const saveUsername = (username: string) => {
+    const saved = localStorage.getItem("webmail_usernames");
+    let usernames: string[] = [];
+
+    if (saved) {
+      try {
+        usernames = JSON.parse(saved);
+      } catch {
+        console.error("Failed to parse saved usernames");
+      }
+    }
+
+    if (!usernames.includes(username)) {
+      usernames = [username, ...usernames].slice(0, 5);
+      localStorage.setItem("webmail_usernames", JSON.stringify(usernames));
+      setSavedUsernames(usernames);
+    }
+  };
+
+  const removeUsername = (username: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const updated = savedUsernames.filter(u => u !== username);
+    localStorage.setItem("webmail_usernames", JSON.stringify(updated));
+    setSavedUsernames(updated);
+    setFilteredSuggestions(updated.filter(u =>
+      u.toLowerCase().includes(formData.username.toLowerCase())
+    ));
+  };
+
+  const handleUsernameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setFormData({ ...formData, username: e.target.value });
+  };
+
+  const handleUsernameFocus = () => {
+    if (savedUsernames.length > 0 && formData.username === "") {
+      setFilteredSuggestions(savedUsernames);
+      setShowSuggestions(true);
+    } else if (filteredSuggestions.length > 0) {
+      setShowSuggestions(true);
+    }
+  };
+
+  const selectSuggestion = (username: string) => {
+    justSelectedSuggestion.current = true;
+    setFormData({ ...formData, username });
+    setShowSuggestions(false);
+    document.getElementById("password")?.focus();
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (!showSuggestions || filteredSuggestions.length === 0) return;
+
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setSelectedSuggestionIndex(prev =>
+        prev < filteredSuggestions.length - 1 ? prev + 1 : prev
+      );
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setSelectedSuggestionIndex(prev => prev > 0 ? prev - 1 : -1);
+    } else if (e.key === "Enter" && selectedSuggestionIndex >= 0) {
+      e.preventDefault();
+      selectSuggestion(filteredSuggestions[selectedSuggestionIndex]);
+    } else if (e.key === "Escape") {
+      setShowSuggestions(false);
+      setSelectedSuggestionIndex(-1);
+    }
+  };
+
+  // Lite on Stalwart: the redirect flow without a server (lib/auth/lite-oauth.ts).
+  // Discovery needs the account, which decides the provider.
+  const startLiteOAuth = async (liteServerUrl: string) => {
+    const account = formData.username.trim();
+    if (!account) {
+      inputRef.current?.focus();
+      inputRef.current?.reportValidity();
+      return;
+    }
+    setOauthLoading(true);
+    setLiteOAuthFailed(false);
+    const discovery = await liteDiscoverOAuth(liteServerUrl, account);
+    if (!discovery) {
+      setLiteOAuthFailed(true);
+      setOauthLoading(false);
+      return;
+    }
+
+    const verifier = generateCodeVerifier();
+    const challenge = await generateCodeChallenge(verifier);
+    const state = generateState();
+    const redirectUri = getLiteOAuthRedirectUri();
+    const clientId = getLiteClientId();
+
+    sessionStorage.setItem("oauth_code_verifier", verifier);
+    sessionStorage.setItem("oauth_state", state);
+    sessionStorage.setItem("oauth_server_url", liteServerUrl);
+    sessionStorage.removeItem("oauth_server_id");
+    if (isAddAccountMode) {
+      sessionStorage.setItem("oauth_add_account_mode", "true");
+    }
+    sessionStorage.setItem("oauth_cookie_slot", useAccountStore.getState().getNextCookieSlot().toString());
+    saveLiteOAuthFlow({
+      tokenEndpoint: discovery.metadata.token_endpoint,
+      clientId,
+      redirectUri,
+      persistent: rememberMeEnabled && rememberMe,
+      revocationEndpoint: discovery.metadata.revocation_endpoint,
+    });
+
+    const authUrl = new URL(discovery.metadata.authorization_endpoint);
+    authUrl.searchParams.set("response_type", "code");
+    authUrl.searchParams.set("client_id", clientId);
+    authUrl.searchParams.set("redirect_uri", redirectUri);
+    if (discovery.scope) authUrl.searchParams.set("scope", discovery.scope);
+    authUrl.searchParams.set("state", state);
+    authUrl.searchParams.set("code_challenge", challenge);
+    authUrl.searchParams.set("code_challenge_method", "S256");
+    authUrl.searchParams.set("login_hint", account);
+    if (isAddAccountMode) {
+      authUrl.searchParams.set("prompt", "select_account");
+    }
+
+    window.location.href = authUrl.toString();
+  };
+
+  /**
+   * Starts OAuth for the selected server, or for `target`: a server in the
+   * list with its own OAuth client (a Gmail bridge, say), offered on the page
+   * whichever server is selected so that "Sign in with Google" is one tap.
+   */
+  const handleOAuthLogin = async (target?: PublicJmapServerEntry) => {
+    if (LITE_OAUTH_AVAILABLE && !target) {
+      await startLiteOAuth(probeTarget);
+      return;
+    }
+    const server = target ?? selectedServer;
+    const clientId = target ? target.oauth?.clientId : effectiveOauthClientId;
+    let metadata = target ? null : oauthMetadata;
+    if (target) {
+      setOauthLoading(true);
+      setSelectedServerId(target.id);
+      try {
+        const res = await apiFetch(`/api/auth/oauth/metadata?server_id=${encodeURIComponent(target.id)}`);
+        metadata = res.ok ? ((await res.json()) as OAuthMetadata) : null;
+      } catch {
+        metadata = null;
+      }
+      if (!metadata) {
+        // The target is now the selected server: its discovery runs again and
+        // the page shows the usual "discovery failed" notice.
+        setOauthLoading(false);
+        return;
+      }
+    }
+    if (!metadata || !clientId) return;
+    // In mobile-handoff mode the client-side PKCE flow doesn't help us:
+    // tokens would land in sessionStorage on the webmail origin and the
+    // mobile app couldn't read them. Route through the server-side SSO
+    // path instead, which has the mobile-aware /api/auth/sso/complete
+    // branch.
+    if (isMobileHandoff) {
+      await startServerSideSso();
+      return;
+    }
+    setOauthLoading(true);
+
+    const verifier = generateCodeVerifier();
+    const challenge = await generateCodeChallenge(verifier);
+    const state = generateState();
+    const prefix = getPathPrefix(params.locale as string);
+    const redirectUri = `${window.location.origin}${prefix}/${params.locale}/auth/callback`;
+
+    // Resolve the JMAP URL to send to the callback. Server-list entries win
+    // over the custom-endpoint input, which wins over the global server URL.
+    const oauthServerUrl = server?.url
+      || (allowCustomJmapEndpoint ? jmapEndpoint : configuredServerUrl);
+
+    sessionStorage.setItem("oauth_code_verifier", verifier);
+    sessionStorage.setItem("oauth_state", state);
+    sessionStorage.setItem("oauth_server_url", oauthServerUrl!);
+    if (server?.id) {
+      sessionStorage.setItem("oauth_server_id", server.id);
+    } else {
+      sessionStorage.removeItem("oauth_server_id");
+    }
+    if (isAddAccountMode) {
+      sessionStorage.setItem("oauth_add_account_mode", "true");
+    }
+
+    // Persist the next-free cookie slot so loginWithOAuth (in stores/auth-store.ts)
+    // writes the refresh token to the correct per-account jmap_rt_<slot> cookie.
+    // loginWithOAuth reads this key but it was previously never written, so every
+    // OAuth account collapsed onto slot 0 and clobbered earlier accounts' refresh
+    // tokens. getNextCookieSlot() returns 0 when no accounts exist (correct for
+    // first sign-in) and the lowest unused slot otherwise (correct for "+ Add
+    // Account").
+    const nextSlot = useAccountStore.getState().getNextCookieSlot();
+    sessionStorage.setItem("oauth_cookie_slot", nextSlot.toString());
+
+    const authUrl = new URL(metadata.authorization_endpoint);
+    authUrl.searchParams.set("response_type", "code");
+    authUrl.searchParams.set("client_id", clientId);
+    authUrl.searchParams.set("redirect_uri", redirectUri);
+    authUrl.searchParams.set("scope", oauthScopes || DEFAULT_OAUTH_SCOPES);
+    authUrl.searchParams.set("state", state);
+    authUrl.searchParams.set("code_challenge", challenge);
+    authUrl.searchParams.set("code_challenge_method", "S256");
+    if (isAddAccountMode) {
+      authUrl.searchParams.set("prompt", "select_account");
+    }
+
+    window.location.href = authUrl.toString();
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    // Server-list entries always win - `allowCustomJmapEndpoint` is only honored
+    // when the admin hasn't configured a server list.
+    const effectiveServerUrl = selectedServer?.url
+      || (allowCustomJmapEndpoint ? jmapEndpoint : serverUrl);
+    if (signInWithToken) {
+      if (await loginWithToken(effectiveServerUrl, accessToken, rememberMeEnabled && rememberMe)) {
+        router.push('/');
+      }
+      return;
+    }
+    // Lite on Stalwart: an account whose domain signs in at an external
+    // provider has no password Stalwart could check. Asked again here (cached)
+    // because Enter can beat the debounced lookup; a name without a domain is
+    // always Stalwart's own.
+    if (LITE_OAUTH_AVAILABLE && formData.username.includes("@")) {
+      const discovery = await liteDiscoverOAuth(effectiveServerUrl, formData.username);
+      if (discovery?.external) {
+        await startLiteOAuth(effectiveServerUrl);
+        return;
+      }
+    }
+    // Capture before login() so the isAuthenticated effect can build the
+    // deep-link fragment with values the user actually typed (formData may
+    // be cleared by the auth store on success).
+    if (isMobileHandoff) {
+      mobileHandoffPayloadRef.current = {
+        server_url: effectiveServerUrl,
+        username: formData.username,
+        password: formData.password,
+      };
+    }
+    const success = await login(
+      effectiveServerUrl,
+      formData.username,
+      formData.password,
+      totpCode || undefined,
+      // Only persist credentials when the server actually supports it
+      // (a SESSION_SECRET is configured). Prevents a broken cookie write
+      // when the remember-me feature is disabled server-side.
+      rememberMeEnabled && rememberMe
+    );
+
+    if (success) {
+      // Suggested again on this browser only when the user did not decline
+      // being remembered: on a shared computer the next person sees the list.
+      if (!rememberMeEnabled || rememberMe) saveUsername(formData.username);
+      if (isMobileHandoff) {
+        // The isAuthenticated effect handles the redirect; nothing else to
+        // do here. Don't push to / - that would race the deep link.
+        return;
+      }
+      router.push('/');
+    } else if (isMobileHandoff) {
+      // Stale payload should never feed into a later retry's redirect.
+      mobileHandoffPayloadRef.current = null;
+    }
+  };
+
+  const handleDevLogin = async () => {
+    // Remember the session when the server supports it so dev reloads restore
+    // through the same cookie path production remember-me/OAuth users take,
+    // instead of bouncing to the login page.
+    const success = await login(serverUrl, "dev@localhost", "dev", undefined, rememberMeEnabled);
+    if (success) {
+      let redirectTo = '/';
+      try {
+        const saved = sessionStorage.getItem('redirect_after_login');
+        if (saved) {
+          sessionStorage.removeItem('redirect_after_login');
+          redirectTo = saved;
+        }
+      } catch { /* ignore */ }
+      router.push(toRouterPath(redirectTo));
+    }
+  };
+
+  const handleDemoLogin = async () => {
+    setDemoLoading(true);
+    const success = await loginDemo();
+    if (success) {
+      router.push('/');
+    }
+    setDemoLoading(false);
+  };
+
+  const currentThemeOption = THEME_OPTIONS.find(o => o.value === theme) || THEME_OPTIONS[2];
+  const CurrentThemeIcon = currentThemeOption.icon;
+
+  // Server picker (when admin has configured a server list). Rendered by both
+  // the password form and the OAuth-only branch - with several servers the user
+  // has to pick which one SSO targets before the button starts the flow, since
+  // the selection drives OAuth discovery and the server_id sent to the callback
+  // (issue #799).
+  const serverPicker = hasServerList && jmapServers.length > 1 ? (
+    <div className="space-y-1.5">
+      <label htmlFor="jmap-server-select" className="block text-sm font-medium text-foreground">
+        {t("jmap_server_label")}
+      </label>
+      <select
+        id="jmap-server-select"
+        value={selectedServer?.id ?? ""}
+        onChange={(e) => setSelectedServerId(e.target.value)}
+        disabled={domainAutoLocked || oauthLoading}
+        className="h-11 w-full px-3.5 bg-muted/40 border border-border/60 rounded-xl focus:bg-background focus:border-primary/50 transition-all duration-200 text-sm text-foreground disabled:opacity-70 disabled:cursor-not-allowed"
+      >
+        {jmapServers.map((s) => (
+          <option key={s.id} value={s.id}>{s.label}</option>
+        ))}
+      </select>
+      {domainAutoLocked && (
+        <p className="text-[11px] text-muted-foreground leading-snug">
+          {t("jmap_server_auto_picked")}
+        </p>
+      )}
+    </div>
+  ) : null;
+
+  // Other servers in the list that sign in with their own OAuth client get a
+  // button of their own, so signing in with Google does not first mean finding
+  // the bridge in the server menu. Not in mobile handoff, which signs in
+  // server-side against the selected server.
+  const otherOauthServers = isMobileHandoff
+    ? []
+    : jmapServers.filter((s) => offersOwnOAuth(s) && s.id !== selectedServer?.id);
+  const otherOauthButtons = otherOauthServers.map((s) => (
+    <Button
+      key={s.id}
+      type="button"
+      variant="outline"
+      className="w-full h-11 font-medium text-[15px] rounded-xl border-border/60 hover:bg-muted/50"
+      onClick={() => handleOAuthLogin(s)}
+      disabled={oauthLoading || isLoading}
+    >
+      <LogIn className="w-4 h-4 me-2" />
+      {s.oauth?.buttonLabel}
+    </Button>
+  ));
+
+  // Demo-only mode: show only a large demo login button
+  if (demoMode && !isAddAccountMode) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center bg-gradient-to-br from-background via-muted/10 to-muted/30 relative px-4">
+        {/* Theme toggle */}
+        <div className="absolute top-5 right-5" ref={themeMenuRef} suppressHydrationWarning>
+          <button
+            type="button"
+            ref={themeButtonRef}
+            onClick={() => setShowThemeMenu(!showThemeMenu)}
+            className={cn(
+              "flex items-center gap-2 px-3 py-2 rounded-xl border text-sm transition-all duration-200",
+              showThemeMenu
+                ? "bg-secondary border-border text-foreground shadow-md"
+                : "bg-background/60 backdrop-blur-sm border-border/50 text-muted-foreground hover:text-foreground hover:bg-secondary/80 hover:border-border"
+            )}
+            aria-label={`Theme: ${currentThemeOption.label}`}
+            aria-expanded={showThemeMenu}
+            aria-haspopup="menu"
+          >
+            <CurrentThemeIcon className="w-4 h-4" />
+            <span className="hidden sm:inline" suppressHydrationWarning>{currentThemeOption.label}</span>
+          </button>
+
+          {showThemeMenu && (
+            <div
+              ref={themeListRef}
+              onKeyDown={onThemeMenuKeyDown}
+              className="absolute right-0 top-full mt-2 w-40 rounded-xl border border-border bg-background shadow-lg overflow-hidden animate-fade-in z-50"
+              role="menu"
+              aria-label="Theme selection"
+            >
+              {THEME_OPTIONS.map((option) => {
+                const Icon = option.icon;
+                const isActive = theme === option.value;
+                return (
+                  <button
+                    key={option.value}
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={isActive}
+                    onClick={() => handleThemeSelect(option.value)}
+                    className={cn(
+                      "w-full flex items-center gap-3 px-3.5 py-2.5 text-sm transition-colors",
+                      isActive
+                        ? "bg-primary/10 text-foreground font-medium"
+                        : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                    )}
+                  >
+                    <Icon className="w-4 h-4" />
+                    <span className="flex-1 text-start">{option.label}</span>
+                    {isActive && <Check className="w-3.5 h-3.5 text-primary" />}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        <main className="w-full max-w-[440px] mx-auto">
+          <div className="rounded-2xl border border-border/60 bg-background/80 backdrop-blur-sm shadow-xl shadow-black/5 dark:shadow-black/20 overflow-hidden">
+            {/* Header with logo */}
+            <div className="px-8 pt-12 pb-4 text-center">
+              <div className="inline-flex items-center justify-center w-20 h-20 mb-6">
+                <img
+                  src={withBasePath(resolvedTheme === 'dark' ? loginLogoDarkUrl : loginLogoLightUrl)}
+                  alt={appName}
+                  className="max-w-20 max-h-20 object-contain"
+                />
+              </div>
+              <h1 className="text-3xl font-bold text-foreground tracking-tight">
+                {appName}
+              </h1>
+              <p className="text-base text-muted-foreground mt-2 max-w-xs mx-auto leading-relaxed">
+                {t("demo_tagline")}
+              </p>
+            </div>
+
+            {/* Large demo button */}
+            <div className="px-8 pb-10 pt-4">
+              {error && (
+                <div className={cn(
+                  "mb-5 p-3 rounded-xl border border-destructive/20 bg-destructive/5 flex items-start gap-3",
+                  shakeError && "animate-shake"
+                )}>
+                  <div className="w-10 h-10 rounded-full bg-destructive/15 text-destructive flex items-center justify-center flex-shrink-0 shadow-sm">
+                    <AlertCircle className="w-5 h-5" />
+                  </div>
+                  <div className="flex-1 min-w-0 self-center">
+                    <p className="text-sm text-destructive leading-relaxed">
+                      {t(`error.${error}`) || t("error.generic")}
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              <Button
+                type="button"
+                className="w-full h-14 font-semibold text-lg bg-primary hover:bg-primary/90 transition-all duration-200 rounded-xl shadow-lg shadow-primary/25 hover:shadow-xl hover:shadow-primary/30 hover:scale-[1.02] active:scale-[0.98]"
+                onClick={handleDemoLogin}
+                disabled={demoLoading || isLoading}
+              >
+                {demoLoading ? (
+                  <div className="flex items-center gap-3">
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    {t("demo_launching")}
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-3">
+                    <Play className="w-5 h-5" />
+                    {t("demo_login_button")}
+                  </div>
+                )}
+              </Button>
+
+              <p className="text-center text-sm text-muted-foreground mt-4 leading-relaxed">
+                {t("demo_no_signup")}
+              </p>
+            </div>
+          </div>
+
+          {/* Footer */}
+          <div className="mt-6 flex flex-col items-center gap-2">
+            {loginCompanyName && (
+              <p className="text-center text-xs text-muted-foreground/60 font-medium">
+                {loginCompanyName}
+              </p>
+            )}
+            {(loginImprintUrl || loginPrivacyPolicyUrl || loginWebsiteUrl) && (
+              <div className="flex items-center gap-3 flex-wrap justify-center">
+                {loginWebsiteUrl && (
+                  <a href={loginWebsiteUrl} target="_blank" rel="noopener noreferrer" className="text-xs text-muted-foreground/50 hover:text-muted-foreground transition-colors">
+                    {t("website")}
+                  </a>
+                )}
+                {loginImprintUrl && (
+                  <a href={loginImprintUrl} target="_blank" rel="noopener noreferrer" className="text-xs text-muted-foreground/50 hover:text-muted-foreground transition-colors">
+                    {t("imprint")}
+                  </a>
+                )}
+                {loginPrivacyPolicyUrl && (
+                  <a href={loginPrivacyPolicyUrl} target="_blank" rel="noopener noreferrer" className="text-xs text-muted-foreground/50 hover:text-muted-foreground transition-colors">
+                    {t("privacy_policy")}
+                  </a>
+                )}
+              </div>
+            )}
+            {loginShowVersion && <VersionBadge />}
+          </div>
+        </main>
+      </div>
+    );
+  }
+
+  // Hosted Comail entry. Keep upstream/self-hosted password and OAuth modes on
+  // the generic card below; ATPROTO_LOGIN_URL is the explicit signal that this
+  // instance should wear the full Comail marketing shell.
+  if (atprotoLoginUrl && !devMode) {
+    return (
+      <div
+        data-testid="comail-atproto-login"
+        className="min-h-screen bg-background text-foreground lg:grid lg:grid-cols-[minmax(320px,1fr)_minmax(520px,1fr)]"
+      >
+        <aside className="hidden min-h-screen border-r border-border bg-background px-12 py-14 text-foreground lg:flex lg:flex-col lg:justify-between xl:px-16">
+          <div className="mx-auto my-auto flex w-full max-w-md flex-col items-center text-center">
+            <img
+              src={withBasePath("/branding/comail/cammie-wiggle.gif")}
+              alt=""
+              className="h-auto w-56 object-contain"
+            />
+            <img
+              src={withBasePath("/branding/comail/comail-logo.svg")}
+              alt="comail"
+              className="mt-8 h-auto w-44"
+            />
+            <p className="mt-4 text-lg font-medium text-muted-foreground">
+              your inbox, atproto-native
+            </p>
+          </div>
+          <p className="text-center text-sm text-muted-foreground">
+            cooperative email for atproto
+          </p>
+        </aside>
+
+        <section className="relative flex min-h-screen flex-col bg-sidebar text-sidebar-foreground">
+          <div className="absolute right-5 top-5 z-20" ref={themeMenuRef} suppressHydrationWarning>
+            <button
+              type="button"
+              onClick={() => setShowThemeMenu(!showThemeMenu)}
+              className={cn(
+                "flex items-center gap-2 rounded-md border px-3 py-2 text-sm transition-colors",
+                showThemeMenu
+                  ? "border-sidebar-border bg-sidebar-accent text-sidebar-accent-foreground"
+                  : "border-sidebar-border bg-sidebar/80 text-sidebar-foreground/75 hover:bg-sidebar-accent hover:text-sidebar-foreground",
+              )}
+              aria-label={`Theme: ${currentThemeOption.label}`}
+              aria-expanded={showThemeMenu}
+              aria-haspopup="listbox"
+            >
+              <CurrentThemeIcon className="h-4 w-4" />
+              <span className="hidden sm:inline" suppressHydrationWarning>{currentThemeOption.label}</span>
+            </button>
+            {showThemeMenu && (
+              <div
+                className="absolute right-0 top-full z-50 mt-2 w-40 overflow-hidden rounded-md border border-border bg-popover text-popover-foreground shadow-lg"
+                role="listbox"
+                aria-label="Theme selection"
+              >
+                {THEME_OPTIONS.map((option) => {
+                  const Icon = option.icon;
+                  const isActive = theme === option.value;
+                  return (
+                    <button
+                      key={option.value}
+                      type="button"
+                      role="option"
+                      aria-selected={isActive}
+                      onClick={() => handleThemeSelect(option.value)}
+                      className={cn(
+                        "flex w-full items-center gap-3 px-3.5 py-2.5 text-sm transition-colors",
+                        isActive
+                          ? "bg-accent font-medium text-accent-foreground"
+                          : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                      )}
+                    >
+                      <Icon className="h-4 w-4" />
+                      <span className="flex-1 text-start">{option.label}</span>
+                      {isActive && <Check className="h-3.5 w-3.5 text-primary" />}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          <header className="flex items-center gap-3 border-b border-sidebar-border px-5 py-4 pr-28 lg:hidden">
+            <img
+              src={withBasePath("/branding/comail/cammie-mark.png")}
+              alt=""
+              className="h-10 w-10 object-contain"
+            />
+            <img
+              src={withBasePath("/branding/comail/comail-logo-dark.svg")}
+              alt="comail"
+              className="h-auto w-28"
+            />
+          </header>
+
+          <main className="flex flex-1 items-center justify-center px-6 py-16 sm:px-10">
+            <div className="w-full max-w-md">
+              <p className="mb-3 text-xs font-bold uppercase tracking-[0.16em] text-sidebar-foreground/70">
+                comail inbox
+              </p>
+              <h1 className="text-4xl text-sidebar-foreground">
+                {isAddAccountMode ? t("add_account_title") : t("sign_in")}
+              </h1>
+              <p className="mt-2 text-base leading-relaxed text-sidebar-foreground/75">
+                {isAddAccountMode ? t("add_account_subtitle") : t("atproto_only_hint")}
+              </p>
+
+              {sessionExpired && (
+                <div
+                  className="mt-6 flex items-start gap-3 rounded-md border border-sidebar-border bg-sidebar-accent p-3"
+                  role="status"
+                  aria-live="polite"
+                >
+                  <Info className="mt-0.5 h-5 w-5 flex-shrink-0 text-sidebar-accent-foreground" />
+                  <p className="flex-1 text-sm leading-relaxed text-sidebar-accent-foreground">{t("session_expired")}</p>
+                  <button
+                    type="button"
+                    onClick={() => setSessionExpired(false)}
+                    className="rounded p-1 text-sidebar-accent-foreground/70 hover:bg-sidebar hover:text-sidebar-foreground"
+                    aria-label={t("dismiss")}
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+              )}
+
+              {error && (
+                <div
+                  className={cn(
+                    "mt-6 flex items-start gap-3 rounded-md border border-destructive/40 bg-card p-3",
+                    shakeError && "animate-shake",
+                  )}
+                  role="alert"
+                >
+                  <AlertCircle className="mt-0.5 h-5 w-5 flex-shrink-0 text-destructive" />
+                  <p className="text-sm leading-relaxed text-destructive">
+                    {t(`error.${error}`) || t("error.generic")}
+                  </p>
+                </div>
+              )}
+
+              <form
+                onSubmit={(e) => { e.preventDefault(); handleAtprotoLogin(); }}
+                className="mt-8 space-y-5"
+                aria-label={t("sign_in")}
+              >
+                <div className="space-y-2">
+                  <label htmlFor="atproto-handle" className="block text-sm font-bold text-sidebar-foreground">
+                    {t("atproto_handle_label")}
+                  </label>
+                  <HandleCombobox
+                    id="atproto-handle"
+                    value={atprotoHandle}
+                    onChange={(v) => {
+                      setAtprotoHandle(v);
+                      if (atprotoHandleError) setAtprotoHandleError(false);
+                    }}
+                    className="h-12 rounded-md border-sidebar-border bg-card px-3.5 text-card-foreground focus:border-ring"
+                    placeholder={t("atproto_handle_placeholder")}
+                    aria-invalid={atprotoHandleError}
+                    aria-describedby={atprotoHandleError ? "atproto-handle-error" : "atproto-handle-help"}
+                    autoFocus
+                  />
+                  {atprotoHandleError ? (
+                    <p id="atproto-handle-error" role="alert" className="text-sm leading-snug text-destructive">
+                      {t("atproto_handle_invalid")}
+                    </p>
+                  ) : (
+                    <p id="atproto-handle-help" className="text-sm text-sidebar-foreground/75">
+                      Your Bluesky or atproto handle. Comail never asks for your password.
+                    </p>
+                  )}
+                </div>
+                <Button
+                  type="submit"
+                  className="h-12 w-full rounded-md bg-card text-base font-bold text-card-foreground shadow-sm hover:bg-card/90"
+                  disabled={isLoading || atprotoResolving || !atprotoHandle.trim()}
+                >
+                  {isLoading || atprotoResolving ? (
+                    <div className="flex items-center gap-2">
+                      <Loader2 className="h-5 w-5 animate-spin" />
+                      {t("signing_in")}
+                    </div>
+                  ) : (
+                    t("sign_in")
+                  )}
+                </Button>
+              </form>
+            </div>
+          </main>
+
+          <footer className="mx-auto w-[calc(100%-3rem)] max-w-xl border-t border-sidebar-border py-5 text-xs leading-relaxed text-sidebar-foreground/70 sm:w-[calc(100%-5rem)]">
+            <p>
+              <strong className="text-sidebar-foreground">comail</strong>
+              <span aria-hidden="true"> · </span>
+              Atmosphere Mail LLC
+              <span aria-hidden="true"> · </span>
+              cooperative email for atproto
+            </p>
+            <nav className="mt-1 flex flex-wrap gap-x-1" aria-label="footer">
+              {[
+                ["Terms", "https://comail.at/terms"],
+                ["Privacy", "https://comail.at/privacy"],
+                ["Acceptable use", "https://comail.at/aup"],
+                ["Docs", "https://comail.at/docs"],
+                ["FAQ", "https://comail.at/faq"],
+                ["About", "https://comail.at/about"],
+                ["Source", configSourceCodeUrl || process.env.NEXT_PUBLIC_CORRESPONDING_SOURCE_URL || "https://github.com/comail-atproto/bulwark"],
+              ].map(([label, href], index) => (
+                <span key={href}>
+                  {index > 0 && <span aria-hidden="true"> · </span>}
+                  <a className="underline decoration-sidebar-border underline-offset-2 hover:text-sidebar-foreground" href={href}>{label}</a>
+                </span>
+              ))}
+            </nav>
+            <div className="mt-1 flex flex-wrap items-center gap-x-2">
+              <VersionBadge />
+              <span aria-hidden="true">·</span>
+              <span>Follow us <a className="underline decoration-sidebar-border underline-offset-2 hover:text-sidebar-foreground" href="https://bsky.app/profile/comail.at">@comail.at</a></span>
+            </div>
+          </footer>
+        </section>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen flex flex-col items-center justify-center bg-gradient-to-br from-background via-muted/10 to-muted/30 relative px-4">
+      {/* Theme toggle - top right, dropdown style */}
+      <div className="absolute top-5 right-5" ref={themeMenuRef} suppressHydrationWarning>
+        <button
+          type="button"
+          ref={themeButtonRef}
+          onClick={() => setShowThemeMenu(!showThemeMenu)}
+          className={cn(
+            "flex items-center gap-2 px-3 py-2 rounded-xl border text-sm transition-all duration-200",
+            showThemeMenu
+              ? "bg-secondary border-border text-foreground shadow-md"
+              : "bg-background/60 backdrop-blur-sm border-border/50 text-muted-foreground hover:text-foreground hover:bg-secondary/80 hover:border-border"
+          )}
+          aria-label={`Theme: ${currentThemeOption.label}`}
+          aria-expanded={showThemeMenu}
+          aria-haspopup="menu"
+        >
+          <CurrentThemeIcon className="w-4 h-4" />
+          <span className="hidden sm:inline" suppressHydrationWarning>{currentThemeOption.label}</span>
+        </button>
+
+        {showThemeMenu && (
+          <div
+            ref={themeListRef}
+            onKeyDown={onThemeMenuKeyDown}
+            className="absolute right-0 top-full mt-2 w-40 rounded-xl border border-border bg-background shadow-lg overflow-hidden animate-fade-in z-50"
+            role="menu"
+            aria-label="Theme selection"
+          >
+            {THEME_OPTIONS.map((option) => {
+              const Icon = option.icon;
+              const isActive = theme === option.value;
+              return (
+                <button
+                  key={option.value}
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={isActive}
+                  onClick={() => handleThemeSelect(option.value)}
+                  className={cn(
+                    "w-full flex items-center gap-3 px-3.5 py-2.5 text-sm transition-colors",
+                    isActive
+                      ? "bg-primary/10 text-foreground font-medium"
+                      : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                  )}
+                >
+                  <Icon className="w-4 h-4" />
+                  <span className="flex-1 text-start">{option.label}</span>
+                  {isActive && <Check className="w-3.5 h-3.5 text-primary" />}
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      <main className="w-full max-w-[400px] mx-auto">
+        {/* Card container */}
+        <div className="rounded-2xl border border-border/60 bg-background/80 backdrop-blur-sm shadow-xl shadow-black/5 dark:shadow-black/20 overflow-hidden">
+          {/* Header section with logo */}
+          <div className="px-8 pt-10 pb-6 text-center">
+            <div className={cn("inline-flex items-center justify-center mb-5", !hasLogoSize && "w-16 h-16")}>
+              <img
+                src={withBasePath(resolvedTheme === 'dark' ? loginLogoDarkUrl : loginLogoLightUrl)}
+                alt={appName}
+                className={cn("object-contain", !hasLogoSize && "max-w-16 max-h-16")}
+                style={loginLogoStyle}
+              />
+            </div>
+            {loginShowHeading && (
+              <h1 className="text-2xl font-semibold text-foreground tracking-tight">
+                {isAddAccountMode ? t("add_account_title") : appName}
+              </h1>
+            )}
+            {loginShowSubtitle && (
+              <p className="text-sm text-muted-foreground mt-1.5">
+                {isAddAccountMode ? t("add_account_subtitle") : (t("title") !== appName ? t("title") : "Sign in to your account")}
+              </p>
+            )}
+          </div>
+
+          {/* Form section */}
+          <div className="px-8 pb-8">
+            {/* Session Expired Banner */}
+            {sessionExpired && (
+              <div
+                className="mb-5 p-3 rounded-xl border border-info/20 bg-info/5 flex items-start gap-3"
+                role="status"
+                aria-live="polite"
+              >
+                <div className="w-10 h-10 rounded-full bg-info/15 text-info flex items-center justify-center flex-shrink-0 shadow-sm">
+                  <Info className="w-5 h-5" />
+                </div>
+                <div className="flex-1 min-w-0 self-center flex items-center gap-2">
+                  <p className="text-sm text-info flex-1 leading-relaxed">
+                    {t("session_expired")}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setSessionExpired(false)}
+                    className="p-1 rounded-md text-info hover:bg-info/10 transition-colors flex-shrink-0"
+                    aria-label={t("dismiss")}
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Error Message */}
+            {error && (
+              <div className={cn(
+                "mb-5 p-3 rounded-xl border border-destructive/20 bg-destructive/5 flex items-start gap-3",
+                shakeError && "animate-shake"
+              )}>
+                <div className="w-10 h-10 rounded-full bg-destructive/15 text-destructive flex items-center justify-center flex-shrink-0 shadow-sm">
+                  <AlertCircle className="w-5 h-5" />
+                </div>
+                <div className="flex-1 min-w-0 self-center">
+                  <p className="text-sm text-destructive leading-relaxed">
+                    {error === 'invalid_credentials' && showTotpField && totpCode
+                      ? t('error.totp_invalid')
+                      : t(`error.${error}`) || t("error.generic")}
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* Dev Mode: One-click login */}
+            {devMode ? (
+              <div className="space-y-4">
+                <Button
+                  type="button"
+                  className="w-full h-12 font-medium text-base bg-primary hover:bg-primary/90 transition-all duration-200 rounded-xl shadow-lg shadow-primary/20"
+                  onClick={handleDevLogin}
+                  disabled={isLoading}
+                >
+                  {isLoading ? (
+                    <div className="flex items-center gap-2">
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      {t("signing_in")}
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <LogIn className="w-4 h-4" />
+                      {t("sign_in")}
+                    </div>
+                  )}
+                </Button>
+                <p className="text-center text-xs text-muted-foreground">
+                  Dev mode - logging in as dev@localhost
+                </p>
+              </div>
+            ) : atprotoLoginUrl ? (
+              /* comail atproto-only mode: hide username/password, single
+                 handle-entry point. The handle is forwarded to the relay as
+                 ?handle= so it skips its own form and goes straight to the
+                 member's PDS OAuth. */
+              <form onSubmit={(e) => { e.preventDefault(); handleAtprotoLogin(); }} className="space-y-4">
+                <div className="space-y-1.5">
+                  <label htmlFor="atproto-handle" className="block text-sm font-medium text-foreground">
+                    {t("atproto_handle_label")}
+                  </label>
+                  <HandleCombobox
+                    id="atproto-handle"
+                    value={atprotoHandle}
+                    onChange={(v) => {
+                      setAtprotoHandle(v);
+                      if (atprotoHandleError) setAtprotoHandleError(false);
+                    }}
+                    className="h-11 px-3.5 bg-muted/40 border-border/60 rounded-xl focus:bg-background focus:border-primary/50 transition-all duration-200"
+                    placeholder={t("atproto_handle_placeholder")}
+                    aria-invalid={atprotoHandleError}
+                    aria-describedby={atprotoHandleError ? "atproto-handle-error" : undefined}
+                    autoFocus
+                  />
+                  {atprotoHandleError && (
+                    <p
+                      id="atproto-handle-error"
+                      role="alert"
+                      className="text-[13px] text-destructive leading-snug"
+                    >
+                      {t("atproto_handle_invalid")}
+                    </p>
+                  )}
+                </div>
+                <Button
+                  type="submit"
+                  className="w-full h-12 font-semibold text-base bg-primary hover:bg-primary/90 transition-all duration-200 rounded-xl shadow-lg shadow-primary/25 hover:shadow-xl hover:shadow-primary/30 hover:scale-[1.02] active:scale-[0.98]"
+                  disabled={isLoading || atprotoResolving || !atprotoHandle.trim()}
+                >
+                  {isLoading || atprotoResolving ? (
+                    <div className="flex items-center gap-2">
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                      {t("signing_in")}
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <LogIn className="w-5 h-5" />
+                      {t("sign_in_atproto")}
+                    </div>
+                  )}
+                </Button>
+                <p className="text-center text-sm text-muted-foreground leading-relaxed">
+                  {t("atproto_only_hint")}
+                </p>
+              </form>
+            ) : oauthOnly ? (
+              /* OAuth-only mode: server picker (if any) plus the SSO button */
+              <div className="space-y-4">
+                {serverPicker}
+                {oauthMetadata ? (
+                  <Button
+                    type="button"
+                    className="w-full h-11 font-medium text-[15px] bg-primary hover:bg-primary/90 transition-all duration-200 rounded-xl shadow-md shadow-primary/15 hover:shadow-lg hover:shadow-primary/20"
+                    onClick={() => handleOAuthLogin()}
+                    disabled={oauthLoading}
+                  >
+                    {oauthLoading ? (
+                      <div className="flex items-center gap-2">
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        {t("signing_in")}
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <LogIn className="w-4 h-4" />
+                        {selectedServer?.oauth?.buttonLabel || t("sign_in_sso")}
+                      </div>
+                    )}
+                  </Button>
+                ) : oauthDiscoveryDone ? (
+                  <div className="p-3 rounded-xl border border-warning/20 bg-warning/5 flex items-start gap-3">
+                    <div className="w-10 h-10 rounded-full bg-warning/15 text-warning flex items-center justify-center flex-shrink-0 shadow-sm">
+                      <AlertCircle className="w-5 h-5" />
+                    </div>
+                    <div className="flex-1 min-w-0 self-center">
+                      <p className="text-sm text-warning leading-relaxed">
+                        {t("error.oauth_discovery_failed")}
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex justify-center py-4">
+                    <Loader2 className="w-6 h-6 animate-spin text-primary" />
+                  </div>
+                )}
+              </div>
+            ) : (
+              /* Login Form */
+              <form onSubmit={handleSubmit} className="space-y-5">
+                <fieldset disabled={isLoading} className="space-y-4">
+                  {serverPicker}
+                  {/* JMAP Endpoint field (only when no server list and custom endpoints are allowed) */}
+                  {!hasServerList && allowCustomJmapEndpoint && (
+                    <div className="space-y-1.5">
+                      <label htmlFor="jmap-endpoint" className="block text-sm font-medium text-foreground">
+                        {t("jmap_endpoint_label")}
+                      </label>
+                      <Input
+                        id="jmap-endpoint"
+                        type="url"
+                        value={jmapEndpoint}
+                        onChange={(e) => setJmapEndpoint(e.target.value)}
+                        className="h-11 px-3.5 bg-muted/40 border-border/60 rounded-xl focus:bg-background focus:border-primary/50 transition-all duration-200"
+                        placeholder={t("jmap_endpoint_placeholder")}
+                        required
+                      />
+                      <p className="text-[11px] text-muted-foreground leading-snug">
+                        {t("jmap_endpoint_cors_hint")}
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Username field. The access token names the account, so
+                      token sign-in has none. */}
+                  <div className={cn("space-y-1.5", signInWithToken && "hidden")}>
+                    <label htmlFor="username" className="block text-sm font-medium text-foreground">
+                      {t("username_label")}
+                    </label>
+                    <div className="relative">
+                      <Input
+                        ref={inputRef}
+                        id="username"
+                        type="text"
+                        value={formData.username}
+                        onChange={handleUsernameChange}
+                        onFocus={handleUsernameFocus}
+                        onKeyDown={handleKeyDown}
+                        className="h-11 px-3.5 bg-muted/40 border-border/60 rounded-xl focus:bg-background focus:border-primary/50 transition-all duration-200"
+                        placeholder={t("username_placeholder")}
+                        required={!signInWithToken}
+                        autoComplete="off"
+                        data-form-type="other"
+                        data-lpignore="true"
+                        autoFocus
+                      />
+
+                      {/* Custom autocomplete dropdown */}
+                      {showSuggestions && filteredSuggestions.length > 0 && (
+                        <div
+                          ref={suggestionsRef}
+                          className="absolute top-full mt-1.5 w-full bg-background border border-border rounded-xl shadow-lg z-50 overflow-hidden"
+                        >
+                          {filteredSuggestions.map((username, index) => (
+                            <div
+                              key={username}
+                              className={cn(
+                                "px-3.5 py-2.5 flex items-center justify-between hover:bg-muted cursor-pointer transition-colors",
+                                index === selectedSuggestionIndex && "bg-muted"
+                              )}
+                              onClick={() => selectSuggestion(username)}
+                            >
+                              <span className="text-sm text-foreground">{username}</span>
+                              <button
+                                type="button"
+                                onClick={(e) => removeUsername(username, e)}
+                                className="p-1 hover:bg-secondary rounded-md transition-colors"
+                                title={t("remove_from_history")}
+                              >
+                                <X className="w-3 h-3 text-muted-foreground" />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Password field. Hidden for an account that signs in at an
+                      external provider (Lite on Stalwart): the submit button is
+                      the SSO button then. */}
+                  <div className={cn("space-y-1.5", (liteSsoRequired || signInWithToken) && "hidden")}>
+                    <label htmlFor="password" className="block text-sm font-medium text-foreground">
+                      {t("password_label")}
+                    </label>
+                    <div className="relative">
+                      <Input
+                        id="password"
+                        type={showPassword ? "text" : "password"}
+                        value={formData.password}
+                        onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+                        className="h-11 px-3.5 pe-11 bg-muted/40 border-border/60 rounded-xl focus:bg-background focus:border-primary/50 transition-all duration-200"
+                        placeholder={t("password_placeholder")}
+                        required={!liteSsoRequired && !signInWithToken}
+                        autoComplete="current-password"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowPassword(!showPassword)}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 p-1 rounded-md text-muted-foreground hover:text-foreground transition-colors"
+                        aria-label={showPassword ? t("hide_password") : t("show_password")}
+                        tabIndex={-1}
+                      >
+                        {showPassword ? (
+                          <EyeOff className="w-4 h-4" />
+                        ) : (
+                          <Eye className="w-4 h-4" />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  {signInWithToken && (
+                    <div className="space-y-1.5">
+                      <label htmlFor="access-token" className="block text-sm font-medium text-foreground">
+                        {t("token_label")}
+                      </label>
+                      <Input
+                        ref={tokenInputRef}
+                        id="access-token"
+                        type="password"
+                        value={accessToken}
+                        onChange={(e) => setAccessToken(e.target.value)}
+                        className="h-11 px-3.5 bg-muted/40 border-border/60 rounded-xl focus:bg-background focus:border-primary/50 transition-all duration-200 font-mono"
+                        placeholder={t("token_placeholder")}
+                        required
+                        autoComplete="off"
+                        spellCheck={false}
+                        data-lpignore="true"
+                      />
+                      <p className="text-[11px] text-muted-foreground leading-snug">
+                        {t("token_hint")}
+                      </p>
+                    </div>
+                  )}
+
+                  {/* 2FA toggle / field. The manual toggle can be hidden via
+                      LOGIN_SHOW_TOTP (loginShowTotp) for deployments whose mail
+                      server has no per-account TOTP (auth delegated to an
+                      external directory); server-required TOTP still shows. */}
+                  {liteSsoRequired || signInWithToken ? null : !showTotpField ? (
+                    loginShowTotp ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowTotpField(true);
+                        setTimeout(() => totpInputRef.current?.focus(), 50);
+                      }}
+                      className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                    >
+                      <Shield className="w-3.5 h-3.5" />
+                      {t("totp_toggle")}
+                    </button>
+                    ) : null
+                  ) : (
+                    <div className="space-y-1.5">
+                      <label htmlFor="totp" className="block text-sm font-medium text-foreground">
+                        {t("totp_label")}
+                      </label>
+                      <Input
+                        ref={totpInputRef}
+                        id="totp"
+                        type="text"
+                        inputMode="numeric"
+                        maxLength={6}
+                        value={totpCode}
+                        onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, ''))}
+                        className={cn(
+                          "h-11 px-3.5 bg-muted/40 border-border/60 rounded-xl focus:bg-background focus:border-primary/50 transition-all duration-200 text-center font-mono tracking-widest",
+                          error === 'totp_required' && "border-primary ring-2 ring-primary/30"
+                        )}
+                        placeholder={t("totp_placeholder")}
+                        autoComplete="one-time-code"
+                        aria-label={t("totp_label")}
+                      />
+                    </div>
+                  )}
+
+                  {loginShowTokenLogin && !isMobileHandoff && !liteSsoRequired && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        clearError();
+                        setTokenMode(!signInWithToken);
+                        setTimeout(() => (signInWithToken ? inputRef : tokenInputRef).current?.focus(), 50);
+                      }}
+                      className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                    >
+                      <KeyRound className="w-3.5 h-3.5" />
+                      {signInWithToken ? t("password_toggle") : t("token_toggle")}
+                    </button>
+                  )}
+
+                  {/* Remember me */}
+                  {showRememberMe && (
+                    <label className="flex items-center gap-2.5 cursor-pointer group select-none pt-1">
+                      <span className="relative flex items-center justify-center">
+                        <input
+                          type="checkbox"
+                          checked={rememberMe}
+                          onChange={(e) => setRememberMe(e.target.checked)}
+                          className="peer sr-only"
+                        />
+                        <span className="flex items-center justify-center w-[18px] h-[18px] rounded-[5px] border border-border/80 bg-muted/40 peer-checked:bg-primary peer-checked:border-primary peer-focus-visible:ring-2 peer-focus-visible:ring-ring peer-focus-visible:ring-offset-2 peer-focus-visible:ring-offset-background transition-all duration-200">
+                          {rememberMe && (
+                            <svg className="w-3 h-3 text-primary-foreground" viewBox="0 0 12 12" fill="none">
+                              <path d="M2 6L5 9L10 3" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                            </svg>
+                          )}
+                        </span>
+                      </span>
+                      <span className="text-sm text-muted-foreground group-hover:text-foreground transition-colors">
+                        {t("remember_me")}
+                      </span>
+                    </label>
+                  )}
+                </fieldset>
+
+                <Button
+                  type="submit"
+                  className="w-full h-11 font-medium text-[15px] bg-primary hover:bg-primary/90 transition-all duration-200 rounded-xl shadow-md shadow-primary/15 hover:shadow-lg hover:shadow-primary/20"
+                  disabled={isLoading || (liteSsoRequired && oauthLoading)}
+                >
+                  {isLoading || (liteSsoRequired && oauthLoading) ? (
+                    <div className="flex items-center gap-2">
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      {t("signing_in")}
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <LogIn className="w-4 h-4" />
+                      {liteSsoRequired ? t("sign_in_sso") : t("sign_in")}
+                    </div>
+                  )}
+                </Button>
+
+                {(oauthMetadata || liteSsoOffered || otherOauthButtons.length > 0) && (
+                  <>
+                    <div className="relative my-2">
+                      <div className="absolute inset-0 flex items-center">
+                        <span className="w-full border-t border-border/60" />
+                      </div>
+                      <div className="relative flex justify-center text-xs uppercase">
+                        <span className="bg-background/80 px-3 text-muted-foreground">{t("or")}</span>
+                      </div>
+                    </div>
+
+                    {(oauthMetadata || liteSsoOffered) && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="w-full h-11 font-medium text-[15px] rounded-xl border-border/60 hover:bg-muted/50"
+                        onClick={() => handleOAuthLogin()}
+                        disabled={oauthLoading || isLoading}
+                      >
+                        {oauthLoading ? (
+                          <Loader2 className="w-4 h-4 animate-spin me-2" />
+                        ) : (
+                          <LogIn className="w-4 h-4 me-2" />
+                        )}
+                        {selectedServer?.oauth?.buttonLabel || t("sign_in_sso")}
+                      </Button>
+                    )}
+                    {otherOauthButtons}
+                  </>
+                )}
+
+                {((serverOauthEnabled && oauthDiscoveryDone && !oauthMetadata) || liteOAuthFailed) && (
+                  <div className="mt-2 p-3 rounded-xl border border-warning/20 bg-warning/5 flex items-start gap-3">
+                    <div className="w-10 h-10 rounded-full bg-warning/15 text-warning flex items-center justify-center flex-shrink-0 shadow-sm">
+                      <AlertCircle className="w-5 h-5" />
+                    </div>
+                    <div className="flex-1 min-w-0 self-center">
+                      <p className="text-sm text-warning leading-relaxed">
+                        {t("error.oauth_discovery_failed")}
+                      </p>
+                    </div>
+                  </div>
+                )}
+              </form>
+            )}
+
+            {isAddAccountMode && (
+              <div className="mt-4">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  className="w-full h-10 text-sm text-muted-foreground hover:text-foreground"
+                  onClick={() => router.push('/')}
+                >
+                  {t("cancel")}
+                </Button>
+              </div>
+            )}
+
+            {/* Demo Mode Button */}
+            {demoMode && !isAddAccountMode && (
+              <div className="mt-4 pt-4 border-t border-border/40">
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="w-full h-11 font-medium text-[15px] rounded-xl border-border/60 hover:bg-muted/50"
+                  onClick={handleDemoLogin}
+                  disabled={demoLoading || isLoading}
+                >
+                  {demoLoading ? (
+                    <div className="flex items-center gap-2">
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      {t("demo_launching")}
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <Play className="w-4 h-4" />
+                      {t("try_demo")}
+                    </div>
+                  )}
+                </Button>
+                <p className="text-center text-xs text-muted-foreground mt-2">
+                  {t("demo_description")}
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Company name & links - below card */}
+        <div className="mt-6 flex flex-col items-center gap-2">
+          {loginCompanyName && (
+            <p className="text-center text-xs text-muted-foreground/60 font-medium">
+              {loginCompanyName}
+            </p>
+          )}
+          {(loginImprintUrl || loginPrivacyPolicyUrl || loginWebsiteUrl) && (
+            <div className="flex items-center gap-3 flex-wrap justify-center">
+              {loginWebsiteUrl && (
+                <a
+                  href={loginWebsiteUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs text-muted-foreground/50 hover:text-muted-foreground transition-colors"
+                >
+                  {t("website")}
+                </a>
+              )}
+              {loginImprintUrl && (
+                <a
+                  href={loginImprintUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs text-muted-foreground/50 hover:text-muted-foreground transition-colors"
+                >
+                  {t("imprint")}
+                </a>
+              )}
+              {loginPrivacyPolicyUrl && (
+                <a
+                  href={loginPrivacyPolicyUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs text-muted-foreground/50 hover:text-muted-foreground transition-colors"
+                >
+                  {t("privacy_policy")}
+                </a>
+              )}
+            </div>
+          )}
+          {loginShowVersion && <VersionBadge />}
+        </div>
+      </main>
+    </div>
+  );
+}
+
+// useSearchParams() above must sit under a Suspense boundary for the route to
+// prerender (the static Lite build); at runtime the boundary never suspends.
+export default function LoginPage() {
+  return (
+    <Suspense fallback={null}>
+      <LoginPageContent />
+    </Suspense>
+  );
+}

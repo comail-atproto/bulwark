@@ -1,0 +1,102 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { useEmailStore } from '../email-store';
+import type { Email, Mailbox } from '@/lib/jmap/types';
+import type { IJMAPClient } from '@/lib/jmap/client-interface';
+
+type Store = ReturnType<typeof useEmailStore.getState>;
+
+function makeMailbox(overrides: Partial<Mailbox>): Mailbox {
+  return {
+    id: 'inbox',
+    name: 'Inbox',
+    sortOrder: 0,
+    totalEmails: 0,
+    unreadEmails: 0,
+    totalThreads: 0,
+    unreadThreads: 0,
+    myRights: {
+      mayReadItems: true, mayAddItems: true, mayRemoveItems: true, maySetSeen: true,
+      maySetKeywords: true, mayCreateChild: true, mayRename: true, mayDelete: true, maySubmit: true,
+    },
+    isSubscribed: true,
+    isShared: false,
+    ...overrides,
+  };
+}
+
+function makeEmail(id: string, mailboxServerId: string): Email {
+  return {
+    id, threadId: `t-${id}`, mailboxIds: { [mailboxServerId]: true }, keywords: {},
+    size: 100, receivedAt: new Date().toISOString(),
+    from: [{ name: 'X', email: 'x@example.com' }], to: [{ name: 'Y', email: 'y@example.com' }],
+    subject: id, preview: '', hasAttachment: false, textBody: [], htmlBody: [], bodyValues: {},
+  };
+}
+
+// Own account (JMAP acct "jmap-A", reached via local account "local-A") and a
+// delegated/shared folder owned by another JMAP account ("jmap-B").
+const ownInbox = makeMailbox({ id: 'inbox-A', role: 'inbox', accountId: 'jmap-A', originalId: 'srv-inbox-A' });
+const ownArchive = makeMailbox({ id: 'archive-A', role: 'archive', accountId: 'jmap-A', originalId: 'srv-archive-A' });
+const sharedTeamA = makeMailbox({ id: 'jmap-B:srv-teamA', name: 'TeamA', accountId: 'jmap-B', originalId: 'srv-teamA', isShared: true });
+
+describe('email-store moveToMailboxCrossAware', () => {
+  let crossSpy: ReturnType<typeof vi.fn>;
+  let moveSpy: ReturnType<typeof vi.fn>;
+  const client = {} as IJMAPClient;
+
+  beforeEach(() => {
+    const email = makeEmail('e1', 'srv-inbox-A');
+    email.accountId = 'local-A';
+    crossSpy = vi.fn().mockResolvedValue(undefined);
+    moveSpy = vi.fn().mockResolvedValue(undefined);
+    useEmailStore.setState({
+      emails: [email],
+      mailboxes: [ownInbox, ownArchive, sharedTeamA],
+      selectedMailbox: 'inbox-A',
+      viewingAccountId: 'local-A',
+      isUnifiedView: false,
+      accountMailboxes: {},
+      crossAccountMoveEmails: crossSpy as unknown as Store['crossAccountMoveEmails'],
+      moveToMailbox: moveSpy as unknown as Store['moveToMailbox'],
+    });
+  });
+
+  it('routes an own → shared (cross-account) move through crossAccountMoveEmails', async () => {
+    await useEmailStore.getState().moveToMailboxCrossAware(client, 'e1', 'jmap-B:srv-teamA');
+
+    expect(moveSpy).not.toHaveBeenCalled();
+    // copy into the owner's (jmap-B) TeamA via the viewer's client, using the
+    // destination's raw server id; source is own, so no source override.
+    expect(crossSpy).toHaveBeenCalledWith(
+      new Map([['local-A', ['e1']]]),
+      'local-A',
+      'srv-teamA',
+      'jmap-B',
+      undefined,
+    );
+  });
+
+  it('routes a same-account move through the single-account moveToMailbox', async () => {
+    await useEmailStore.getState().moveToMailboxCrossAware(client, 'e1', 'archive-A');
+
+    expect(crossSpy).not.toHaveBeenCalled();
+    expect(moveSpy).toHaveBeenCalledWith(client, 'e1', 'archive-A');
+  });
+
+  it('reverse: shared → own also routes cross-account (source override set)', async () => {
+    const email = makeEmail('e2', 'srv-teamA');
+    email.accountId = 'local-A';
+    useEmailStore.setState({ emails: [email], selectedMailbox: 'jmap-B:srv-teamA' });
+
+    await useEmailStore.getState().moveToMailboxCrossAware(client, 'e2', 'inbox-A');
+
+    expect(moveSpy).not.toHaveBeenCalled();
+    expect(crossSpy).toHaveBeenCalledWith(
+      new Map([['local-A', ['e2']]]),
+      'local-A',
+      'srv-inbox-A',
+      undefined,      // dest (own) not shared
+      'jmap-B',       // source shared → override to owner account
+    );
+  });
+});

@@ -1,0 +1,454 @@
+import { describe, it, expect } from 'vitest';
+import {
+  parseAuthenticationResults,
+  parseSpamScore,
+  parseReceivedHeaders,
+  formatBytes,
+  getSecurityStatus,
+  parseSpamLLM,
+  extractListHeaders,
+  isAuthenticationSpoofed,
+  getSenderVerification,
+} from '../email-headers';
+
+describe('parseAuthenticationResults', () => {
+  it('parses SPF pass with domain', () => {
+    const result = parseAuthenticationResults('spf=pass smtp.mailfrom=example.com');
+    expect(result.spf).toEqual({ result: 'pass', domain: 'example.com' });
+  });
+
+  it('parses DKIM pass with domain and selector', () => {
+    const result = parseAuthenticationResults('dkim=pass header.d=example.com header.s=selector1');
+    expect(result.dkim).toEqual({ result: 'pass', domain: 'example.com', selector: 'selector1' });
+  });
+
+  it('parses DMARC pass with domain', () => {
+    const result = parseAuthenticationResults('dmarc=pass header.from=example.com');
+    expect(result.dmarc).toEqual({ result: 'pass', domain: 'example.com', policy: undefined });
+  });
+
+  it('parses all three together separated by semicolons', () => {
+    const header = 'spf=pass smtp.mailfrom=example.com; dkim=pass header.d=example.com; dmarc=pass header.from=example.com';
+    const result = parseAuthenticationResults(header);
+    expect(result.spf?.result).toBe('pass');
+    expect(result.dkim?.result).toBe('pass');
+    expect(result.dmarc?.result).toBe('pass');
+  });
+
+  it('parses failure results', () => {
+    expect(parseAuthenticationResults('spf=fail smtp.mailfrom=bad.com').spf?.result).toBe('fail');
+    expect(parseAuthenticationResults('dkim=fail header.d=bad.com').dkim?.result).toBe('fail');
+    expect(parseAuthenticationResults('dmarc=fail header.from=bad.com').dmarc?.result).toBe('fail');
+  });
+
+  it('returns empty object for unrecognized header', () => {
+    expect(parseAuthenticationResults('garbage header value')).toEqual({});
+  });
+
+  it('parses iprev with IP address', () => {
+    const result = parseAuthenticationResults('iprev=pass policy.iprev=192.168.1.1');
+    expect(result.iprev).toEqual({ result: 'pass', ip: '192.168.1.1' });
+  });
+
+  it('parses SPF softfail', () => {
+    const result = parseAuthenticationResults('spf=softfail smtp.mailfrom=example.com');
+    expect(result.spf?.result).toBe('softfail');
+  });
+
+  it('surfaces the most severe result when multiple SPF identities exist', () => {
+    // HELO temperror, MAIL FROM fail — the harder fail must be the headline.
+    const header =
+      'mx.example.com; spf=temperror (mx: dns timeout) smtp.helo=mail.spoof.com; spf=fail (mx: not authorized) smtp.mailfrom=victim.com';
+    const result = parseAuthenticationResults(header);
+    expect(result.spf?.result).toBe('fail');
+    expect(result.spf?.domain).toBe('victim.com');
+  });
+
+  it('exposes all SPF results when more than one identity is evaluated', () => {
+    const header =
+      'spf=temperror smtp.helo=mail.spoof.com; spf=fail smtp.mailfrom=victim.com';
+    const result = parseAuthenticationResults(header);
+    expect(result.spf?.all).toEqual([
+      { result: 'temperror', identity: 'helo', domain: 'mail.spoof.com' },
+      { result: 'fail', identity: 'mailfrom', domain: 'victim.com' },
+    ]);
+  });
+
+  it('does not set `all` for a single SPF result', () => {
+    const result = parseAuthenticationResults('spf=pass smtp.mailfrom=example.com');
+    expect(result.spf?.all).toBeUndefined();
+  });
+
+  it('prefers the MAIL FROM identity when severities tie', () => {
+    const header = 'spf=pass smtp.helo=mail.example.com; spf=pass smtp.mailfrom=example.com';
+    const result = parseAuthenticationResults(header);
+    expect(result.spf?.domain).toBe('example.com');
+  });
+
+  it('does not let a HELO `none` downgrade a MAIL FROM `pass` (#650)', () => {
+    const header =
+      'mail.haxalot.com; spf=none (mail.haxalot.com: no SPF records found for postmaster@out-23.smtp.github.com) smtp.helo=out-23.smtp.github.com; spf=pass (mail.haxalot.com: domain of noreply@github.com designates 192.30.252.206 as permitted sender) smtp.mailfrom=noreply@github.com';
+    const result = parseAuthenticationResults(header);
+    expect(result.spf?.result).toBe('pass');
+    expect(result.spf?.domain).toBe('noreply@github.com');
+    expect(result.spf?.all).toHaveLength(2);
+  });
+
+  it('does not let a HELO `neutral` downgrade a MAIL FROM `pass`', () => {
+    const header = 'spf=neutral smtp.helo=mail.example.com; spf=pass smtp.mailfrom=example.com';
+    const result = parseAuthenticationResults(header);
+    expect(result.spf?.result).toBe('pass');
+  });
+
+  it('still escalates a HELO hard fail over a MAIL FROM pass', () => {
+    const header = 'spf=fail smtp.helo=mail.spoof.com; spf=pass smtp.mailfrom=example.com';
+    const result = parseAuthenticationResults(header);
+    expect(result.spf?.result).toBe('fail');
+    expect(result.spf?.domain).toBe('mail.spoof.com');
+  });
+
+  it('keeps MAIL FROM `none` as the headline even when HELO passes', () => {
+    const header = 'spf=pass smtp.helo=mail.example.com; spf=none smtp.mailfrom=example.com';
+    const result = parseAuthenticationResults(header);
+    expect(result.spf?.result).toBe('none');
+    expect(result.spf?.domain).toBe('example.com');
+  });
+});
+
+describe('isAuthenticationSpoofed', () => {
+  it('returns false when no auth results are present', () => {
+    expect(isAuthenticationSpoofed(undefined)).toBe(false);
+    expect(isAuthenticationSpoofed({})).toBe(false);
+  });
+
+  it('flags a DMARC fail as spoofed', () => {
+    expect(isAuthenticationSpoofed({ dmarc: { result: 'fail' } })).toBe(true);
+  });
+
+  it('flags a hard SPF fail without a passing DKIM as spoofed', () => {
+    expect(isAuthenticationSpoofed({ spf: { result: 'fail' } })).toBe(true);
+    expect(
+      isAuthenticationSpoofed({ spf: { result: 'fail' }, dkim: { result: 'fail' } })
+    ).toBe(true);
+  });
+
+  it('does not flag an SPF fail rescued by a passing DKIM', () => {
+    expect(
+      isAuthenticationSpoofed({ spf: { result: 'fail' }, dkim: { result: 'pass' } })
+    ).toBe(false);
+  });
+
+  it('does not flag passing or ambiguous results', () => {
+    expect(isAuthenticationSpoofed({ spf: { result: 'pass' }, dmarc: { result: 'pass' } })).toBe(false);
+    expect(isAuthenticationSpoofed({ spf: { result: 'softfail' } })).toBe(false);
+    expect(isAuthenticationSpoofed({ spf: { result: 'temperror' } })).toBe(false);
+  });
+});
+
+describe('parseSpamScore', () => {
+  it('parses X-Spam-Status "No" format', () => {
+    expect(parseSpamScore('No, score=-0.25')).toEqual({ status: 'no', score: -0.25 });
+  });
+
+  it('parses X-Spam-Status "Yes" format', () => {
+    expect(parseSpamScore('Yes, score=8.5')).toEqual({ status: 'yes', score: 8.5 });
+  });
+
+  it('extracts plain score and classifies as ham', () => {
+    expect(parseSpamScore('score=3.2')).toEqual({ score: 3.2, status: 'ham' });
+  });
+
+  it('extracts plain score and classifies as spam when above threshold', () => {
+    expect(parseSpamScore('score=6.0')).toEqual({ score: 6.0, status: 'spam' });
+  });
+
+  it('returns null for unrecognized format', () => {
+    expect(parseSpamScore('nothing useful here')).toBeNull();
+  });
+});
+
+describe('parseReceivedHeaders', () => {
+  it('parses a single received header', () => {
+    const headers = ['from mail.example.com by mx.example.com with SMTP id abc123; Mon, 15 Jan 2024 10:00:00 +0000'];
+    const result = parseReceivedHeaders(headers);
+    expect(result).toHaveLength(1);
+    expect(result[0].from).toBe('mail.example.com');
+    expect(result[0].by).toBe('mx.example.com');
+    expect(result[0].protocol).toBe('SMTP');
+    expect(result[0].id).toBe('abc123');
+    expect(result[0].timestamp).toBe('Mon, 15 Jan 2024 10:00:00 +0000');
+  });
+
+  it('handles missing fields gracefully', () => {
+    const result = parseReceivedHeaders(['from sender.example.com']);
+    expect(result).toHaveLength(1);
+    expect(result[0].from).toBe('sender.example.com');
+    expect(result[0].by).toBe('unknown');
+  });
+
+  it('returns empty array for empty input', () => {
+    expect(parseReceivedHeaders([])).toEqual([]);
+  });
+
+  it('skips headers with no from or by', () => {
+    expect(parseReceivedHeaders(['random text without routing info'])).toEqual([]);
+  });
+});
+
+describe('formatBytes', () => {
+  it('formats 0 bytes', () => {
+    expect(formatBytes(0)).toBe('0 B');
+  });
+
+  it('formats bytes', () => {
+    expect(formatBytes(512)).toBe('512.0 B');
+  });
+
+  it('formats kilobytes', () => {
+    expect(formatBytes(1024)).toBe('1.0 KB');
+  });
+
+  it('formats megabytes', () => {
+    expect(formatBytes(1048576)).toBe('1.0 MB');
+  });
+
+  it('formats gigabytes', () => {
+    expect(formatBytes(1073741824)).toBe('1.0 GB');
+  });
+});
+
+describe('getSecurityStatus', () => {
+  it('returns green for pass', () => {
+    const status = getSecurityStatus('pass');
+    expect(status.icon).toBe('check');
+    expect(status.color).toContain('green');
+    expect(status.borderColor).toContain('green');
+  });
+
+  it('returns red for fail', () => {
+    const status = getSecurityStatus('fail');
+    expect(status.icon).toBe('x');
+    expect(status.color).toContain('red');
+  });
+
+  it('returns red for permerror', () => {
+    const status = getSecurityStatus('permerror');
+    expect(status.icon).toBe('x');
+    expect(status.color).toContain('red');
+  });
+
+  it('returns a warning color for softfail', () => {
+    const status = getSecurityStatus('softfail');
+    expect(status.icon).toBe('alert');
+    expect(status.color).toContain('warning');
+  });
+
+  it('returns amber for neutral and temperror', () => {
+    expect(getSecurityStatus('neutral').icon).toBe('alert');
+    expect(getSecurityStatus('temperror').icon).toBe('alert');
+  });
+
+  it('returns gray for undefined', () => {
+    const status = getSecurityStatus(undefined);
+    expect(status.icon).toBe('minus');
+    expect(status.color).toContain('gray');
+  });
+});
+
+describe('parseSpamLLM', () => {
+  it('parses LEGITIMATE verdict', () => {
+    expect(parseSpamLLM('LEGITIMATE (This is a normal email)')).toEqual({
+      verdict: 'LEGITIMATE',
+      explanation: 'This is a normal email',
+    });
+  });
+
+  it('parses SPAM verdict', () => {
+    expect(parseSpamLLM('SPAM (Unsolicited bulk message)')).toEqual({
+      verdict: 'SPAM',
+      explanation: 'Unsolicited bulk message',
+    });
+  });
+
+  it('parses SUSPICIOUS verdict', () => {
+    expect(parseSpamLLM('SUSPICIOUS (Possible phishing attempt)')).toEqual({
+      verdict: 'SUSPICIOUS',
+      explanation: 'Possible phishing attempt',
+    });
+  });
+
+  it('is case-insensitive for verdict keyword', () => {
+    expect(parseSpamLLM('legitimate (test)')).toEqual({
+      verdict: 'LEGITIMATE',
+      explanation: 'test',
+    });
+  });
+
+  it('returns null for unrecognized format', () => {
+    expect(parseSpamLLM('some random header')).toBeNull();
+    expect(parseSpamLLM('')).toBeNull();
+  });
+});
+
+describe('extractListHeaders', () => {
+  it('extracts List-Id', () => {
+    const result = extractListHeaders({ 'List-Id': 'My Newsletter <list.example.com>' });
+    expect(result.listId).toBe('My Newsletter <list.example.com>');
+  });
+
+  it('extracts List-Unsubscribe with HTTP URL', () => {
+    const result = extractListHeaders({
+      'List-Unsubscribe': '<https://example.com/unsubscribe?id=123>',
+    });
+    expect(result.listUnsubscribe?.http).toBe('https://example.com/unsubscribe?id=123');
+    expect(result.listUnsubscribe?.preferred).toBe('http');
+  });
+
+  it('extracts List-Unsubscribe with both HTTP and mailto', () => {
+    const result = extractListHeaders({
+      'List-Unsubscribe': '<https://example.com/unsub>, <mailto:unsub@example.com>',
+    });
+    expect(result.listUnsubscribe?.http).toBe('https://example.com/unsub');
+    expect(result.listUnsubscribe?.mailto).toBe('mailto:unsub@example.com');
+    expect(result.listUnsubscribe?.preferred).toBe('http');
+  });
+
+  it('handles array header values', () => {
+    const result = extractListHeaders({
+      'List-Id': ['Newsletter <list.example.com>', 'fallback'],
+    });
+    expect(result.listId).toBe('Newsletter <list.example.com>');
+  });
+
+  it('returns empty object when no list headers present', () => {
+    expect(extractListHeaders({})).toEqual({});
+    expect(extractListHeaders({ 'Subject': 'hello' })).toEqual({});
+  });
+
+  it('extracts List-Help and List-Post', () => {
+    const result = extractListHeaders({
+      'List-Help': '<mailto:help@example.com>',
+      'List-Post': '<mailto:post@example.com>',
+    });
+    expect(result.listHelp).toBe('<mailto:help@example.com>');
+    expect(result.listPost).toBe('<mailto:post@example.com>');
+  });
+});
+
+describe('parseAuthenticationResults - sender-controlled text', () => {
+  // Stalwart writes dkim (when signed), spf helo, spf mailfrom with the MAIL
+  // FROM address echoed in a comment and in smtp.mailfrom, iprev, then dmarc.
+  const stalwart = (mailFrom: string, dmarc: string) =>
+    `mx.victim.example;\r\n\tspf=pass (mx.victim.example: domain of ${mailFrom} designates 203.0.113.9 as permitted sender) smtp.mailfrom=${mailFrom};\r\n\tiprev=pass policy.iprev=203.0.113.9;\r\n\tdmarc=${dmarc} header.from=corp.example policy.dmarc=none`;
+
+  it('reads the honest header', () => {
+    const result = parseAuthenticationResults([stalwart('bounce@evil.example', 'fail')]);
+    expect(result.dmarc?.result).toBe('fail');
+    expect(result.spf?.domain).toBe('bounce@evil.example');
+    expect(result.iprev).toEqual({ result: 'pass', ip: '203.0.113.9' });
+    expect(isAuthenticationSpoofed(result)).toBe(true);
+  });
+
+  it('ignores a method=result token inside the envelope local part', () => {
+    const result = parseAuthenticationResults([stalwart('dmarc=pass@evil.example', 'fail')]);
+    expect(result.dmarc?.result).toBe('fail');
+    expect(result.spf?.domain).toBe('dmarc=pass@evil.example');
+    expect(isAuthenticationSpoofed(result)).toBe(true);
+  });
+
+  it('does not split on a ; inside a quoted local part or a comment', () => {
+    const header =
+      'mx.victim.example; spf=fail (domain of "x; dkim=pass"@evil.example; dmarc=pass) smtp.mailfrom="x; dmarc=pass header.from=corp.example"@evil.example; dmarc=fail header.from=corp.example';
+    const result = parseAuthenticationResults(header);
+    expect(result.dkim).toBeUndefined();
+    expect(result.dmarc?.result).toBe('fail');
+    expect(result.spf?.result).toBe('fail');
+  });
+
+  it('takes DKIM and DMARC only from the topmost (receiving server) header', () => {
+    const result = parseAuthenticationResults([
+      stalwart('bounce@evil.example', 'none'),
+      'forged.example; dkim=pass header.d=corp.example header.s=s1; dmarc=pass header.from=corp.example',
+    ]);
+    expect(result.dkim).toBeUndefined();
+    expect(result.dmarc?.result).toBe('none');
+  });
+
+  it('lets a lower header escalate SPF to a failure but never to a pass', () => {
+    const escalated = parseAuthenticationResults([
+      'mx.victim.example; spf=pass smtp.mailfrom=corp.example',
+      'relay.example; spf=fail smtp.mailfrom=corp.example',
+    ]);
+    expect(escalated.spf?.result).toBe('fail');
+
+    const notUpgraded = parseAuthenticationResults([
+      'mx.victim.example; spf=softfail smtp.mailfrom=corp.example',
+      'forged.example; spf=pass smtp.mailfrom=corp.example',
+    ]);
+    expect(notUpgraded.spf?.result).toBe('softfail');
+    expect(notUpgraded.spf?.all).toBeUndefined();
+  });
+
+  it('keeps the most severe DMARC verdict within one header', () => {
+    const result = parseAuthenticationResults('mx.example; dmarc=pass header.from=a.example; dmarc=fail header.from=a.example');
+    expect(result.dmarc?.result).toBe('fail');
+  });
+});
+
+describe('getSenderVerification', () => {
+  // Shape of a real phish: forged bank From, sent by a web host's PHP
+  // mailer, no signature. mail-auth reports dmarc=none because neither SPF
+  // nor DKIM passed, although the From domain publishes a DMARC record.
+  const phish = parseAuthenticationResults(
+    'mx.example.org;\r\n\tspf=none (mx.example.org: no SPF records found for www-data@web1.hoster.example) smtp.mailfrom=www-data@web1.hoster.example;\r\n\tiprev=permerror policy.iprev=203.0.113.7;\r\n\tdmarc=none header.from=bank.example policy.dmarc=none',
+  );
+
+  it('flags a message that passes neither SPF nor DKIM', () => {
+    expect(isAuthenticationSpoofed(phish)).toBe(false);
+    expect(getSenderVerification(phish, 'support@bank.example')).toEqual({
+      status: 'unverified',
+      domain: 'bank.example',
+      sentFrom: 'web1.hoster.example',
+    });
+  });
+
+  it('leaves out the envelope host when it is the From domain', () => {
+    const auth = parseAuthenticationResults('mx; spf=softfail smtp.mailfrom=billing@Bank.Example; dmarc=none header.from=bank.example');
+    expect(getSenderVerification(auth, 'billing@bank.example')).toEqual({ status: 'unverified', domain: 'bank.example' });
+  });
+
+  it('reports a DMARC fail as failed', () => {
+    const auth = parseAuthenticationResults('mx; spf=pass smtp.mailfrom=bounce@evil.example; dmarc=fail header.from=bank.example');
+    expect(getSenderVerification(auth, 'support@bank.example')).toEqual({
+      status: 'failed',
+      domain: 'bank.example',
+      sentFrom: 'evil.example',
+    });
+  });
+
+  it('accepts any passing SPF, DKIM or DMARC result', () => {
+    const from = 'news@shop.example';
+    expect(getSenderVerification(parseAuthenticationResults('mx; spf=pass smtp.mailfrom=bounces.esp.example'), from)).toBeNull();
+    expect(getSenderVerification(parseAuthenticationResults('mx; spf=none smtp.mailfrom=x.example; dkim=pass header.d=esp.example'), from)).toBeNull();
+    expect(getSenderVerification(parseAuthenticationResults('mx; dmarc=pass header.from=shop.example'), from)).toBeNull();
+  });
+
+  it('counts a passing signature that is not the first one', () => {
+    const auth = parseAuthenticationResults('mx; dkim=fail header.d=shop.example; dkim=pass header.d=esp.example; spf=none smtp.mailfrom=x.example');
+    expect(auth.dkim?.result).toBe('fail');
+    expect(auth.dkim?.all).toHaveLength(2);
+    expect(getSenderVerification(auth, 'news@shop.example')).toBeNull();
+  });
+
+  it('does not take a HELO pass for a MAIL FROM pass', () => {
+    const auth = parseAuthenticationResults('mx; spf=pass smtp.helo=web1.hoster.example; spf=none smtp.mailfrom=www-data@web1.hoster.example');
+    expect(getSenderVerification(auth, 'support@bank.example')?.status).toBe('unverified');
+  });
+
+  it('says nothing without results or a From address', () => {
+    expect(getSenderVerification(undefined, 'a@b.example')).toBeNull();
+    expect(getSenderVerification({}, 'a@b.example')).toBeNull();
+    expect(getSenderVerification({ iprev: { result: 'fail' } }, 'a@b.example')).toBeNull();
+    expect(getSenderVerification(phish, undefined)).toBeNull();
+  });
+});
