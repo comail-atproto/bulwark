@@ -22,12 +22,19 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      - run: npm ci
-      - run: npm audit --omit=dev --audit-level=high
-      - run: npm run lint
-      - run: npm run typecheck
-      - run: npx playwright install --with-deps chromium
-      - run: COMAIL_BROWSER_TESTS=1 npm test
-      - run: npx next build --webpack
+      - name: Install dependencies
+        run: npm ci
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+      - name: Lint the source
+        run: npm run lint
+      - name: Check TypeScript types
+        run: npm run typecheck
+      - name: Install Chromium for browser tests
+        run: npx playwright install --with-deps chromium
+      - name: Run tests with browser coverage
+        run: COMAIL_BROWSER_TESTS=1 npm test
+      - name: Build the application
+        run: npx next build --webpack
         env:
           NEXT_TELEMETRY_DISABLED: '1'
