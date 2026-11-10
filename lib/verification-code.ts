@@ -120,10 +120,16 @@ const ALNUM = /[\p{L}\p{N}]/u;
  *  "ai177945Copy", and are not one group of an id like "4887a30a5a2si2098"
  *  or "PAXPR03MB8065". */
 function gluedToWords(text: string, start: number, end: number): boolean {
-  while (start > 0 && ALNUM.test(text[start - 1])) start--;
-  while (end < text.length && ALNUM.test(text[end])) end++;
+  // A longer run is never word + code + word; walking it whole for every
+  // digit group in it would make one long token cost quadratic time.
+  const floor = Math.max(0, start - GLUED_CONTEXT);
+  const ceiling = Math.min(text.length, end + GLUED_CONTEXT);
+  while (start > floor && ALNUM.test(text[start - 1])) start--;
+  while (end < ceiling && ALNUM.test(text[end])) end++;
+  if ((start > 0 && ALNUM.test(text[start - 1])) || (end < text.length && ALNUM.test(text[end]))) return false;
   return /^\p{L}*\d+\p{L}*$/u.test(text.slice(start, end));
 }
+const GLUED_CONTEXT = 40;
 
 const YEAR = /^(?:19|20)\d\d$/;
 // 10min, 600px, 100GB
@@ -182,6 +188,9 @@ function scoreCandidate(text: string, raw: string, start: number, keywords: Span
     if (/[€$£]\s?$/.test(before) || /^\s?(?:[€$£%]|eur\b|usd\b|chf\b)/i.test(after)) return null;
   } else if (NUMBER_WITH_UNIT.test(raw) || PROMO_CODE.test(raw)) {
     return null;
+  } else if (/^\d{4}-\d\d-\d\dT\d/i.test(raw)) {
+    // An ISO timestamp cut at its first colon: 2026-10-13T15:37:13
+    return null;
   }
   if (LABELLED_AS_OTHER.test(before)) return null;
   if (PROMO_WORDS.test(contextWindow(text, start - 60, end + 40))) return null;
@@ -222,17 +231,23 @@ function normalize(text: string): string {
   return text
     // Invisible spacers senders put between characters
     .replace(/[\u00ad\u200b-\u200f\u2060\ufeff]|\u034f/g, '')
-    // Links and addresses carry ids and tokens, never the code to type
+    // Links and addresses carry ids and tokens, never the code to type.
+    // Anchored to the start of a token so a long run of letters is scanned
+    // once, not once per character.
     .replace(/https?:\/\/\S+|www\.\S+/gi, ' ')
-    .replace(/\S*@\S+/g, ' ')
+    .replace(/(?<!\S)\S*@\S+/g, ' ')
     // Keep line breaks (a code often stands on a line of its own) but not
     // the runs of blank lines and indentation between table cells.
     .replace(/[^\S\n]+/g, ' ')
     .replace(/ ?\n[\s]*/g, '\n')
     // A preview is cut off with "...", and the word it cut may be half a code.
-    .replace(/[\p{L}\p{N}-]*(?:\.\.\.|…)\s*$/u, '')
+    .replace(/(?<![\p{L}\p{N}-])[\p{L}\p{N}-]*(?:\.\.\.|…)\s*$/u, '')
     .trim();
 }
+
+// A subject is a line, not a document; the MTA's message size is the only
+// bound on its length, and the list runs this for every row.
+const MAX_SUBJECT = 1_000;
 
 function bestCandidate(rawText: string): Candidate | null {
   const text = normalize(rawText);
@@ -258,7 +273,9 @@ function bestCandidate(rawText: string): Candidate | null {
  * it next to unrelated numbers in the body.
  */
 export function findVerificationCode(subject: string | null | undefined, text: string | null | undefined): string | null {
-  return bestCandidate(subject ?? '')?.code ?? bestCandidate(text ?? '')?.code ?? null;
+  return bestCandidate((subject ?? '').slice(0, MAX_SUBJECT))?.code
+    ?? bestCandidate((text ?? '').slice(0, MAX_BODY_TEXT))?.code
+    ?? null;
 }
 
 /** Only fresh codes are worth a chip in the list; they expire within minutes to a day. */
@@ -287,13 +304,56 @@ export function listVerificationCode(
 const MAX_BODY_HTML = 200_000;
 const MAX_BODY_TEXT = 50_000;
 
+// Every code word above contains one of these (any case), so a body without
+// any of them has no code to find, and the HTML need not be turned into text.
+const CODE_WORD_HINT = /cod|cód|kod|kód|kood|код|κωδικ|קוד|رمز|کد|kennwort|passwort|pass(?:word|code)|コード|認証番号|確認番号|验证码|驗證碼|校验码|动态码|인증|코드/iu;
+const UPPERCASE_HINT = /PIN|OTP|TAN/;
+// Entities that stand for no letter, decoded so they can't hide a code word.
+const NAMED_ENTITIES: Record<string, string> = {
+  amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', ensp: ' ', emsp: ' ', thinsp: ' ',
+  shy: '', zwnj: '', zwj: '', lrm: '', rlm: '', copy: '', reg: '', trade: '', hellip: '', mdash: '',
+  ndash: '', lsquo: '', rsquo: '', ldquo: '', rdquo: '', laquo: '', raquo: '', bull: '', middot: '',
+  euro: '', pound: '', cent: '', yen: '', deg: '', times: '', sect: '', para: '',
+};
+
+/**
+ * False when the HTML cannot hold a code word, so verificationCodeBodyText
+ * can skip parsing it (the costly part of opening a big HTML mail). Errs on
+ * the side of true: tags are dropped so a word split by markup joins up
+ * again, numeric entities are decoded, invisible spacers removed, and any
+ * named entity that might be a letter counts as a possible code word.
+ */
+export function htmlMayNameACode(html: string): boolean {
+  let unknownEntity = false;
+  const text = html
+    // `[^<>]` so a `<` without a `>` after it is given up at the next `<`,
+    // not after scanning to the end once per `<`.
+    .replace(/<[^<>]*>/g, '')
+    .replace(/&(#x[0-9a-f]+|#\d+|[a-z][a-z0-9]*);/gi, (_m, ref: string) => {
+      if (ref[0] === '#') {
+        const cp = ref[1] === 'x' || ref[1] === 'X' ? parseInt(ref.slice(2), 16) : parseInt(ref.slice(1), 10);
+        return cp > 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : '';
+      }
+      const known = NAMED_ENTITIES[ref.toLowerCase()];
+      if (known === undefined) unknownEntity = true;
+      return known ?? '';
+    })
+    .replace(/[\u00ad\u200b-\u200f\u2060\ufeff]|\u034f/g, '');
+  return unknownEntity || CODE_WORD_HINT.test(text) || UPPERCASE_HINT.test(text);
+}
+
 /** The text of a loaded mail as the reader shows it, for finding its code. */
 export function verificationCodeBodyText(email: Pick<Email, 'htmlBody' | 'textBody' | 'bodyValues'>): string {
   const html = getRenderableHtmlBody(email);
   if (html) {
     // htmlToPlainText walks the body, and a <style> in it is text there.
-    const markup = html.replace(/<(style|script|title)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, ' ');
-    return htmlToPlainText(markup.slice(0, MAX_BODY_HTML)).slice(0, MAX_BODY_TEXT);
+    // Cut first, then strip: an unclosed element runs to the end of what is
+    // left, once, rather than to the end of the whole body once per opener.
+    const markup = html
+      .slice(0, MAX_BODY_HTML)
+      .replace(/<(style|script|title)\b[^<>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, ' ');
+    if (!htmlMayNameACode(markup)) return '';
+    return htmlToPlainText(markup).slice(0, MAX_BODY_TEXT);
   }
   const textPart = email.textBody?.[0]?.partId;
   return ((textPart && email.bodyValues?.[textPart]?.value) || '').slice(0, MAX_BODY_TEXT);

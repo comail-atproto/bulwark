@@ -1,7 +1,8 @@
 import type { Email, Mailbox, UnifiedMailboxRole, CrossView } from '@/lib/jmap/types';
 import { CROSS_EXCLUDED_ROLES } from '@/lib/jmap/types';
-import type { IJMAPClient } from '@/lib/jmap/client-interface';
-import { andFilters } from '@/lib/jmap/search-utils';
+import type { IJMAPClient, SearchEmailsResult, SearchRequestOptions } from '@/lib/jmap/client-interface';
+import type { DeferredSnippetBatch } from '@/lib/search-snippet';
+import { andFilters, textConditions, textFilter } from '@/lib/jmap/search-utils';
 import { compareEmails, type SortLevel } from '@/lib/message-list-order';
 
 export interface UnifiedAccountClient {
@@ -43,6 +44,8 @@ export interface UnifiedFetchResult {
   total: number;
   hasMore: boolean;
   errors: Map<string, string>; // accountId -> error message
+  /** Deferred search snippets per account (see SearchRequestOptions.deferSnippets). */
+  snippets?: Promise<DeferredSnippetBatch[]>;
 }
 
 export interface UnifiedMailboxCounts {
@@ -367,7 +370,7 @@ export function fetchUnifiedMailboxCounts(
 // ─── Cross-account views (unread / starred / all) ─────────────────────────────
 //
 // These merge messages across EVERY account (including shared) and across all
-// folders except the CROSS_EXCLUDED_ROLES (junk, sent, archive, trash, drafts),
+// folders except the CROSS_EXCLUDED_ROLES (junk, sent, archive, trash, drafts, all),
 // i.e. inbox + custom folders, into one date-sorted list. Unlike the per-role
 // unified fan-out above, the query spans many mailboxes per account, so the
 // filter is built from each account's included-mailbox ids.
@@ -494,8 +497,9 @@ export async function fetchCrossViewEmails(
 }
 
 /**
- * Text search within a cross-account view: the view filter AND a free-text
- * condition, fanned out across accounts.
+ * Text search within a cross-account view: the view filter AND the free-text
+ * conditions (one per quoted phrase or `word*` part, see splitSearchText),
+ * fanned out across accounts.
  *
  * Searching from "All mail" is the exception: it searches every folder of
  * every account except Trash and Junk, the standard search panel's default
@@ -515,7 +519,7 @@ export async function searchCrossViewEmails(
   }
   return fanOutCrossQuery(accounts, (account, jmapAccountId, ids) =>
     account.client.advancedSearchEmails(
-      { operator: 'AND', conditions: [buildCrossFilter(view, ids), { text: query }] },
+      { operator: 'AND', conditions: [buildCrossFilter(view, ids), ...textConditions(query)] },
       jmapAccountId,
       limit,
       positionFor(position, account),
@@ -591,7 +595,7 @@ export async function fetchTagEmails(
   );
 }
 
-export interface AcrossAccountsSearchOptions {
+export interface AcrossAccountsSearchOptions extends SearchRequestOptions {
   /**
    * Leave every account's Trash and Junk out: the search panel's default
    * scope, "All folders except Spam and Trash". Its "All folders" scope
@@ -623,9 +627,10 @@ export async function searchAcrossAccounts(
       const exclusion = options.excludeTrashAndJunk ? trashAndJunkExclusion(account) : null;
       return exclusion
         ? account.client.advancedSearchEmails(
-            andFilters({ text: query.trim() }, exclusion), jmapAccountId, limit, positionFor(position, account),
+            andFilters(textFilter(query), exclusion), jmapAccountId, limit, positionFor(position, account),
+            ...searchRequestOptions(options),
           )
-        : account.client.searchEmails(query, undefined, jmapAccountId, limit, positionFor(position, account));
+        : account.client.searchEmails(query, undefined, jmapAccountId, limit, positionFor(position, account), ...searchRequestOptions(options));
     },
     newestFirst,
   );
@@ -649,9 +654,15 @@ export async function advancedSearchAcrossAccounts(
       jmapAccountId,
       limit,
       positionFor(position, account),
+      ...searchRequestOptions(options),
     ),
     newestFirst,
   );
+}
+
+/** The trailing SearchRequestOptions argument, left off when nothing is asked of it. */
+function searchRequestOptions(options: AcrossAccountsSearchOptions): [] | [SearchRequestOptions] {
+  return options.deferSnippets ? [{ deferSnippets: true }] : [];
 }
 
 function newestFirst(a: Email, b: Email): number {
@@ -669,14 +680,14 @@ async function fanOutAccountQuery(
   run: (
     account: UnifiedAccountClient,
     jmapAccountId: string | undefined,
-  ) => Promise<{ emails: Email[]; total: number; hasMore: boolean }>,
+  ) => Promise<SearchEmailsResult>,
   sort: (a: Email, b: Email) => number,
 ): Promise<UnifiedFetchResult> {
   const errors = new Map<string, string>();
 
   type AccountResult = {
     account: UnifiedAccountClient;
-    result: { emails: Email[]; total: number; hasMore: boolean };
+    result: SearchEmailsResult;
   } | null;
 
   const promises = accounts.map(async (account): Promise<AccountResult> => {
@@ -695,10 +706,14 @@ async function fanOutAccountQuery(
   let mergedEmails: Email[] = [];
   let totalSum = 0;
   let anyHasMore = false;
+  const snippetBatches: Promise<DeferredSnippetBatch | null>[] = [];
 
   for (const outcome of results) {
     if (outcome.status !== 'fulfilled' || outcome.value === null) continue;
     const { account, result } = outcome.value;
+    if (result.snippets) {
+      snippetBatches.push(result.snippets.then((list) => (list ? { accountId: account.accountId, list } : null)));
+    }
     // Decorate shallow copies, not the shared client-returned objects. The
     // source stamps are what routes every later action (read, move, delete,
     // thread expansion) back to the owning account.
@@ -717,7 +732,10 @@ async function fanOutAccountQuery(
 
   mergedEmails.sort(sort);
 
-  return { emails: mergedEmails, total: totalSum, hasMore: anyHasMore, errors };
+  const snippets = snippetBatches.length > 0
+    ? Promise.all(snippetBatches).then((batches) => batches.filter((batch): batch is DeferredSnippetBatch => batch !== null))
+    : undefined;
+  return { emails: mergedEmails, total: totalSum, hasMore: anyHasMore, errors, ...(snippets ? { snippets } : {}) };
 }
 
 /**
@@ -751,6 +769,11 @@ export function connectedAccountsGrew(previous: string | null, current: string):
   return current.split(',').some((id) => id !== '' && !before.has(id));
 }
 
+/** The server a client talks to, compared without case or a trailing slash. */
+export function unifiedServerKey(client: Pick<IJMAPClient, 'getServerUrl'> | undefined): string {
+  return (client?.getServerUrl?.() ?? '').trim().replace(/\/+$/, '').toLowerCase();
+}
+
 /**
  * How far the unified scope has got while logins are still reconnecting:
  * `{ loaded, total }` while some logins expected in it are not there yet,
@@ -768,4 +791,47 @@ export function unifiedLoadProgress(input: {
   if (total < 2) return null;
   const loaded = new Set(input.scope.filter((e) => !e.isShared).map((e) => e.clientAccountId)).size;
   return loaded < total ? { loaded, total } : null;
+}
+
+/**
+ * Drops mailboxes that are reachable through more than one logged-in account,
+ * so each folder contributes to the aggregate views exactly once.
+ *
+ * A folder shared with a second login (owner + grantee both logged in), or
+ * shared with two logins at once, otherwise yields one entry per reaching
+ * login: its messages list twice and its unread count is summed twice.
+ *
+ * A mailbox is identified by its server, its owning JMAP account and its
+ * server-side id (a shared entry's `originalId`). JMAP account and mailbox ids
+ * are only unique on one server (Stalwart hands out short ids like "b" or "c"
+ * everywhere), so logins on different servers never cover each other's
+ * folders. Personal entries always win and are never trimmed, so
+ * an owner's folder is read through the owner's own login and honors their
+ * folder selection. Shared entries keep only mailboxes not already covered and
+ * are dropped when none remain. Order is preserved.
+ */
+export function dedupeUnifiedAccounts(accounts: UnifiedAccountClient[]): UnifiedAccountClient[] {
+  const seen = new Set<string>();
+  const key = (account: UnifiedAccountClient, mailboxId: string) =>
+    `${unifiedServerKey(account.client)}\u0000${account.jmapAccountId}\u0000${mailboxId}`;
+  for (const account of accounts) {
+    if (account.isShared) continue;
+    for (const m of account.mailboxes) seen.add(key(account, m.id));
+  }
+  const out: UnifiedAccountClient[] = [];
+  for (const account of accounts) {
+    if (!account.isShared) {
+      out.push(account);
+      continue;
+    }
+    const mailboxes = account.mailboxes.filter((m) => {
+      const k = key(account, m.originalId ?? m.id);
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+    if (mailboxes.length === 0) continue;
+    out.push(mailboxes.length === account.mailboxes.length ? account : { ...account, mailboxes });
+  }
+  return out;
 }

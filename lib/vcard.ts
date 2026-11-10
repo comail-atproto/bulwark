@@ -1,19 +1,22 @@
 import type { ContactCard, NameComponent, ContactOnlineService, AnniversaryDate, PartialDate } from "@/lib/jmap/types";
 import { generateUUID } from "@/lib/utils";
+import { parseBase64DataUri } from "@/lib/data-uri";
 
-// Convert RFC 9553 AnniversaryDate (PartialDate|Timestamp|string) to vCard date string
+// Convert RFC 9553 AnniversaryDate (PartialDate|Timestamp|string) to a vCard
+// 4.0 date, which uses the ISO 8601 basic format (RFC 6350 §4.3.1): 19850412,
+// --0412, 1985-04, 1985.
 function anniversaryDateToVcardString(date: AnniversaryDate): string {
   if (typeof date === 'string') return date;
   if (date && typeof date === 'object') {
     if ('@type' in date && date['@type'] === 'Timestamp' && 'utc' in date) {
-      return (date as { utc: string }).utc.split('T')[0];
+      return (date as { utc: string }).utc.split('T')[0].replace(/-/g, '');
     }
     const pd = date as PartialDate;
     if (pd.year && pd.month && pd.day) {
-      return `${String(pd.year).padStart(4, '0')}-${String(pd.month).padStart(2, '0')}-${String(pd.day).padStart(2, '0')}`;
+      return `${String(pd.year).padStart(4, '0')}${String(pd.month).padStart(2, '0')}${String(pd.day).padStart(2, '0')}`;
     }
     if (pd.month && pd.day) {
-      return `--${String(pd.month).padStart(2, '0')}-${String(pd.day).padStart(2, '0')}`;
+      return `--${String(pd.month).padStart(2, '0')}${String(pd.day).padStart(2, '0')}`;
     }
     if (pd.year && pd.month) {
       return `${String(pd.year).padStart(4, '0')}-${String(pd.month).padStart(2, '0')}`;
@@ -201,12 +204,26 @@ function decodeQuotedPrintable(input: string, charset?: string): string {
   }
 }
 
+// One pass, so an escaped backslash can't pair up with the next character.
+// \: isn't a vCard escape, but Google Contacts writes it.
 function decodeValue(raw: string): string {
-  return raw
-    .replace(/\\n/gi, "\n")
-    .replace(/\\,/g, ",")
-    .replace(/\\;/g, ";")
-    .replace(/\\\\/g, "\\");
+  return raw.replace(/\\([nN,;:\\])/g, (_match, escaped: string) =>
+    escaped === "n" || escaped === "N" ? "\n" : escaped);
+}
+
+function splitEscapedValue(raw: string, delimiter: string): string[] {
+  const values: string[] = [];
+  let start = 0;
+  for (let i = 0; i < raw.length; i += 1) {
+    if (raw[i] === "\\") {
+      i += 1;
+    } else if (raw[i] === delimiter) {
+      values.push(decodeValue(raw.slice(start, i)));
+      start = i + 1;
+    }
+  }
+  values.push(decodeValue(raw.slice(start)));
+  return values;
 }
 
 function encodeValue(val: string): string {
@@ -322,18 +339,58 @@ function anniversaryKindFromLabel(label: string | undefined): "birth" | "wedding
   return "other";
 }
 
-const PHONE_FEATURE_TYPES = new Set(["CELL", "FAX", "VOICE", "PAGER", "VIDEO", "TEXT", "TEXTPHONE"]);
+// vCard TEL types (RFC 6350 §6.4.1, RFC 7852) and the RFC 9553 phone features
+// they stand for: vCard calls a mobile phone "cell", JSContact "mobile".
+// MOBILE is no vCard type, but Bulwark's own exports used to write it.
+const TEL_TYPE_TO_PHONE_FEATURE: Record<string, string> = {
+  CELL: "mobile",
+  MOBILE: "mobile",
+  VOICE: "voice",
+  FAX: "fax",
+  PAGER: "pager",
+  VIDEO: "video",
+  TEXT: "text",
+  TEXTPHONE: "textphone",
+  "MAIN-NUMBER": "main-number",
+};
+
+// The contact form stored mobile phones as "cell" before it used "mobile".
+const PHONE_FEATURE_TO_TEL_TYPE: Record<string, string> = {
+  mobile: "CELL",
+  cell: "CELL",
+  voice: "VOICE",
+  fax: "FAX",
+  pager: "PAGER",
+  video: "VIDEO",
+  text: "TEXT",
+  textphone: "TEXTPHONE",
+  "main-number": "MAIN-NUMBER",
+};
 
 function typeToPhoneFeatures(typeStr: string | undefined): Record<string, boolean> | undefined {
   if (!typeStr) return undefined;
   const types = typeStr.toUpperCase().split(",");
   const features: Record<string, boolean> = {};
   for (const t of types) {
-    if (PHONE_FEATURE_TYPES.has(t)) {
-      features[t.toLowerCase()] = true;
-    }
+    const feature = TEL_TYPE_TO_PHONE_FEATURE[t];
+    if (feature) features[feature] = true;
   }
   return Object.keys(features).length > 0 ? features : undefined;
+}
+
+function phoneFeaturesToTypes(features: Record<string, boolean> | undefined): string[] {
+  const types = new Set<string>();
+  for (const [feature, on] of Object.entries(features || {})) {
+    if (!on) continue;
+    const type = PHONE_FEATURE_TO_TEL_TYPE[feature.toLowerCase()];
+    if (type) {
+      types.add(type);
+    } else if (/^x-[a-z0-9-]+$/i.test(feature)) {
+      // RFC 6350 allows x-name TYPE values; anything else is not a TEL type.
+      types.add(feature.toUpperCase());
+    }
+  }
+  return [...types];
 }
 
 function typeToContext(typeStr: string | undefined): Record<string, boolean> | undefined {
@@ -395,9 +452,7 @@ function parseVcardDate(value: string, params: Record<string, string>): PartialD
 
 function contextToType(contexts: Record<string, boolean> | undefined): string {
   if (!contexts) return "";
-  if (contexts.work) return "WORK";
-  if (contexts.private) return "HOME";
-  return "";
+  return [contexts.work && "WORK", contexts.private && "HOME"].filter(Boolean).join(",");
 }
 
 interface RawProperty {
@@ -552,7 +607,7 @@ function buildContact(raw: Record<string, string[]>): ContactCard | null {
           // Mapped to JSContact-standard kinds (RFC 9553 §2.2.1):
           //   prefix→title, additional→given2, suffix→generation.
           // Pushed in natural display order so `isOrdered: true` renders correctly.
-          const nParts = val.split(";");
+          const nParts = splitEscapedValue(decoded, ";");
           const components: NameComponent[] = [];
           if (nParts[3]) components.push({ kind: "title", value: nParts[3] });
           if (nParts[1]) components.push({ kind: "given", value: nParts[1] });
@@ -595,7 +650,7 @@ function buildContact(raw: Record<string, string[]>): ContactCard | null {
 
         case "ORG": {
           if (!card.organizations) card.organizations = {};
-          const orgParts = val.split(";").filter(Boolean);
+          const orgParts = splitEscapedValue(decoded, ";").filter(Boolean);
           const idx = Object.keys(card.organizations).length;
           card.organizations[`o${idx}`] = {
             name: orgParts[0],
@@ -606,7 +661,7 @@ function buildContact(raw: Record<string, string[]>): ContactCard | null {
 
         case "ADR": {
           if (!card.addresses) card.addresses = {};
-          const adrParts = val.split(";");
+          const adrParts = splitEscapedValue(decoded, ";");
           const idx = Object.keys(card.addresses).length;
           card.addresses[`a${idx}`] = {
             street: adrParts[2] || undefined,
@@ -773,7 +828,7 @@ function buildContact(raw: Record<string, string[]>): ContactCard | null {
 
         case "CATEGORIES": {
           if (!card.keywords) card.keywords = {};
-          const cats = val.split(",").map(c => c.trim()).filter(Boolean);
+          const cats = splitEscapedValue(decoded, ",").map(c => c.trim()).filter(Boolean);
           for (const cat of cats) {
             card.keywords[cat] = true;
           }
@@ -1133,19 +1188,92 @@ function buildContact(raw: Record<string, string[]>): ContactCard | null {
   return card;
 }
 
+// PRODID names the product that wrote the file, not the one that first made
+// the card, so the card's own prodId is not written back.
+const VCARD_PRODID = "-//JMAP-Webmail//EN";
+
+function hasUriScheme(value: string): boolean {
+  return /^[a-z][a-z0-9+.-]*:/i.test(value);
+}
+
+// JSContact timestamps are RFC 3339 (2025-07-28T12:17:00Z); vCard 4.0 wants
+// the ISO 8601 basic format (RFC 6350 §4.3.5): 20250728T121700Z.
+function toVcardTimestamp(value: string): string {
+  const m = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})?$/i);
+  if (!m) return value;
+  const zone = (m[7] || "").replace(":", "").toUpperCase();
+  return `${m[1]}${m[2]}${m[3]}T${m[4]}${m[5]}${m[6]}${zone}`;
+}
+
+// vCard 4.0 GEO is a geo: URI; a vCard 3.0 import may have left "lat;lon".
+function toGeoUri(coordinates: string): string {
+  if (/^geo:/i.test(coordinates)) return coordinates;
+  const m = coordinates.match(/^\s*(-?[\d.]+)\s*[;,]\s*(-?[\d.]+)\s*$/);
+  return m ? `geo:${m[1]},${m[2]}` : coordinates;
+}
+
+function utf8Length(char: string): number {
+  const code = char.codePointAt(0) ?? 0;
+  if (code < 0x80) return 1;
+  if (code < 0x800) return 2;
+  if (code < 0x10000) return 3;
+  return 4;
+}
+
+// RFC 6350 §3.2: lines SHOULD be folded at 75 octets, and a fold must not
+// split a multi-octet UTF-8 character. A continuation starts with one space.
+function foldLine(line: string): string {
+  const out: string[] = [];
+  let current = "";
+  let octets = 0;
+  for (const char of line) {
+    const size = utf8Length(char);
+    const limit = out.length === 0 ? 75 : 74;
+    if (octets + size > limit) {
+      out.push(current);
+      current = "";
+      octets = 0;
+    }
+    current += char;
+    octets += size;
+  }
+  out.push(current);
+  return out.join("\r\n ");
+}
+
+/** Contacts as vCard 4.0 (RFC 6350), each line folded and ended by CRLF. */
 export function generateVCard(contacts: ContactCard[]): string {
-  return contacts.map(generateSingleVCard).join("\r\n");
+  return contacts.map(generateSingleVCard).join("");
+}
+
+const VCARD_CONTACT_FIELDS = new Set<keyof ContactCard>([
+  "uid", "prodId", "kind", "updated", "name", "nicknames", "emails", "phones",
+  "organizations", "titles", "addresses", "anniversaries", "onlineServices",
+  "keywords", "preferredLanguages", "relatedTo", "cryptoKeys", "personalInfo",
+  "directories", "links", "notes", "members", "media", "speakToAs", "calendars",
+  "schedulingAddresses", "calendarUri", "schedulingUri", "freeBusyUri", "source", "created",
+]);
+
+const VCARD_CONTACT_METADATA = new Set([
+  "@type", "version", "id", "originalId", "addressBookIds", "accountId", "accountName", "isShared", "localAccountId",
+]);
+
+function rejectUnsupportedVCardFields(contact: ContactCard): void {
+  const unsupported = Object.keys(contact)
+    .filter(key => !VCARD_CONTACT_FIELDS.has(key as keyof ContactCard) && !VCARD_CONTACT_METADATA.has(key))
+    .sort();
+  if (unsupported.length > 0) {
+    throw new Error(`Cannot export unsupported contact fields to vCard: ${unsupported.join(", ")}`);
+  }
 }
 
 function generateSingleVCard(contact: ContactCard): string {
-  const lines: string[] = ["BEGIN:VCARD", "VERSION:3.0"];
+  rejectUnsupportedVCardFields(contact);
+  const lines: string[] = ["BEGIN:VCARD", "VERSION:4.0", `PRODID:${VCARD_PRODID}`];
 
   if (contact.uid) {
-    lines.push(`UID:${contact.uid}`);
-  }
-
-  if (contact.prodId) {
-    lines.push(`PRODID:${contact.prodId}`);
+    // UID is a URI by default (RFC 6350 §6.7.6); other values must say so.
+    lines.push(hasUriScheme(contact.uid) ? `UID:${contact.uid}` : `UID;VALUE=text:${contact.uid}`);
   }
 
   if (contact.kind) {
@@ -1153,7 +1281,7 @@ function generateSingleVCard(contact: ContactCard): string {
   }
 
   if (contact.updated) {
-    lines.push(`REV:${contact.updated}`);
+    lines.push(`REV:${toVcardTimestamp(contact.updated)}`);
   }
 
   const components = contact.name?.components || [];
@@ -1167,13 +1295,15 @@ function generateSingleVCard(contact: ContactCard): string {
   const additional = findKind("given2", "additional", "middle");
 
   // FN is mandatory in vCard, so fall back to the organization name for org cards.
-  const fn = [prefix, given, additional, surname, suffix].filter(Boolean).join(" ")
-    || contact.name?.full
+  const fn = contact.name?.full
+    || [prefix, given, additional, surname, suffix].filter(Boolean).join(" ")
     || Object.values(contact.organizations || {})[0]?.name
     || "";
   if (fn) {
-    lines.push(`FN:${encodeValue(fn)}`);
+    // vCard does not order properties, but some importers drop the first
+    // and last name unless N comes before FN (#1407).
     lines.push(`N:${encodeValue(surname)};${encodeValue(given)};${encodeValue(additional)};${encodeValue(prefix)};${encodeValue(suffix)}`);
+    lines.push(`FN:${encodeValue(fn)}`);
   }
 
   // vCard has no second-surname slot; X-MAIDENNAME is the de-facto extension
@@ -1205,11 +1335,7 @@ function generateSingleVCard(contact: ContactCard): string {
       const typeParts: string[] = [];
       const ctxType = contextToType(phone.contexts);
       if (ctxType) typeParts.push(ctxType);
-      if (phone.features) {
-        for (const feat of Object.keys(phone.features)) {
-          if (phone.features[feat]) typeParts.push(feat.toUpperCase());
-        }
-      }
+      typeParts.push(...phoneFeaturesToTypes(phone.features));
       const params: string[] = [];
       if (typeParts.length > 0) params.push(`TYPE=${typeParts.join(",")}`);
       if (phone.pref) params.push(`PREF=${phone.pref}`);
@@ -1340,8 +1466,13 @@ function generateSingleVCard(contact: ContactCard): string {
   if (contact.relatedTo) {
     for (const [uri, rel] of Object.entries(contact.relatedTo)) {
       const relType = rel.relation ? Object.keys(rel.relation).find(k => rel.relation![k]) : undefined;
-      const typeParam = relType ? `;TYPE=${relType}` : "";
-      lines.push(`RELATED${typeParam}:${uri}`);
+      const params: string[] = [];
+      // RELATED is a URI by default (RFC 6350 §6.6.6); a bare name, as
+      // imported from Apple or Android, is text.
+      if (!hasUriScheme(uri)) params.push("VALUE=text");
+      if (relType) params.push(`TYPE=${relType}`);
+      const paramStr = params.length > 0 ? `;${params.join(";")}` : "";
+      lines.push(`RELATED${paramStr}:${hasUriScheme(uri) ? uri : encodeValue(uri)}`);
     }
   }
 
@@ -1404,19 +1535,29 @@ function generateSingleVCard(contact: ContactCard): string {
   if (contact.members) {
     for (const memberId of Object.keys(contact.members)) {
       if (contact.members[memberId]) {
-        lines.push(`MEMBER:urn:uuid:${memberId}`);
+        // Keys are URIs already for groups made here (members are keyed by
+        // uid, a urn:uuid:) and for groups from CardDAV clients (Stalwart
+        // keeps MEMBER values verbatim); only a bare key gets the prefix.
+        const uri = /^[a-z][a-z0-9+.-]*:/i.test(memberId) ? memberId : `urn:uuid:${memberId}`;
+        lines.push(`MEMBER:${uri}`);
       }
     }
   }
 
   if (contact.media) {
+    // Blob-only entries (Stalwart 1.0) are turned into data: URIs by the
+    // caller before export; there is nothing to write for them here.
     for (const media of Object.values(contact.media)) {
-      if (media.uri) {
+      if (media?.uri) {
         const prop = media.kind === "logo" ? "LOGO" : media.kind === "sound" ? "SOUND" : "PHOTO";
         if (media.uri.startsWith("data:")) {
-          const match = media.uri.match(/^data:([^;]+);base64,(.+)$/);
-          if (match) {
-            lines.push(`${prop};ENCODING=b;TYPE=${match[1]}:${match[2]}`);
+          // vCard 4.0 carries inline media as a data: URI (no ENCODING=b).
+          // Stalwart writes photos without a media type as `data:;base64,`
+          // (0.16.x) and `data:base64,` (0.16.0); the card's mediaType fills in.
+          const parsed = parseBase64DataUri(media.uri);
+          if (parsed?.data) {
+            const type = parsed.type || media.mediaType || "";
+            lines.push(`${prop}:data:${type};base64,${parsed.data}`);
           }
         } else {
           const mt = media.mediaType ? `;MEDIATYPE=${media.mediaType}` : "";
@@ -1430,7 +1571,7 @@ function generateSingleVCard(contact: ContactCard): string {
   if (contact.addresses) {
     for (const addr of Object.values(contact.addresses)) {
       if (addr.coordinates) {
-        lines.push(`GEO:${addr.coordinates}`);
+        lines.push(`GEO:${toGeoUri(addr.coordinates)}`);
       }
       if (addr.timeZone) {
         lines.push(`TZ:${addr.timeZone}`);
@@ -1466,12 +1607,12 @@ function generateSingleVCard(contact: ContactCard): string {
   }
 
   if (contact.created) {
-    // RFC 9554 §3.1 - CREATED is a timestamp; emit as-is for round-trip.
-    lines.push(`CREATED:${contact.created}`);
+    // RFC 9554 §3.1 - CREATED is a timestamp.
+    lines.push(`CREATED:${toVcardTimestamp(contact.created)}`);
   }
 
   lines.push("END:VCARD");
-  return lines.join("\r\n");
+  return lines.map(line => `${foldLine(line)}\r\n`).join("");
 }
 
 export function detectDuplicates(

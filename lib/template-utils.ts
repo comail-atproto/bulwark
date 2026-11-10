@@ -1,4 +1,5 @@
 import DOMPurify from 'dompurify';
+import { sanitizeEmailHtml } from './email-sanitization';
 import type { EmailTemplate } from './template-types';
 import { BUILT_IN_PLACEHOLDERS } from './template-types';
 import { generateUUID } from './utils';
@@ -51,6 +52,12 @@ export function getAutoFilledPlaceholders(
 
   const values: Record<string, string> = {
     date: now.toLocaleDateString(locale, { year: 'numeric', month: 'long', day: 'numeric' }),
+    // The locale's all-numeric form (19.10.2026, 10/19/2026), and the parts
+    // for any other order or separator (#1284).
+    short_date: now.toLocaleDateString(locale, { year: 'numeric', month: '2-digit', day: '2-digit' }),
+    day: String(now.getDate()).padStart(2, '0'),
+    month: String(now.getMonth() + 1).padStart(2, '0'),
+    year: String(now.getFullYear()),
     day_of_week: now.toLocaleDateString(locale, { weekday: 'long' }),
   };
 
@@ -138,6 +145,16 @@ function sanitizeText(value: unknown): string {
   return DOMPurify.sanitize(String(value || ''), STRIP_HTML_CONFIG);
 }
 
+/**
+ * An HTML template body from outside the app (a templates file, a synced
+ * settings blob written by another client) as the store may hold it. Bodies
+ * the plugin API creates are sanitised at creation; these were kept raw and
+ * reached the composer's placeholder preview as markup in the app document.
+ */
+function sanitizeTemplateHtml(value: unknown): string {
+  return sanitizeEmailHtml(String(value || ''));
+}
+
 interface ExportData {
   version: 1;
   type: 'webmail-templates';
@@ -174,6 +191,9 @@ export {
   type SyncedTemplateState,
 } from './template-merge';
 
+/** `createdAt` / `updatedAt` of a synced template that has none. */
+const UNKNOWN_TIME = new Date(0).toISOString();
+
 /**
  * Structurally validates a `templates` value from a synced settings blob or
  * settings-file import. Returns null when the value is not an array (a blob
@@ -193,13 +213,15 @@ export function parseSyncedTemplates(value: unknown): EmailTemplate[] | null {
     seen.add(t.id);
 
     const recipients = t.defaultRecipients as Record<string, unknown> | undefined;
-    const now = new Date().toISOString();
+    // A fixed time, not now: a copy without a date must never win a merge
+    // by `updatedAt` against one that has a date.
+    const now = UNKNOWN_TIME;
 
     templates.push({
       id: t.id,
       name: sanitizeText(t.name),
       subject: sanitizeText(t.subject),
-      body: t.isHTML ? String(t.body || '') : sanitizeText(t.body),
+      body: t.isHTML ? sanitizeTemplateHtml(t.body) : sanitizeText(t.body),
       isHTML: Boolean(t.isHTML),
       category: sanitizeText(t.category),
       defaultRecipients: recipients && typeof recipients === 'object'
@@ -277,7 +299,7 @@ export function importTemplates(json: string): ImportResult {
       id: generateUUID(),
       name: sanitizeText(t.name),
       subject: sanitizeText(t.subject),
-      body: t.isHTML ? String(t.body || '') : sanitizeText(t.body),
+      body: t.isHTML ? sanitizeTemplateHtml(t.body) : sanitizeText(t.body),
       isHTML: Boolean(t.isHTML),
       category: sanitizeText(t.category),
       defaultRecipients: recipients && typeof recipients === 'object'
