@@ -1,6 +1,7 @@
 import { configManager } from '@/lib/admin/config-manager';
 import { logger } from '@/lib/logger';
-import { getCookieOptions } from '@/lib/oauth/cookie-config';
+import { getSignInCookieOptions } from '@/lib/oauth/cookie-config';
+import { fitsSetCookieBudget } from '@/lib/oauth/set-cookie-budget';
 
 /*
  * RP-initiated logout (OpenID Connect RP-Initiated Logout 1.0), #905.
@@ -10,31 +11,12 @@ import { getCookieOptions } from '@/lib/oauth/cookie-config';
  * "Sign in with SSO" silently signs the same person back in. Signing out
  * therefore finishes with a top-level navigation to the provider's
  * end_session_endpoint, carrying the parameters it needs to identify the
- * session and the client.
+ * session and the client. Providers that advertise none get a logout URL
+ * from the admin instead (OAUTH_END_SESSION_URL or a server's
+ * oauth.endSessionUrl, #1279), and it is sent the same parameters.
  */
 
 export const ID_TOKEN_COOKIE = 'jmap_idt';
-
-/**
- * Most bytes the Set-Cookie headers of a response may take for it to also
- * carry the id token. nginx holds an upstream's response headers in
- * `proxy_buffer_size`, one memory page (4 KB) unless raised, as does
- * ingress-nginx, and answers 502 "upstream sent too big header" when they
- * do not fit. The route's other headers take about 300 bytes; the refresh
- * and access-token cookies beside the id token take 2-3 KB with a provider
- * that issues large JWTs such as Keycloak. Adding the id token pushed such
- * sign-ins over the limit (#1096), so it is only stored when it fits.
- * Otherwise sign-out identifies the client by `client_id` alone. This also
- * keeps the id-token cookie under the browsers' ~4096-byte cookie cap.
- */
-const MAX_SET_COOKIE_BYTES = 3500;
-
-/**
- * A Set-Cookie header's size beyond the cookie value: header and cookie
- * name, attributes (path, expiry, flags) and line break. About 120-135 bytes
- * for these cookies, rounded up.
- */
-const SET_COOKIE_OVERHEAD_BYTES = 150;
 
 /** Get the id-token cookie name for a given account slot. Slot 0 uses the bare name. */
 export function idTokenCookieName(slot: number): string {
@@ -52,19 +34,17 @@ function idTokenCookiePath(basePath: string | undefined): string {
 }
 
 interface CookieWriter {
+  get(name: string): unknown;
   set(name: string, value: string, options?: Record<string, unknown>): unknown;
   delete(options: { name: string; path: string }): unknown;
-}
-
-function setCookieBytes(values: ReadonlyArray<string | null | undefined>): number {
-  return values.reduce((sum, value) => (value ? sum + value.length + SET_COOKIE_OVERHEAD_BYTES : sum), 0);
 }
 
 /**
  * Remember the slot's id token for sign-out, or forget a stale one.
  * `otherCookieValues` are the values of the other cookies the same response
  * sets; the id token is only stored when all of them fit the response's
- * header budget.
+ * header budget. Otherwise sign-out identifies the client by `client_id`
+ * alone. The budget also keeps the cookie under the browsers' ~4096-byte cap.
  */
 export function storeIdToken(
   cookieStore: CookieWriter,
@@ -72,14 +52,17 @@ export function storeIdToken(
   idToken: unknown,
   basePath: string | undefined,
   otherCookieValues: ReadonlyArray<string | null | undefined> = [],
+  remember = true,
 ): void {
   const name = idTokenCookieName(slot);
   const path = idTokenCookiePath(basePath);
-  if (typeof idToken !== 'string' || !idToken || setCookieBytes([...otherCookieValues, idToken]) > MAX_SET_COOKIE_BYTES) {
-    cookieStore.delete({ name, path });
+  if (typeof idToken !== 'string' || !idToken || !fitsSetCookieBudget([...otherCookieValues, idToken])) {
+    // Deleting a cookie the browser does not have would only spend header
+    // bytes. The cookie's path covers this route, so the browser sends it.
+    if (cookieStore.get(name)) cookieStore.delete({ name, path });
     return;
   }
-  cookieStore.set(name, idToken, { ...getCookieOptions(), path });
+  cookieStore.set(name, idToken, { ...getSignInCookieOptions(remember), path });
 }
 
 export function clearIdToken(cookieStore: CookieWriter, slot: number, basePath: string | undefined): void {
@@ -89,6 +72,11 @@ export function clearIdToken(cookieStore: CookieWriter, slot: number, basePath: 
 /** Whether signing out should also end the provider's session (OAUTH_END_SESSION). */
 export function isEndSessionEnabled(): boolean {
   return configManager.get<boolean>('oauthEndSession', true) !== false;
+}
+
+/** Whether signing out revokes the refresh token at the provider (OAUTH_REVOKE_ON_SIGN_OUT). */
+export function isRevokeOnSignOutEnabled(): boolean {
+  return configManager.get<boolean>('oauthRevokeOnSignOut', true) !== false;
 }
 
 function isLoopbackHost(hostname: string): boolean {
@@ -126,7 +114,7 @@ export function getPostLogoutRedirectUri(): string | undefined {
 
 /**
  * The URL to navigate the browser to so the provider ends its session, or
- * null when the discovered endpoint is unusable.
+ * null when the discovered or configured endpoint is unusable.
  *
  * `client_id` is always sent: providers use it to validate the redirect URI
  * and to find the session when no id token is at hand. `id_token_hint` is sent

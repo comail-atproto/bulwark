@@ -6,21 +6,34 @@ import { pluginStorage } from '../plugin-storage';
 import {
   emailHooks, calendarHooks, calendarFormHooks, contactHooks, fileHooks,
   authHooks, settingsHooks, identityHooks, filterHooks,
-  taskHooks, templateHooks, smimeHooks, vacationHooks,
+  taskHooks, templateHooks, vacationHooks,
   uiHooks, themeHooks, toastHooks, dragDropHooks,
   keyboardHooks, appLifecycleHooks, accountSecurityHooks,
   sidebarAppHooks, avatarHooks, renderHooks, routerHooks,
   messageListTabHooks,
-  removeAllPluginHooks, pluginErrorTracker,
+  removeAllPluginHooks, pluginErrorTracker, setHookDialogGate,
 } from '../plugin-hooks';
 import { useMessageListTabsStore } from '@/stores/message-list-tabs-store';
+import { useEmailStore } from '@/stores/email-store';
+import { emailToReadView } from '../plugin-projection';
 import { verifyBundle } from './bundle-integrity';
 import { downloadManagedBundle } from './bundle-fetch';
-import { createBackgroundInstance } from './host-bridge';
-import { register as registerActive, deregister as deregisterActive, all as allActiveEntries } from './registry';
+import { createBackgroundInstance, forEachInstance, snapshotRegionalSettings, type InitDoneInfo, type RegionalSnapshot } from './host-bridge';
+import { register as registerActive, deregister as deregisterActive, all as allActiveEntries, get as getActive, type SlotOffer } from './registry';
 import { cancelPluginDialogs } from './host-api';
+import { hasDialogFor, whenNoDialogFor } from './host-dialog';
 import { registerShortcuts } from './shortcuts';
-import { mayOfferSlot, mayRegisterHook } from './permissions';
+import { mayOfferSlot, mayRegisterHook, pluginHasPermission, slotPropsFor } from './permissions';
+import { clearPluginActions, setActionDispatcher } from './actions';
+import { clearDayLabels } from './day-labels';
+import { clearPluginListFilters } from './list-filters';
+import { clearPluginPages } from './pages';
+import { clearSectionTitle } from './section-titles';
+import { cancelPluginProxyRequests } from './proxy-client';
+import { cancelConnectFor } from './connect-dialog';
+import { isHookHandedOver } from './host-features';
+import type { SlotName } from '../plugin-types';
+import { PLUGIN_REFUSED_ERROR, pluginAllowed } from '../outgoing-hosts';
 
 // ─── Hook-bus lookup (one flat map for name → bus) ────────────
 
@@ -29,7 +42,7 @@ type AnyBus = { register: (pluginId: string, handler: (...args: unknown[]) => un
 const HOOK_BUSES: Record<string, AnyBus> = Object.assign({},
   emailHooks, calendarHooks, calendarFormHooks, contactHooks, fileHooks,
   authHooks, settingsHooks, identityHooks, filterHooks,
-  taskHooks, templateHooks, smimeHooks, vacationHooks,
+  taskHooks, templateHooks, vacationHooks,
   uiHooks, themeHooks, toastHooks, dragDropHooks,
   keyboardHooks, appLifecycleHooks, accountSecurityHooks,
   sidebarAppHooks, avatarHooks, renderHooks, routerHooks,
@@ -38,24 +51,38 @@ const HOOK_BUSES: Record<string, AnyBus> = Object.assign({},
 
 // ─── Store accessor (status updates flow through the existing store) ──
 
-type StoreAccessor = { setPluginStatus: (id: string, status: InstalledPlugin['status'], error?: string) => void };
+type StoreAccessor = {
+  setPluginStatus: (id: string, status: InstalledPlugin['status'], error?: string) => void;
+  /** Turn a failing plugin off for good (until the user turns it on again). */
+  markAutoDisabled?: (id: string) => void;
+};
 let storeAccessor: StoreAccessor | null = null;
 export function setSandboxStoreAccessor(a: StoreAccessor): void { storeAccessor = a; }
 
 // ─── Locale (kept in step with the app locale) ────────────────
 
 let currentLocale = 'en';
-export function setSandboxLocale(locale: string): void {
+let currentRegionalKey = '';
+
+export function setSandboxLocale(locale: string, regional?: RegionalSnapshot): void {
   // Ignore empty/falsy values so a not-yet-seeded locale store can't clobber a
   // good locale back to '' - the initial 'en' default stands until the real
   // locale arrives via the store subscription.
   if (!locale) return;
+  const reg = regional ?? (typeof snapshotRegionalSettings === 'function' ? snapshotRegionalSettings(locale) : undefined);
+  const regKey = reg ? JSON.stringify(reg) : '';
+  const changed = locale !== currentLocale || regKey !== currentRegionalKey;
   currentLocale = locale;
+  currentRegionalKey = regKey;
   // Background instances read `currentLocale` at load time; the slot-iframe
   // component reads this global at spawn time (plugin-iframe-slot.tsx). Keep
-  // both in step from one place. Already-running instances are not re-pushed,
-  // so a locale switch only affects plugins/slots loaded afterwards.
+  // both in step from one place.
   (globalThis as unknown as { __APP_LOCALE__?: string }).__APP_LOCALE__ = locale;
+  if (!changed) return;
+  // Running plugins switch too: their slots re-render in the new language
+  // and their onLocaleChange handlers run.
+  forEachInstance(null, (instance) => instance.setLocale(locale, reg));
+  void themeHooks.onLocaleChange.emit({ locale });
 }
 
 // ─── Bundle fetch ─────────────────────────────────────────────
@@ -73,7 +100,7 @@ async function readCachedBundle(plugin: InstalledPlugin): Promise<string | null>
   }
 }
 
-async function getBundleCode(plugin: InstalledPlugin): Promise<string> {
+async function getBundleCode(plugin: InstalledPlugin): Promise<{ code: string; hash: string }> {
   // IndexedDB is the fast path: the store's server sync (managed plugins) and
   // the upload flow (user plugins) both populate it. It is per-browser though,
   // while a managed plugin's record travels with the server registry to every
@@ -86,8 +113,7 @@ async function getBundleCode(plugin: InstalledPlugin): Promise<string> {
   const cached = await readCachedBundle(plugin);
   if (cached) {
     try {
-      await verifyBundle(cached, plugin.bundleHash);
-      return cached;
+      return { code: cached, hash: await verifyBundle(cached, plugin.bundleHash) };
     } catch (err) {
       if (!plugin.managed) throw err;
       // Stale (sync updated the record but not the bytes) or corrupt copy; the
@@ -99,15 +125,63 @@ async function getBundleCode(plugin: InstalledPlugin): Promise<string> {
     throw new Error(`No bundle in storage for plugin "${plugin.id}". Reinstall to populate.`);
   }
 
-  const code = await downloadManagedBundle(plugin.id, plugin.bundleHash);
-  await verifyBundle(code, plugin.bundleHash);
+  const code = await downloadManagedBundle(plugin.id, plugin.bundleHash, {
+    requireSignature: plugin.tier === 'privileged',
+  });
+  const hash = await verifyBundle(code, plugin.bundleHash);
   try {
     await pluginStorage.saveCode(plugin.id, code);
   } catch (err) {
     // Caching is best effort - the plugin runs from the fetched bytes either way.
     console.warn(`[plugin-sandbox] Could not cache bundle for "${plugin.id}":`, err);
   }
-  return code;
+  return { code, hash };
+}
+
+// ─── Slot offers from the last start ─────────────────────────
+
+// A plugin's slots are fixed exports of its bundle. They used to be known
+// only once its background frame had booted and run activate(), so a slot
+// frame (a sidebar section, say) started ~1 s after the plugin did, behind
+// it. The offers are kept per bundle hash, and a plugin started with the
+// same verified bundle offers them right away; its frames then boot next to
+// the background one. The real list replaces them when init is done. The
+// record only says where to draw: the same permission filter applies and
+// the frames run the same verified code. A changed bundle has another hash.
+const SLOT_CACHE_PREFIX = 'plugin-slot-offers:';
+
+function readSlotOffers(pluginId: string, hash: string): InitDoneInfo['slots'] | null {
+  try {
+    const raw = localStorage.getItem(SLOT_CACHE_PREFIX + pluginId);
+    if (!raw) return null;
+    const rec = JSON.parse(raw) as { hash?: unknown; slots?: unknown };
+    if (rec.hash !== hash || !Array.isArray(rec.slots)) return null;
+    return rec.slots.filter((o): o is InitDoneInfo['slots'][number] =>
+      !!o && typeof o === 'object' && typeof (o as { name?: unknown }).name === 'string');
+  } catch {
+    return null;
+  }
+}
+
+function writeSlotOffers(pluginId: string, hash: string, slots: InitDoneInfo['slots']): void {
+  try {
+    localStorage.setItem(SLOT_CACHE_PREFIX + pluginId, JSON.stringify({ hash, slots }));
+  } catch {
+    // Storage blocked or full: the next start just waits for init again.
+  }
+}
+
+/** Forget a plugin's remembered slots (it was removed). */
+export function forgetSlotOffers(pluginId: string): void {
+  try { localStorage.removeItem(SLOT_CACHE_PREFIX + pluginId); } catch { /* ignore */ }
+}
+
+function permittedOffers(plugin: InstalledPlugin, slots: InitDoneInfo['slots'], warn: boolean): SlotOffer[] {
+  return slots.filter((offer) => {
+    if (mayOfferSlot(plugin, offer.name)) return true;
+    if (warn) console.warn(`[plugin-sandbox] Plugin "${plugin.id}" lacks the permission for slot "${offer.name}"; not rendered`);
+    return false;
+  });
 }
 
 // ─── Load ─────────────────────────────────────────────────────
@@ -130,17 +204,48 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
   });
 }
 
-export async function loadSandboxedPlugin(plugin: InstalledPlugin): Promise<void> {
-  if (typeof window === 'undefined') return;
+const loading = new Map<string, Promise<void>>();
+
+/**
+ * Start a plugin. Calling it again for a plugin that is running or still
+ * starting does nothing: start-up and a force-enable sync used to both load
+ * a plugin, leaving two background iframes whose hooks all fired twice.
+ */
+export function loadSandboxedPlugin(plugin: InstalledPlugin): Promise<void> {
+  if (typeof window === 'undefined') return Promise.resolve();
+  // Before the registry: a plugin offering remembered slots is registered
+  // while it is still starting.
+  const pending = loading.get(plugin.id);
+  if (pending) return pending;
+  if (getActive(plugin.id)) return Promise.resolve();
+  const run = startSandboxedPlugin(plugin).finally(() => loading.delete(plugin.id));
+  loading.set(plugin.id, run);
+  return run;
+}
+
+async function startSandboxedPlugin(plugin: InstalledPlugin): Promise<void> {
+  // A plugin that declares network access doesn't start while third-party
+  // traffic is off; the rest run (#903).
+  if (!pluginAllowed(plugin)) {
+    storeAccessor?.setPluginStatus(plugin.id, 'error', PLUGIN_REFUSED_ERROR);
+    console.warn(`[plugin-sandbox] "${plugin.id}" not started: it declares network access and third-party traffic is off`);
+    return;
+  }
 
   let background: ReturnType<typeof createBackgroundInstance> | null = null;
   try {
-    const code = await getBundleCode(plugin);
+    const tier = 'untrusted' as const;
+    const { code, hash } = await getBundleCode(plugin);
     background = createBackgroundInstance({
       plugin,
       code,
       locale: currentLocale,
     });
+
+    const remembered = readSlotOffers(plugin.id, hash);
+    if (remembered && remembered.length > 0) {
+      registerActive({ plugin, code, tier, background, slotOffers: permittedOffers(plugin, remembered, false), hookDisposables: [] });
+    }
 
     // Wait for the background runtime to evaluate the bundle, register hooks,
     // and enumerate slots. Bounded so a stuck iframe doesn't hang activation.
@@ -157,8 +262,12 @@ export async function loadSandboxedPlugin(plugin: InstalledPlugin): Promise<void
     // A hook hands the plugin data or a say in what the host sends, so it
     // needs the same manifest permission as the matching API call.
     const hookDisposables: Disposable[] = [];
+    let openHandler: ((...args: unknown[]) => unknown) | null = null;
     for (const hookName of info.hooks) {
       if (hookName.startsWith('shortcut:')) continue;
+      // Not a bus: the host calls it directly for clicks on this plugin's own
+      // actions (see setActionDispatcher below).
+      if (hookName === 'onAction') continue;
       const bus = HOOK_BUSES[hookName];
       if (!bus) {
         console.warn(`[plugin-sandbox] Plugin "${plugin.id}" registered unknown hook "${hookName}"`);
@@ -168,26 +277,31 @@ export async function loadSandboxedPlugin(plugin: InstalledPlugin): Promise<void
         console.warn(`[plugin-sandbox] Plugin "${plugin.id}" lacks the permission for hook "${hookName}"; not registered`);
         continue;
       }
-      const proxy = async (...args: unknown[]) => {
-        try {
-          return await bg.invokeHook(hookName, args);
-        } catch (err) {
-          pluginErrorTracker.record(plugin.id, err);
-          throw err;
-        }
-      };
+      // The bus records a failure once; recording it here too made the
+      // three-strikes breaker trip on the second error.
+      // While Bulwark does a retired plugin's job itself, that plugin's
+      // hook is skipped: copies older than the release that steps back on
+      // its own would ask twice (host-features.ts). Asked per call, so
+      // turning the core switch off gives the plugin its hook back.
+      const pluginId = plugin.id;
+      const proxy = (...args: unknown[]) => (isHookHandedOver(pluginId, hookName) ? undefined : bg.invokeHook(hookName, args));
       hookDisposables.push(bus.register(plugin.id, proxy as (...a: unknown[]) => unknown));
+      if (hookName === 'onEmailOpen') openHandler = proxy;
     }
 
-    // Install plugin-declared keyboard shortcuts.
-    const shortcutDispose = registerShortcuts(bg, info.shortcuts ?? []);
-    hookDisposables.push({ dispose: shortcutDispose });
+    // Install plugin-declared keyboard shortcuts. A shortcut sees every
+    // key press outside text fields, so it needs ui:keyboard like the hooks.
+    if ((info.shortcuts ?? []).length > 0) {
+      if (pluginHasPermission(plugin, 'ui:keyboard')) {
+        const shortcutDispose = registerShortcuts(bg, info.shortcuts ?? []);
+        hookDisposables.push({ dispose: shortcutDispose });
+      } else {
+        console.warn(`[plugin-sandbox] Plugin "${plugin.id}" declares shortcuts without the ui:keyboard permission; not registered`);
+      }
+    }
 
-    const slotOffers = info.slots.filter((offer) => {
-      if (mayOfferSlot(plugin, offer.name)) return true;
-      console.warn(`[plugin-sandbox] Plugin "${plugin.id}" lacks the permission for slot "${offer.name}"; not rendered`);
-      return false;
-    });
+    const slotOffers = permittedOffers(plugin, info.slots, true);
+    writeSlotOffers(plugin.id, hash, info.slots);
 
     registerActive({
       plugin,
@@ -198,8 +312,20 @@ export async function loadSandboxedPlugin(plugin: InstalledPlugin): Promise<void
     });
 
     storeAccessor?.setPluginStatus(plugin.id, 'running');
+
+    // onEmailOpen fires when a message is selected. A plugin that starts
+    // while one is already open (page load on a message URL, a plugin turned
+    // on later) would otherwise not see it until the next one.
+    const openEmail = openHandler ? useEmailStore.getState().selectedEmail : null;
+    if (openHandler && openEmail) {
+      Promise.resolve(openHandler(emailToReadView(openEmail))).catch((err) => pluginErrorTracker.record(plugin.id, err));
+    }
     console.info(`[plugin-sandbox] "${plugin.id}" activated (hooks=${info.hooks.length}, slots=${info.slots.length})`);
   } catch (err) {
+    // Turned off while it was starting: unload has set the status.
+    if (background?.closed && getActive(plugin.id)?.background !== background) return;
+    // Offered from the last start: take the slots back down.
+    if (background && getActive(plugin.id)?.background === background) deregisterActive(plugin.id);
     const msg = (err as Error).message ?? String(err);
     storeAccessor?.setPluginStatus(plugin.id, 'error', msg);
     console.error(`[plugin-sandbox] Failed to load "${plugin.id}":`, err);
@@ -210,6 +336,22 @@ export async function loadSandboxedPlugin(plugin: InstalledPlugin): Promise<void
     }
   }
 }
+
+// ─── Action clicks ────────────────────────────────────────────
+
+// A click on a button a plugin declared (api.ui.setActions) goes to that
+// plugin's background instance as its `onAction` hook, with the surface's
+// context cut down to what the plugin may see.
+setActionDispatcher(async (pluginId, surface, actionId, context) => {
+  const entry = allActiveEntries().find((e) => e.plugin.id === pluginId);
+  if (!entry) return;
+  const visible = slotPropsFor(entry.plugin, surface as SlotName, context);
+  try {
+    await entry.background.invokeHook('onAction', [{ surface, actionId, context: visible }]);
+  } catch (err) {
+    pluginErrorTracker.record(pluginId, err);
+  }
+});
 
 // ─── Unload ───────────────────────────────────────────────────
 
@@ -223,6 +365,15 @@ export function unloadSandboxedPlugin(pluginId: string): void {
   // Drop any message-list category tabs the plugin registered so the strip
   // disappears (and the inbox unfilters) the moment the plugin is disabled.
   try { useMessageListTabsStore.getState().clearTabs(pluginId); } catch { /* ignore */ }
+  // Same for the buttons, list filters, day labels and pages it declared,
+  // and anything still running through the proxy for it.
+  clearPluginActions(pluginId);
+  clearPluginListFilters(pluginId);
+  clearDayLabels(pluginId);
+  clearPluginPages(pluginId);
+  clearSectionTitle(pluginId);
+  cancelPluginProxyRequests(pluginId);
+  cancelConnectFor(pluginId);
   try { entry.background.destroy(); } catch { /* ignore */ }
   cancelPluginDialogs(pluginId);
   pluginErrorTracker.reset(pluginId);
@@ -247,9 +398,15 @@ export function deactivateAllSandboxed(): void {
 // ─── Auto-disable ─────────────────────────────────────────────
 
 export function setupSandboxAutoDisable(): void {
+  setHookDialogGate({ hasOpenDialog: hasDialogFor, whenDialogsClosed: whenNoDialogFor });
   pluginErrorTracker.setAutoDisableCallback((pluginId) => {
     unloadSandboxedPlugin(pluginId);
-    storeAccessor?.setPluginStatus(pluginId, 'error', 'Auto-disabled due to repeated errors');
+    if (storeAccessor?.markAutoDisabled) storeAccessor.markAutoDisabled(pluginId);
+    else storeAccessor?.setPluginStatus(pluginId, 'error', 'auto-disabled');
+    // PluginDialogHost turns this into a toast in the user's language.
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('plugin:auto-disabled', { detail: { pluginId } }));
+    }
   });
 }
 

@@ -17,7 +17,8 @@ import { all as allActive, get as getActive } from './plugin-sandbox/registry';
 // Re-export so the plugin store can keep the sandbox locale in step via this
 // facade, instead of importing lib/plugin-sandbox/loader directly (which would
 // also pull the hook buses into consumers' module graphs).
-export { setSandboxLocale } from './plugin-sandbox/loader';
+export { setSandboxLocale, forgetSlotOffers } from './plugin-sandbox/loader';
+export { snapshotRegionalSettings, type RegionalSnapshot } from './plugin-sandbox/host-bridge';
 
 /**
  * Historically re-published React/ReactDOM on `globalThis` for the blob-import
@@ -33,7 +34,10 @@ export function exposePluginExternals(): void {
 
 // ─── Store accessor (status updates) ──────────────────────────
 
-type StoreAccessor = { setPluginStatus: (id: string, status: InstalledPlugin['status'], error?: string) => void };
+type StoreAccessor = {
+  setPluginStatus: (id: string, status: InstalledPlugin['status'], error?: string) => void;
+  markAutoDisabled?: (id: string) => void;
+};
 
 export function setPluginStoreAccessor(accessor: StoreAccessor): void {
   setSandboxStoreAccessor(accessor);

@@ -2,14 +2,24 @@
 // on `plugin.permissions` BEFORE doing the underlying work, and only returns
 // structured-cloneable data back to the iframe.
 
-import type { InstalledPlugin, Permission } from '../plugin-types';
-import { pluginHasPermission } from './permissions';
+import type { AppInfoView, InstalledPlugin, Permission } from '../plugin-types';
+import { fetchConfig } from '@/hooks/use-config';
+import { IS_LITE } from '../lite';
+import { doAppGetSettings, doAppSearchSettings } from './host-api-app';
+import { mayOfferSlot, pluginHasPermission } from './permissions';
+import { proxyAccounts, proxyCancel, proxyConnect, proxyDisconnect, proxyFetch, type StreamSink } from './proxy-client';
+import { checkActions, isActionSurface, setPluginActions } from './actions';
+import { checkDayLabels, setDayLabels } from './day-labels';
+import { refreshRowBadges } from './row-badges';
+import { checkListFilters, setPluginListFilters } from './list-filters';
+import { checkPages, setPluginPages } from './pages';
 import { toast as appToast } from '@/stores/toast-store';
 import { useAuthStore } from '@/stores/auth-store';
 import { useAccountStore } from '@/stores/account-store';
 import { claimLegacyPluginStorage, pluginStoragePrefix } from './storage-scope';
 import { useIdentityStore } from '@/stores/identity-store';
-import { useEmailStore } from '@/stores/email-store';
+import { resolveEmailBlobContext, useEmailStore } from '@/stores/email-store';
+import { keywordPointer } from '../jmap/patch-pointer';
 import { useFilterStore } from '@/stores/filter-store';
 import { useMessageListTabsStore } from '@/stores/message-list-tabs-store';
 import {
@@ -19,18 +29,43 @@ import {
   type KeywordVisibility,
 } from '@/stores/settings-store';
 import type { MessageListTabsConfig } from '../plugin-types';
-import { apiFetch, getPathPrefix } from '../browser-navigation';
+import { apiFetch, getPathPrefix, withBasePath } from '../browser-navigation';
+import { createOAuthState } from '../plugin-oauth';
 import { reportUploadProgress } from '../upload-progress';
 import { DEFAULT_KEYWORD_SCAN_LIMIT } from '../jmap/client';
+import { isServerSetKeyword } from '../jmap/server-keywords';
 import { suggestKeywordColor } from '../keyword-discovery';
 import { MAX_KEYWORD_LENGTH } from '../keyword-nesting';
-import { KEYWORD_PREFIX } from '../thread-utils';
+import { emailKeyFor, KEYWORD_PREFIX } from '../thread-utils';
+import { DEFAULT_SEARCH_FILTERS, normalizePluginFilter } from '../jmap/search-utils';
 import { awaitDialog, awaitPrompt, awaitCustomDialog, type PromptField } from './host-dialog';
 import { fileStorage } from '../plugin-storage';
 import { generateUUID } from '../utils';
-import { AddressBook, ContactCard, Identity } from '../jmap/types';
+import { AddressBook, ContactCard, Email, Identity } from '../jmap/types';
 import { EncryptionAtRestConfig, PublicKeyInfo, PublicKeyInput, useAccountSecurityStore } from '@/stores/account-security-store';
-import { createHash } from 'crypto';
+import {
+  doCalendarCreateEvent, doCalendarDeleteEvent, doCalendarGetEvent, doCalendarGetEvents,
+  doCalendarListCalendars, doCalendarUpdateEvent, doTasksCreate, doTasksDelete, doTasksGet,
+  doTasksList, doTasksSetComplete, doTasksUpdate,
+} from './host-api-calendar';
+import {
+  doIdentitiesUpdate, doTemplatesCreate, doTemplatesDelete, doTemplatesGet, doTemplatesList,
+  doTemplatesUpdate, doVacationGet, doVacationSet,
+} from './host-api-settings';
+import {
+  doEmailArchive, doEmailGet, doEmailGetAttachment, doEmailGetRaw, doEmailList, doEmailMove, doEmailSearch, doMailboxesList,
+} from './host-api-mail';
+import { MAX_PLUGIN_FETCH_BYTES, readFileName, readMediaType, sessionClient } from './host-api-input';
+import { doComposeOpen, doComposeReply, doDraftsCreate } from './host-api-compose';
+import { doEmailForward } from './host-api-forward';
+import { doUiPrint } from './host-api-print';
+import { doNotificationsShow } from './host-api-notify';
+import { doAccountDataGet, doAccountDataSet, doUserFindPeople, doUserGetMailAccounts, doUserGetSelf } from './host-api-account';
+import { setSectionTitle } from './section-titles';
+import { requestPanel } from './panel-requests';
+import { requestPageNavigation } from './page-navigation';
+import { doComposerAttach, doComposerGetBody, doComposerGetSelection, doComposerReplaceBody, doComposerReplaceSelection } from './host-api-composer';
+import { pluginAllowed, wkdAllowed } from '../outgoing-hosts';
 
 /**
  * Methods only callable from the privileged (same-origin) tier. These expose
@@ -40,7 +75,9 @@ import { createHash } from 'crypto';
  */
 const PRIVILEGED_ONLY_METHODS = new Set<string>([
   'jmap.fetchBlob',
-  'jmap.uploadBlob',
+  // NOTE: jmap.uploadBlob is deliberately NOT here. The composer's
+  // `composer-attachment-source` slot is built for untrusted plugins that
+  // upload a file (from cloud storage, say) and hand the blob id to onAttach.
   'jmap.sendRaw',
   'jmap.submitRaw',
   'jmap.importRaw',
@@ -66,7 +103,7 @@ const PRIVILEGED_ONLY_METHODS = new Set<string>([
   'upfiles.save',
 ]);
 
-const PERM_PER_METHOD: Record<string, Permission | null> = {
+export const PERM_PER_METHOD: Readonly<Record<string, Permission | null>> = {
   // storage is unscoped by the manifest - implicit.
   'storage.get': null,
   'storage.set': null,
@@ -121,13 +158,33 @@ const PERM_PER_METHOD: Record<string, Permission | null> = {
   'addressbook.create': 'contacts:write',
   // user
   'user.getAccounts': 'account:read',
+  // The user's own account (principal id) and address, and which mail
+  // accounts are team (group) mailboxes.
+  'user.getSelf': 'account:read',
+  'user.getMailAccounts': 'account:read',
+  // People from the server's directory: names and addresses of others.
+  'user.findPeople': 'directory:read',
+  // A plugin's own value in a mail account's shared Inbox metadata.
+  'accountData.get': 'email:read',
+  'accountData.set': 'email:write',
   'user.getIdentities': 'identity:read',
+  // The IANA zone the app shows times in (Settings or the browser's).
+  'user.getTimeZone': null,
+  // The app's name and version: nothing about the user.
+  'app.getInfo': null,
+  // Where a setting is: the app's own texts, nothing about the user.
+  'app.searchSettings': null,
+  // The user's preferences (layout, formats, reading and sending behaviour).
+  'app.getSettings': 'settings:read',
   'user.logout': 'auth:emit',
   // admin
   'admin.getConfig': 'admin:config',
   'admin.getAllConfig': 'admin:config',
   'admin.setConfig': 'admin:config',
   'admin.deleteConfig': 'admin:config',
+  // The admin's non-secret settings for the calling plugin (a server
+  // address, a switch). Secrets stay on the server.
+  'plugin.getConfig': null,
   // ui - any plugin can ask the host to render a modal or open a URL.
   'ui.confirm': null,
   'ui.alert': null,
@@ -136,10 +193,13 @@ const PERM_PER_METHOD: Record<string, Permission | null> = {
   'ui.rerenderEmail': null,
   'ui.rerenderFetchedEmails': null,
   'ui.openExternalUrl': null,
+  // Print a page the plugin made (sanitised, no scripts, no network); 3 a minute.
+  'ui.print': null,
   'ui.downloadFile': 'ui:download-file',
   // email keyword mutations
   'email.setKeyword': 'email:write',
   'email.removeKeyword': 'email:write',
+  'email.updateKeywords': 'email:write',
   // Native keyword definitions are a deliberately narrow settings API: a
   // plugin can read definitions, append missing ones, or reorder the complete
   // existing set, but cannot overwrite or remove user-managed tags.
@@ -147,6 +207,8 @@ const PERM_PER_METHOD: Record<string, Permission | null> = {
   // than a settings permission.
   'keywords.list': 'settings:read',
   'keywords.add': 'settings:write',
+  'keywords.update': 'settings:write',
+  'keywords.remove': 'settings:write',
   'keywords.reorder': 'settings:write',
   'keywords.discover': 'email:read',
   'keywords.getCounts': 'email:read',
@@ -159,11 +221,95 @@ const PERM_PER_METHOD: Record<string, Permission | null> = {
   // categorize rewrites message keywords, so it needs the write permission
   // (a tabs-only plugin can still render tabs without it).
   'tabs.categorize': 'email:write',
+  // message-list search: the plugin never sees the results, but it decides
+  // which messages the list shows.
+  'search.run': 'email:read',
+  // OAuth with a third party: a state value bound to this plugin, and the
+  // redirect URI the provider sends the user back to.
+  'oauth.createState': 'http:fetch',
+  'oauth.getRedirectUri': 'http:fetch',
+  // Requests with a credential, through the server (lib/plugin-secrets).
+  'proxy.fetch': 'http:proxy',
+  'proxy.cancel': 'http:proxy',
+  'proxy.connect': 'http:proxy',
+  'proxy.accounts': 'http:proxy',
+  'proxy.disconnect': 'http:proxy',
+  // Buttons and menu entries drawn by the host; the surface's own
+  // permission is checked per call (see the slot catalogue).
+  'ui.setActions': null,
+  // Ask the rows again for onEmailListItemRender badges (rate limited).
+  'ui.refreshRowBadges': null,
+  'ui.setListFilters': 'ui:message-list',
+  'ui.setDayLabels': 'ui:calendar-action',
+  'ui.setPages': 'ui:app-page',
+  // Move the tab to one of the plugin's own pages (never anywhere else).
+  'ui.openPage': 'ui:app-page',
+  'ui.setSectionTitle': 'ui:sidebar-widget',
+  // Open, close or toggle the panel the plugin's slot sits in; the panel's
+  // own permission is checked per call (see the slot catalogue).
+  'ui.setPanel': null,
   // sieve (delivery-time classification)
   'sieve.isSupported': 'filters:read',
   'sieve.getActiveScript': 'filters:read',
   'sieve.validateScript': 'filters:write',
   'sieve.regenerate': 'filters:write',
+  // calendar events. Reads go to the server; writes go through the calendar
+  // store so its plugin hooks run. None of them sends invitations.
+  'calendar.listCalendars': 'calendar:read',
+  'calendar.getEvents': 'calendar:read',
+  'calendar.getEvent': 'calendar:read',
+  'calendar.createEvent': 'calendar:write',
+  'calendar.updateEvent': 'calendar:write',
+  'calendar.deleteEvent': 'calendar:write',
+  // tasks
+  'tasks.list': 'tasks:read',
+  'tasks.get': 'tasks:read',
+  'tasks.create': 'tasks:write',
+  'tasks.update': 'tasks:write',
+  'tasks.setComplete': 'tasks:write',
+  'tasks.delete': 'tasks:write',
+  // message templates
+  'templates.list': 'templates:read',
+  'templates.get': 'templates:read',
+  'templates.create': 'templates:write',
+  'templates.update': 'templates:write',
+  'templates.delete': 'templates:write',
+  // sender identities: name, reply-to and signatures, never the address
+  'identities.update': 'identity:write',
+  // out-of-office reply
+  'vacation.get': 'vacation:read',
+  'vacation.set': 'vacation:write',
+  // reading mail: one message with its text, a page of a folder, the folders
+  'email.get': 'email:read',
+  'email.list': 'email:read',
+  'email.search': 'email:read',
+  'mailboxes.list': 'email:read',
+  // The bytes of one attachment of a given message, or of the message
+  // itself. Unlike jmap.fetchBlob these only reach blobs of a message the
+  // plugin names, so the untrusted tier may call them.
+  'email.getAttachment': 'email:blob-read',
+  'email.getRaw': 'email:blob-read',
+  // Moving messages between the account's folders, archive included.
+  'email.move': 'email:write',
+  'email.archive': 'email:write',
+  // Forward a message with its attachments, without the composer. The
+  // host asks the user before the first forward to each address.
+  'email.forward': 'email:forward',
+  // Open the composer filled in; the user still decides whether to send.
+  'compose.open': 'compose:open',
+  // Reply to the message open in the reader, with text to start from.
+  'compose.reply': 'compose:open',
+  // Save a draft without opening the composer. Nothing is sent.
+  'drafts.create': 'email:write',
+  // A system notification (or a toast), naming the plugin, 5 a minute.
+  'notifications.show': 'ui:notifications',
+  // The message being written, in a composer that handed the plugin its id.
+  'composer.getBody': 'compose:read',
+  'composer.getSelection': 'compose:read',
+  'composer.replaceSelection': 'compose:write',
+  'composer.replaceBody': 'compose:write',
+  // Attach a file the plugin uploaded (jmap.uploadBlob).
+  'composer.attach': 'email:blob-write',
 };
 
 // ─── Cross-origin allow-list (mirrors lib/plugin-api.ts) ──────
@@ -207,9 +353,32 @@ function storageGet(pluginId: string, key: string): unknown {
   if (raw === null) return null;
   try { return JSON.parse(raw); } catch { return null; }
 }
+/**
+ * What one plugin may keep per account in localStorage. The host's own
+ * stores (sign-in, settings) live in the same 5-10 MB browser quota, so a
+ * plugin that filled it would break them.
+ */
+export const PLUGIN_STORAGE_QUOTA_BYTES = 1024 * 1024;
+
 function storageSet(pluginId: string, key: string, value: unknown): void {
   if (typeof window === 'undefined') return;
-  window.localStorage.setItem(storagePrefix(pluginId) + key, JSON.stringify(value));
+  if (typeof key !== 'string' || key.length === 0 || key.length > 256) {
+    throw new Error('storage.set: key must be a string of 1-256 characters');
+  }
+  const prefix = storagePrefix(pluginId);
+  const serialized = JSON.stringify(value);
+  if (serialized === undefined) throw new Error('storage.set: value is not JSON-serialisable');
+  let used = 0;
+  for (let i = 0; i < window.localStorage.length; i++) {
+    const k = window.localStorage.key(i);
+    if (!k?.startsWith(prefix) || k === prefix + key) continue;
+    used += k.length + (window.localStorage.getItem(k)?.length ?? 0);
+  }
+  // UTF-16 code units, which is what browsers count against the quota.
+  if (used + prefix.length + key.length + serialized.length > PLUGIN_STORAGE_QUOTA_BYTES) {
+    throw new Error(`Plugin storage is full (${Math.round(PLUGIN_STORAGE_QUOTA_BYTES / 1024)} KB per account)`);
+  }
+  window.localStorage.setItem(prefix + key, serialized);
 }
 function storageRemove(pluginId: string, key: string): void {
   if (typeof window === 'undefined') return;
@@ -300,16 +469,27 @@ function isApiPostPathAllowed(path: string, allowlist: readonly string[]): boole
  */
 const PLUGIN_POST_DENIED_ROUTES = new Set([
   'account',
+  'account-archive',
   'admin',
   'auth',
   'caldav',
+  // The user's agenda, a server-side fetch of any URL, and a third-party
+  // relay: each is data or reach a plugin gets only through its own
+  // permission-gated API, not through a POST with the user's cookies.
+  'calendar-agenda',
   'dev-jmap',
+  'fetch-ical',
   'plugin-approval-status',
+  // Another plugin's connected accounts and admin keys: the proxy injects
+  // the credential named in the query string, whichever plugin asks.
+  'plugin-proxy',
+  'plugin-secrets',
   'plugins',
   'push',
   'settings',
   'setup',
   'system',
+  'translate',
   'webdav',
   'wopi',
 ]);
@@ -318,7 +498,7 @@ const PLUGIN_POST_DENIED_ROUTES = new Set([
  * Checked on the path the router will see: decoded once and with repeated
  * slashes collapsed, so `/api/%61dmin/...` cannot pass for something else.
  */
-function isPluginPostDenied(pathname: string): boolean {
+export function isPluginPostDenied(pathname: string): boolean {
   let routePath: string;
   try {
     routePath = decodeURIComponent(pathname);
@@ -477,7 +657,44 @@ interface PluginFetchInit {
   body?: string | ArrayBuffer | ArrayBufferView | null;
 }
 
+// The http.fetch body is copied across postMessage twice (text and bytes);
+// MAX_PLUGIN_FETCH_BYTES (host-api-input.ts) caps it like every other body
+// the host hands a plugin.
+export { MAX_PLUGIN_FETCH_BYTES };
+
+async function readCapped(res: Response, limit: number): Promise<ArrayBuffer> {
+  const declared = Number(res.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > limit) {
+    void res.body?.cancel().catch(() => {});
+    throw new Error(`Response is larger than ${limit} bytes`);
+  }
+  if (!res.body) return res.arrayBuffer();
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > limit) {
+      void reader.cancel().catch(() => {});
+      throw new Error(`Response is larger than ${limit} bytes`);
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out.buffer;
+}
+
 async function doHttpFetch(plugin: InstalledPlugin, rawUrl: string, init?: PluginFetchInit) {
+  // Such a plugin isn't started in the no-third-party mode; this is the
+  // second lock in case one runs anyway (#903).
+  if (!pluginAllowed(plugin)) throw new Error('Outside requests are off: this server does not contact outside services');
   if (typeof rawUrl !== 'string') throw new Error('url must be a string');
   let url: URL;
   try { url = new URL(rawUrl); } catch { throw new Error('url must be absolute https://'); }
@@ -504,11 +721,23 @@ async function doHttpFetch(plugin: InstalledPlugin, rawUrl: string, init?: Plugi
     mode: 'cors',
     redirect: 'follow',
   });
+  // fetch() can't stop at a cross-origin redirect and still tell us where it
+  // was going, so it follows, and the plugin only gets the answer if the
+  // last hop is still allowlisted. The request carries the webmail origin,
+  // so a host that trusts that origin in CORS would otherwise answer it.
+  if (res.url) {
+    let finalUrl: URL | null = null;
+    try { finalUrl = new URL(res.url); } catch { /* opaque */ }
+    if (!finalUrl || !originMatchesAllowlist(finalUrl, allowlist)) {
+      void res.body?.cancel().catch(() => {});
+      throw new Error(`Request was redirected to ${finalUrl?.origin ?? 'an unknown origin'}, which is not in plugin httpOrigins allowlist`);
+    }
+  }
   // Sandboxed plugin can't hold a Response object across the boundary, so
   // we read the body once and return it as text + arrayBuffer (base64).
   const headers: Record<string, string> = {};
   res.headers.forEach((val, key) => { headers[key.toLowerCase()] = val; });
-  const buf = await res.arrayBuffer();
+  const buf = await readCapped(res, MAX_PLUGIN_FETCH_BYTES);
   let text: string | null = null;
   try { text = new TextDecoder('utf-8', { fatal: false }).decode(buf); } catch { text = null; }
   return {
@@ -538,10 +767,30 @@ async function doJmapFetchBlob(blobId: string, opts?: { name?: string; type?: st
   return new Uint8Array(buf);
 }
 
-async function doJmapUploadBlob(content: Uint8Array, name: string, type: string): Promise<{ blobId: string; size: number; type: string; }> {
-  const { client } = useAuthStore.getState();
-  if (!client) throw new Error('jmap.uploadBlob: no active session');
-  const file = new File([content as BlobPart], name, { type });
+/** Largest blob a plugin may upload when the server names no limit of its own. */
+export const MAX_PLUGIN_UPLOAD_BYTES = 50 * 1024 * 1024;
+
+/**
+ * jmap.uploadBlob: bytes from the plugin, checked like the attachment refs a
+ * plugin hands the composer (readBlobRefs): a real file name, a media type,
+ * and no more than the server accepts (its maxSizeUpload, or 50 MB when it
+ * names none).
+ */
+async function doJmapUploadBlob(content: unknown, name: unknown, type: unknown): Promise<{ blobId: string; size: number; type: string; }> {
+  const method = 'jmap.uploadBlob';
+  const bytes = content instanceof Uint8Array ? content
+    : content instanceof ArrayBuffer ? new Uint8Array(content)
+    : null;
+  if (!bytes) throw new Error(`${method}: content must be a Uint8Array or ArrayBuffer`);
+  const fileName = readFileName(name, method, 'name');
+  const mediaType = readMediaType(type, method, 'type');
+  const client = sessionClient(method);
+  const serverLimit = client.getMaxSizeUpload();
+  const limit = serverLimit > 0 ? serverLimit : MAX_PLUGIN_UPLOAD_BYTES;
+  if (bytes.byteLength > limit) {
+    throw new Error(`${method}: content is ${bytes.byteLength} bytes, more than the ${limit} bytes allowed`);
+  }
+  const file = new File([bytes as BlobPart], fileName, { type: mediaType });
   return await client.uploadBlob(file);
 }
 
@@ -654,10 +903,17 @@ async function doJmapImportRaw(
   copy.set(view);
   const blob = new Blob([copy.buffer], { type: 'message/rfc822' });
 
+  // Stalwart 1.0 sets the attachment keyword an imported message deserves and
+  // keeps any other it is given: a `$hasattachment` from the plugin would make
+  // `hasAttachment` true for a message without attachments.
+  const keywords = opts?.keywords
+    ? Object.fromEntries(Object.entries(opts.keywords).filter(([keyword]) => !isServerSetKeyword(keyword)))
+    : undefined;
+
   return client.importRawEmail(
     blob,
     mailboxIds,
-    opts?.keywords,
+    keywords,
     opts?.accountId,
   );
 }
@@ -899,15 +1155,16 @@ function zBase32Encode(buffer: Uint8Array): string {
  * Generates the WKD hash (SHA-1 in z-base-32) from the local-part.
  * RFC 9292: Lowercase in UTF-8 before hashing.
  */
-function getWkdHash(localPart: string): string {
+export async function getWkdHash(localPart: string): Promise<string> {
   // NFC normalization + lowercasing
   const normalizedLocal = localPart.normalize('NFC').toLowerCase();
 
-  // Explicit TextEncoder usage to guarantee UTF-8 bytes
+  // Explicit TextEncoder usage to guarantee UTF-8 bytes. WebCrypto, not
+  // Node's crypto: importing that pulled a ~330 KB polyfill into the client.
   const utf8Bytes = new TextEncoder().encode(normalizedLocal);
-  const sha1Buffer = createHash('sha1').update(utf8Bytes).digest();
+  const sha1 = await crypto.subtle.digest('SHA-1', utf8Bytes);
 
-  return zBase32Encode(sha1Buffer);
+  return zBase32Encode(new Uint8Array(sha1));
 }
 
 /**
@@ -940,6 +1197,8 @@ export interface WkdResult {
 }
 
 export async function doGetPublicKeyFromWKD(email: string): Promise<WkdResult> {
+  // The lookup goes to the recipient's domain: off with third-party traffic (#903).
+  if (!wkdAllowed()) return { status: 'ERROR', error: 'Key lookups at other domains are off on this server' };
   const cleanEmail = email.trim();
   const atIndex = cleanEmail.lastIndexOf('@');
 
@@ -949,7 +1208,12 @@ export async function doGetPublicKeyFromWKD(email: string): Promise<WkdResult> {
 
   const localPart = cleanEmail.slice(0, atIndex);
   const domain = cleanEmail.slice(atIndex + 1).toLowerCase();
-  const hash = getWkdHash(localPart);
+  // The domain goes into a URL; anything but a host name would change where
+  // the request goes (a@evil.example/x?).
+  if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(domain)) {
+    return { status: 'ERROR', error: 'Invalid email address' };
+  }
+  const hash = await getWkdHash(localPart);
 
   const urls = [
     `https://openpgpkey.${domain}/.well-known/openpgpkey/hu/${hash}?l=${encodeURIComponent(localPart)}`,
@@ -1009,21 +1273,47 @@ async function saveFile(formerFileID:string, file: File): Promise<string> {
 }
 
 // ─── Download files generated by the plugin. This is not user's files or attachments ──────────────────────────
-async function downloadFile(args: { content: string; filename: string; contentType?: string }): Promise<void> {
-    const { content, filename, contentType = 'application/json' } = args;
+// File types a plugin may not hand the user: programs, scripts, and
+// documents a browser opens as an active page.
+const BLOCKED_DOWNLOAD_EXTENSIONS = new Set([
+  'exe', 'msi', 'bat', 'cmd', 'com', 'scr', 'ps1', 'vbs', 'vbe', 'js', 'jse', 'wsf', 'hta', 'jar',
+  'lnk', 'app', 'dmg', 'pkg', 'sh', 'command', 'html', 'htm', 'xhtml', 'shtml', 'svg', 'mhtml', 'xml',
+]);
+const BLOCKED_DOWNLOAD_TYPES = /^(text\/html|application\/xhtml|image\/svg|application\/(x-)?javascript|text\/javascript|application\/x-msdownload|application\/xml|text\/xml)/i;
 
-    try {
-      const url = URL.createObjectURL(new Blob([content], { type: contentType }));
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a); 
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    } catch (error) {
-     throw new Error(`Failed to download file: ${error}`);
-    }
+/** A file name that can't carry a path, control characters or a hidden extension. */
+export function safeDownloadName(name: unknown): string {
+  const raw = typeof name === 'string' ? name : '';
+  const cleaned = raw
+    // eslint-disable-next-line no-control-regex -- removing control characters is the point
+    .replace(/[\u0000-\u001f\u007f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '')
+    .replace(/[\\/:*?"<>|]/g, '_')
+    .replace(/^[.\s]+|[.\s]+$/g, '')
+    .slice(0, 120);
+  return cleaned || 'download';
+}
+
+async function downloadFile(args: { content: string | ArrayBuffer | Uint8Array; filename: string; contentType?: string }): Promise<void> {
+  const { content } = args;
+  const filename = safeDownloadName(args.filename);
+  const contentType = typeof args.contentType === 'string' && args.contentType ? args.contentType : 'application/octet-stream';
+  const ext = filename.includes('.') ? filename.slice(filename.lastIndexOf('.') + 1).toLowerCase() : '';
+  if (BLOCKED_DOWNLOAD_EXTENSIONS.has(ext) || BLOCKED_DOWNLOAD_TYPES.test(contentType)) {
+    throw new Error(`ui.downloadFile: ${ext ? `.${ext} files` : contentType} can't be downloaded from a plugin`);
+  }
+  if (typeof content !== 'string' && !(content instanceof ArrayBuffer) && !(content instanceof Uint8Array)) {
+    throw new Error('ui.downloadFile: content must be a string or bytes');
+  }
+  const url = URL.createObjectURL(new Blob([content as BlobPart], { type: contentType }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  // Revoking at once can cancel the download in some browsers.
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
 // ─── Email keyword mutations ──────────────────────────────────
@@ -1036,7 +1326,28 @@ function assertPluginKeyword(keyword: unknown): string {
   if (typeof keyword !== 'string' || !PLUGIN_KEYWORD_RE.test(keyword)) {
     throw new Error(`Invalid JMAP keyword "${String(keyword)}"`);
   }
+  // Stalwart 1.0 derives hasAttachment from these; adding or removing one
+  // would misreport the message.
+  if (isServerSetKeyword(keyword)) {
+    throw new Error(`JMAP keyword "${keyword}" is set by the server`);
+  }
   return keyword;
+}
+
+/**
+ * Keywords that change what the app and the server do with a message, not
+ * just how it is labelled: a draft opens in the composer, $junk and
+ * $notjunk train the spam filter, $phishing hides the content. The
+ * email.* keyword methods leave them to the app's own actions.
+ */
+const PROTECTED_KEYWORDS = new Set(['$draft', '$junk', '$notjunk', '$phishing']);
+
+function assertMailKeyword(keyword: unknown): string {
+  const checked = assertPluginKeyword(keyword);
+  if (PROTECTED_KEYWORDS.has(checked.toLowerCase())) {
+    throw new Error(`JMAP keyword "${checked}" can't be changed by a plugin`);
+  }
+  return checked;
 }
 
 function assertPluginKeywords(value: unknown): Record<string, true> {
@@ -1079,6 +1390,79 @@ function requireClient() {
   return client;
 }
 
+/** Most keywords one email.updateKeywords call changes. */
+export const MAX_PLUGIN_KEYWORD_CHANGES = 20;
+
+/**
+ * Set (true) and clear (false) several keywords of one message in one
+ * Email/set, so a swap (one assignee for another) never leaves both or
+ * neither. A message listed in the open view, or the open one, changes
+ * through the list as the app's own actions do: the row shows the new
+ * keywords at once and the keyword hooks run. Another message is changed on
+ * the server only. `accountId` names the message's account (a click's
+ * context carries it for team and shared mailboxes); without it the
+ * signed-in account's.
+ */
+async function doEmailUpdateKeywords(emailIdArg: unknown, changesArg: unknown, accountArg: unknown): Promise<boolean> {
+  const method = 'email.updateKeywords';
+  const emailId = assertEmailId(emailIdArg, method);
+  if (!isPlainObject(changesArg)) throw new Error(`${method}: changes must be an object of keyword: true | false`);
+  const entries = Object.entries(changesArg);
+  if (entries.length > MAX_PLUGIN_KEYWORD_CHANGES) throw new Error(`${method}: at most ${MAX_PLUGIN_KEYWORD_CHANGES} keywords at once`);
+  const changes: Record<string, boolean> = {};
+  for (const [keyword, value] of entries) {
+    assertMailKeyword(keyword);
+    if (typeof value !== 'boolean') throw new Error(`${method}: keyword "${keyword}" must be true (set) or false (clear)`);
+    changes[keyword] = value;
+  }
+  const accountId = assertOptionalAccountId(accountArg, method);
+  if (entries.length === 0) return true;
+  const client = requireClient();
+  const own = client.getAccountId();
+  const wanted = accountId && accountId !== own ? accountId : undefined;
+  const state = useEmailStore.getState();
+  const isTarget = (email: Email) => {
+    if (email.id !== emailId) return false;
+    const owner = resolveEmailBlobContext(email, client);
+    if (owner.client !== client) return false;
+    return (owner.accountId && owner.accountId !== own ? owner.accountId : undefined) === wanted;
+  };
+  const row = [...state.emails, ...(state.selectedEmail ? [state.selectedEmail] : [])].find(isTarget);
+  let done = true;
+  if (row) {
+    done = await state.patchEmailKeywords(client, emailId, changes, emailKeyFor(row));
+  } else {
+    const patch = Object.fromEntries(Object.entries(changes).map(([keyword, value]) => [keywordPointer(keyword), value ? true : null]));
+    await client.batchUpdateKeywords([emailId], patch, wanted);
+  }
+  if (done) patchThreadCache(isTarget, changes);
+  return done;
+}
+
+/**
+ * The same change on the messages of expanded conversations
+ * (threadEmailsCache), whose inner rows patchEmailKeywords doesn't touch.
+ */
+function patchThreadCache(isTarget: (email: Email) => boolean, changes: Record<string, boolean>): void {
+  useEmailStore.setState((state) => {
+    let cache: Map<string, Email[]> | null = null;
+    for (const [key, members] of state.threadEmailsCache) {
+      if (!members.some(isTarget)) continue;
+      cache ??= new Map(state.threadEmailsCache);
+      cache.set(key, members.map((email) => {
+        if (!isTarget(email)) return email;
+        const keywords = { ...email.keywords };
+        for (const [keyword, on] of Object.entries(changes)) {
+          if (on) keywords[keyword] = true;
+          else delete keywords[keyword];
+        }
+        return { ...email, keywords };
+      }));
+    }
+    return cache ? { threadEmailsCache: cache } : {};
+  });
+}
+
 // ─── Native keyword definitions ──────────────────────────────
 
 const MAX_PLUGIN_KEYWORD_DEFINITIONS = 500;
@@ -1108,9 +1492,17 @@ function isValidKeywordDefinitionId(id: string): boolean {
   return true;
 }
 
-function assertKeywordDefinition(value: unknown, index: number): PluginKeywordDefinitionInput {
+/** The fields of a definition a plugin may set; keywords.update sends only the ones it changes. */
+type PluginKeywordPatch = Pick<KeywordDefinition, 'id'> &
+  Partial<Pick<KeywordDefinition, 'label' | 'color' | 'visibility'>>;
+
+function assertKeywordFields(
+  value: unknown,
+  index: number,
+  method: 'keywords.add' | 'keywords.update',
+): PluginKeywordPatch {
   if (!isPlainObject(value)) {
-    throw new Error(`keywords.add: definitions[${index}] must be an object`);
+    throw new Error(`${method}: definitions[${index}] must be an object`);
   }
 
   const id = value.id;
@@ -1119,32 +1511,48 @@ function assertKeywordDefinition(value: unknown, index: number): PluginKeywordDe
   const visibility = value.visibility;
 
   if (typeof id !== 'string' || !isValidKeywordDefinitionId(id)) {
-    throw new Error(`keywords.add: definitions[${index}].id is not a valid JMAP label id`);
+    throw new Error(`${method}: definitions[${index}].id is not a valid JMAP label id`);
   }
+  // add needs a label; update leaves an omitted one as it is.
   if (
-    typeof label !== 'string' || label.trim().length === 0 ||
-    label.length > MAX_PLUGIN_KEYWORD_LABEL_LENGTH
+    (label !== undefined || method === 'keywords.add') &&
+    (typeof label !== 'string' || label.trim().length === 0 ||
+      label.length > MAX_PLUGIN_KEYWORD_LABEL_LENGTH)
   ) {
     throw new Error(
-      `keywords.add: definitions[${index}].label must be 1-${MAX_PLUGIN_KEYWORD_LABEL_LENGTH} characters`,
+      `${method}: definitions[${index}].label must be 1-${MAX_PLUGIN_KEYWORD_LABEL_LENGTH} characters`,
     );
   }
   if (
     color !== undefined &&
     (typeof color !== 'string' || !Object.prototype.hasOwnProperty.call(KEYWORD_PALETTE, color))
   ) {
-    throw new Error(`keywords.add: definitions[${index}].color is not in the keyword palette`);
+    throw new Error(`${method}: definitions[${index}].color is not in the keyword palette`);
   }
   if (visibility !== undefined && !VALID_VISIBILITIES.has(visibility as KeywordVisibility)) {
-    throw new Error(`keywords.add: definitions[${index}].visibility is invalid`);
+    throw new Error(`${method}: definitions[${index}].visibility is invalid`);
   }
 
   return {
     id,
-    label: label.trim(),
+    ...(typeof label === 'string' ? { label: label.trim() } : {}),
     ...(color === undefined ? {} : { color }),
     ...(visibility === undefined ? {} : { visibility: visibility as KeywordVisibility }),
   };
+}
+
+function assertKeywordDefinition(value: unknown, index: number): PluginKeywordDefinitionInput {
+  const { label, ...rest } = assertKeywordFields(value, index, 'keywords.add');
+  // assertKeywordFields requires the label for add.
+  return { ...rest, label: label as string };
+}
+
+function assertKeywordPatch(value: unknown, index: number): PluginKeywordPatch {
+  const patch = assertKeywordFields(value, index, 'keywords.update');
+  if (patch.label === undefined && patch.color === undefined && patch.visibility === undefined) {
+    throw new Error(`keywords.update: definitions[${index}] changes nothing; give a label, color or visibility`);
+  }
+  return patch;
 }
 
 function assertKeywordDefinitionArray(value: unknown): PluginKeywordDefinitionInput[] {
@@ -1155,11 +1563,34 @@ function assertKeywordDefinitionArray(value: unknown): PluginKeywordDefinitionIn
   return value.map(assertKeywordDefinition);
 }
 
+function assertKeywordPatchArray(value: unknown): PluginKeywordPatch[] {
+  if (!Array.isArray(value)) throw new Error('keywords.update: definitions must be an array');
+  if (value.length > MAX_PLUGIN_KEYWORD_DEFINITIONS) {
+    throw new Error(`keywords.update: at most ${MAX_PLUGIN_KEYWORD_DEFINITIONS} definitions may be updated at once`);
+  }
+  return value.map(assertKeywordPatch);
+}
+
+function assertKeywordIdArray(value: unknown, method: string): string[] {
+  if (
+    !Array.isArray(value) || value.length > MAX_PLUGIN_KEYWORD_DEFINITIONS ||
+    value.some((id) => typeof id !== 'string')
+  ) {
+    throw new Error(`${method}: ids must be an array of at most ${MAX_PLUGIN_KEYWORD_DEFINITIONS} strings`);
+  }
+  return value;
+}
+
 function doKeywordsList(): KeywordDefinition[] {
   return useSettingsStore.getState().emailKeywords.map((keyword) => ({ ...keyword }));
 }
 
-function doKeywordsAdd(value: unknown): { added: KeywordDefinition[]; skipped: string[] } {
+/** Whether keywords.update and keywords.remove may touch this definition: only the plugin's own. */
+function isOwnKeyword(plugin: InstalledPlugin, keyword: KeywordDefinition): boolean {
+  return keyword.addedBy === plugin.id;
+}
+
+function doKeywordsAdd(plugin: InstalledPlugin, value: unknown): { added: KeywordDefinition[]; skipped: string[] } {
   const definitions = assertKeywordDefinitionArray(value);
   const existing = useSettingsStore.getState().emailKeywords;
   const known = new Set(existing.map((keyword) => keyword.id.toLowerCase()));
@@ -1176,7 +1607,7 @@ function doKeywordsAdd(value: unknown): { added: KeywordDefinition[]; skipped: s
     known.add(foldedId);
     const color = definition.color ?? suggestKeywordColor(definition.id, takenColors);
     takenColors.add(color);
-    added.push({ ...definition, color });
+    added.push({ ...definition, color, addedBy: plugin.id });
   }
 
   if (added.length > 0) {
@@ -1188,6 +1619,52 @@ function doKeywordsAdd(value: unknown): { added: KeywordDefinition[]; skipped: s
   }
 
   return { added: added.map((keyword) => ({ ...keyword })), skipped };
+}
+
+function doKeywordsUpdate(plugin: InstalledPlugin, value: unknown): { updated: KeywordDefinition[]; skipped: string[] } {
+  const patches = assertKeywordPatchArray(value);
+  const byId = new Map(patches.map((patch) => [patch.id.toLowerCase(), patch]));
+  let updated: KeywordDefinition[] = [];
+
+  // Read and write in one functional update, as reorder does, so a concurrent
+  // settings write is not overwritten by a list built from an older state.
+  useSettingsStore.setState((state) => {
+    updated = [];
+    const emailKeywords = state.emailKeywords.map((keyword) => {
+      const patch = isOwnKeyword(plugin, keyword) ? byId.get(keyword.id.toLowerCase()) : undefined;
+      if (!patch) return keyword;
+      // The id is what the messages carry, so it never changes here.
+      const next = { ...keyword, ...patch, id: keyword.id };
+      updated.push(next);
+      return next;
+    });
+    return updated.length > 0 ? { emailKeywords } : state;
+  });
+
+  const done = new Set(updated.map((keyword) => keyword.id.toLowerCase()));
+  const skipped = patches.filter((patch) => !done.has(patch.id.toLowerCase())).map((patch) => patch.id);
+  return { updated: updated.map((keyword) => ({ ...keyword })), skipped };
+}
+
+function doKeywordsRemove(plugin: InstalledPlugin, value: unknown): { removed: string[]; skipped: string[] } {
+  const ids = assertKeywordIdArray(value, 'keywords.remove');
+  const wanted = new Set(ids.map((id) => id.toLowerCase()));
+  let removed: string[] = [];
+
+  // Drops the definitions only, as Settings → Tags does; the keywords on
+  // messages stay (jmap.setKeywords removes those, with email:write).
+  useSettingsStore.setState((state) => {
+    removed = [];
+    const emailKeywords = state.emailKeywords.filter((keyword) => {
+      const drop = isOwnKeyword(plugin, keyword) && wanted.has(keyword.id.toLowerCase());
+      if (drop) removed.push(keyword.id);
+      return !drop;
+    });
+    return removed.length > 0 ? { emailKeywords } : state;
+  });
+
+  const done = new Set(removed.map((id) => id.toLowerCase()));
+  return { removed, skipped: ids.filter((id) => !done.has(id.toLowerCase())) };
 }
 
 function doKeywordsReorder(value: unknown, rawOptions?: unknown): KeywordDefinition[] {
@@ -1295,7 +1772,13 @@ async function doJmapGetKeywords(value?: unknown) {
 }
 
 async function doKeywordsDiscover(value?: unknown) {
-  return requireClient().discoverKeywords(keywordDiscoveryOptions(value, 'keywords.discover'));
+  const scan = await requireClient().discoverKeywords(keywordDiscoveryOptions(value, 'keywords.discover'));
+  // Stalwart 1.0 puts an attachment keyword on every message. Nobody applied
+  // it, and the plugin keyword API refuses to set or remove it.
+  return {
+    ...scan,
+    keywords: Object.fromEntries(Object.entries(scan.keywords).filter(([keyword]) => !isServerSetKeyword(keyword))),
+  };
 }
 
 async function doKeywordsRefreshCounts(): Promise<Record<string, { total: number; unread: number }>> {
@@ -1340,6 +1823,34 @@ async function doTabsCategorize(emailIds: unknown, tabId: unknown): Promise<bool
   return moved;
 }
 
+// ─── Message-list search ──────────────────────────────────────
+
+const MAX_SEARCH_LABEL_LENGTH = 64;
+
+/**
+ * Run a plugin's JMAP Email filter as the message-list search (#1024). It
+ * replaces the current search like a user's search does, keeps the scope
+ * picked in the search panel, and shows up as a removable chip.
+ */
+async function doSearchRun(plugin: InstalledPlugin, query: unknown, options: unknown): Promise<void> {
+  const filter = normalizePluginFilter('search.run: query', query);
+  if (Object.keys(filter).length === 0) throw new Error('search.run: query must not be empty');
+  const rawLabel = options && typeof options === 'object' ? (options as { label?: unknown }).label : undefined;
+  if (rawLabel !== undefined && typeof rawLabel !== 'string') {
+    throw new Error('search.run: label must be a string');
+  }
+  const label = (rawLabel?.trim() || plugin.name).slice(0, MAX_SEARCH_LABEL_LENGTH);
+
+  const client = requireClient();
+  const store = useEmailStore.getState();
+  store.setSearchQuery('');
+  store.setSearchFilters({
+    ...DEFAULT_SEARCH_FILTERS,
+    pluginFilter: { pluginId: plugin.id, label, filter },
+  });
+  await store.advancedSearch(client);
+}
+
 // ─── Sieve (delivery-time classification) ─────────────────────
 
 async function doSieveGetActiveScript(): Promise<{ id: string; name: string; content: string } | null> {
@@ -1375,23 +1886,84 @@ async function adminGetAll(pluginId: string): Promise<Record<string, unknown>> {
   if (!res.ok) return {};
   return res.json();
 }
+/** The app a plugin runs in: product, the administrator's name for it, version, edition. */
+async function doAppGetInfo(): Promise<AppInfoView> {
+  let config: Awaited<ReturnType<typeof fetchConfig>> | null = null;
+  try { config = await fetchConfig(); } catch { config = null; }
+  return {
+    product: 'Bulwark Mail',
+    name: config?.appName || 'Webmail',
+    version: process.env.NEXT_PUBLIC_APP_VERSION || '',
+    edition: IS_LITE ? 'lite' : 'full',
+    stalwartFeatures: config?.stalwartFeaturesEnabled ?? true,
+    demoMode: config?.demoMode ?? false,
+  };
+}
+
+/** The zone the app shows times in: the user's choice, else the browser's. */
+function userTimeZone(): string {
+  const setting = useSettingsStore.getState().timeZone;
+  if (typeof setting === 'string' && setting && setting !== 'auto') return setting;
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+}
+
+/** The admin's settings for this plugin that aren't secrets (any user may read them). */
+async function publicConfig(pluginId: string): Promise<Record<string, unknown>> {
+  const res = await apiFetch(`/api/admin/plugins/${encodeURIComponent(pluginId)}/config?public=1`);
+  if (!res.ok) return {};
+  return res.json();
+}
 async function adminGet(pluginId: string, key: string): Promise<unknown> {
   const all = await adminGetAll(pluginId);
   return all[key] ?? null;
 }
 async function adminSet(pluginId: string, key: string, value: unknown): Promise<void> {
-  await apiFetch(`/api/admin/plugins/${encodeURIComponent(pluginId)}/config`, {
+  await expectOk('admin.setConfig', apiFetch(`/api/admin/plugins/${encodeURIComponent(pluginId)}/config`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ key, value }),
-  });
+  }));
+}
+
+/** A failed admin config write used to look like success to the plugin. */
+async function expectOk(method: string, request: Promise<Response>): Promise<void> {
+  const res = await request;
+  if (!res.ok) {
+    throw new Error(res.status === 401 || res.status === 403
+      ? `${method}: only an administrator can change this plugin's admin settings`
+      : `${method} failed (HTTP ${res.status})`);
+  }
 }
 async function adminDelete(pluginId: string, key: string): Promise<void> {
-  await apiFetch(`/api/admin/plugins/${encodeURIComponent(pluginId)}/config`, {
+  await expectOk('admin.deleteConfig', apiFetch(`/api/admin/plugins/${encodeURIComponent(pluginId)}/config`, {
     method: 'DELETE',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ key }),
-  });
+  }));
+}
+
+// ─── Toasts ──────────────────────────────────────────────────
+
+const MAX_TOAST_LENGTH = 300;
+const TOASTS_PER_TEN_SECONDS = 5;
+const recentToasts = new Map<string, number[]>();
+
+function toastText(value: unknown): string {
+  const text = String(value ?? '');
+  return text.length > MAX_TOAST_LENGTH ? text.slice(0, MAX_TOAST_LENGTH - 1) + '…' : text;
+}
+
+/** A plugin may show a few toasts; past that they are dropped, not queued. */
+function mayToast(pluginId: string): boolean {
+  const now = Date.now();
+  const recent = (recentToasts.get(pluginId) ?? []).filter((t) => now - t < 10_000);
+  if (recent.length >= TOASTS_PER_TEN_SECONDS) {
+    recentToasts.set(pluginId, recent);
+    return false;
+  }
+  recent.push(now);
+  recentToasts.set(pluginId, recent);
+  return true;
 }
 
 // ─── Dispatcher ──────────────────────────────────────────────
@@ -1401,7 +1973,7 @@ export async function dispatchApiCall(
   plugin: InstalledPlugin,
   method: string,
   args: unknown[],
-  opts?: { privileged?: boolean },
+  opts?: { privileged?: boolean; sink?: StreamSink },
 ): Promise<unknown> {
   // Raw message and staged-attachment mutation APIs are only available to
   // same-origin privileged plugins, even when the manifest has permission.
@@ -1420,21 +1992,46 @@ export async function dispatchApiCall(
   }
 
   switch (method) {
+    case 'proxy.fetch': return proxyFetch(plugin, args, opts?.sink ?? null);
+    case 'proxy.cancel': proxyCancel(plugin, args[0]); return undefined;
+    case 'proxy.connect': return proxyConnect(plugin, args);
+    case 'proxy.accounts': return proxyAccounts(plugin);
+    case 'proxy.disconnect': return proxyDisconnect(plugin, args);
+
+    case 'ui.setActions': {
+      const surface = args[0];
+      if (typeof surface !== 'string' || !isActionSurface(surface)) throw new Error(`"${String(surface)}" is not a surface that takes actions`);
+      if (!mayOfferSlot(plugin, surface)) throw new Error(`Plugin "${plugin.id}" may not add actions to "${surface}"`);
+      setPluginActions(plugin.id, plugin.name, surface, checkActions(args[1]));
+      return undefined;
+    }
+    case 'ui.refreshRowBadges': refreshRowBadges(); return undefined;
+    case 'ui.setListFilters': setPluginListFilters(plugin.id, plugin.name, checkListFilters(args[0])); return undefined;
+    case 'ui.setDayLabels': setDayLabels(plugin.id, plugin.name, checkDayLabels(args[0])); return undefined;
+    case 'ui.setPages': setPluginPages(plugin.id, plugin.name, checkPages(args[0])); return undefined;
+    case 'ui.openPage': return requestPageNavigation(plugin.id, args[0], args[1]);
+    case 'ui.setSectionTitle': setSectionTitle(plugin.id, args[0]); return undefined;
+    case 'ui.setPanel': {
+      const slot = args[0];
+      if (typeof slot !== 'string' || !mayOfferSlot(plugin, slot)) throw new Error(`Plugin "${plugin.id}" may not open the panel "${String(slot)}"`);
+      return requestPanel(plugin.id, slot, args[1], args[2]);
+    }
+
     case 'storage.get': return storageGet(plugin.id, args[0] as string);
     case 'storage.set': storageSet(plugin.id, args[0] as string, args[1]); return undefined;
     case 'storage.remove': storageRemove(plugin.id, args[0] as string); return undefined;
     case 'storage.keys': return storageKeys(plugin.id);
 
-    case 'toast.success': appToast.success(String(args[0] ?? '')); return undefined;
-    case 'toast.error':   appToast.error(String(args[0] ?? '')); return undefined;
-    case 'toast.info':    appToast.info(String(args[0] ?? '')); return undefined;
-    case 'toast.warning': appToast.warning(String(args[0] ?? '')); return undefined;
+    case 'toast.success': if (mayToast(plugin.id)) appToast.success(toastText(args[0])); return undefined;
+    case 'toast.error':   if (mayToast(plugin.id)) appToast.error(toastText(args[0])); return undefined;
+    case 'toast.info':    if (mayToast(plugin.id)) appToast.info(toastText(args[0])); return undefined;
+    case 'toast.warning': if (mayToast(plugin.id)) appToast.warning(toastText(args[0])); return undefined;
 
     case 'http.post':  return doHttpPost(plugin, args[0] as string, args[1], args[2] as PluginHttpPostOptions | undefined);
     case 'http.fetch': return doHttpFetch(plugin, args[0] as string, args[1] as PluginFetchInit | undefined);
 
     case 'jmap.fetchBlob': return doJmapFetchBlob(args[0] as string, args[1] as { name?: string; type?: string, rangeHeader?: number } | undefined);
-    case 'jmap.uploadBlob': return doJmapUploadBlob(args[0] as Uint8Array, args[1] as string, args[2] as string);
+    case 'jmap.uploadBlob': return doJmapUploadBlob(args[0], args[1], args[2]);
     case 'jmap.sendRaw':   return doJmapSendRaw(
       args[0] as ArrayBuffer | ArrayBufferView,
       args[1] as string,
@@ -1475,8 +2072,10 @@ export async function dispatchApiCall(
     case 'upfiles.get' : return getFile(args[0] as string);
     case 'upfiles.save' : return saveFile(args[0] as string, args[1] as File);
 
-    case 'crypto.createWebAuthn': return doCreatePRF(args[0] as string, args[1] as string, args[2] as string);
-    case 'crypto.getWebAuthn': return doGetPRF(args[0] as number[], args[1] as string);
+    // The PRF salt is derived from the calling plugin's id, never from an
+    // argument: otherwise one plugin could ask for another plugin's secret.
+    case 'crypto.createWebAuthn': return doCreatePRF(plugin.id, args[1] as string, args[2] as string);
+    case 'crypto.getWebAuthn': return doGetPRF(args[0] as number[], plugin.id);
     case 'crypto.getPublicKeys': return getPublicKeys();
     case 'crypto.createPublicKey': return doCreatePublicKey(args[0] as PublicKeyInput);
     case 'crypto.removePublicKey': return doRemovePublicKey(args[0] as string);
@@ -1496,11 +2095,21 @@ export async function dispatchApiCall(
     case 'addressbook.create': return doAddressBookCreate(args[0] as string);
 
     case 'user.getAccounts':   return doUserGetAccounts();
+    case 'user.getSelf':       return doUserGetSelf();
+    case 'user.getMailAccounts': return doUserGetMailAccounts();
+    case 'user.findPeople':    return doUserFindPeople(plugin, args[0]);
+    case 'accountData.get':    return doAccountDataGet(plugin, args[0]);
+    case 'accountData.set':    return doAccountDataSet(plugin, args[0], args[1]);
     case 'user.getIdentities': return doUserGetIdentities();
+    case 'user.getTimeZone': return userTimeZone();
+    case 'app.getInfo': return doAppGetInfo();
+    case 'app.searchSettings': return doAppSearchSettings(args[0], args[1]);
+    case 'app.getSettings': return doAppGetSettings();
     case 'user.logout' : return doUserLogout();
 
     case 'admin.getConfig':    return adminGet(plugin.id, args[0] as string);
     case 'admin.getAllConfig': return adminGetAll(plugin.id);
+    case 'plugin.getConfig':   return publicConfig(plugin.id);
     case 'admin.setConfig':    await adminSet(plugin.id, args[0] as string, args[1]); return undefined;
     case 'admin.deleteConfig': await adminDelete(plugin.id, args[0] as string); return undefined;
 
@@ -1595,24 +2204,32 @@ export async function dispatchApiCall(
       window.open(parsed.toString(), '_blank', 'noopener,noreferrer');
       return undefined;
     }
+    case 'ui.print': return doUiPrint(plugin, args[0]);
     case 'ui.downloadFile': {
-      const opts = args[0] as { content: string; filename: string; contentType?: string };
-      return downloadFile(opts);
+      const opts = args[0] as { content: string | ArrayBuffer | Uint8Array; filename: string; contentType?: string };
+      return downloadFile(opts ?? { content: '', filename: '' });
     }
 
     case 'email.setKeyword': {
-      const keyword = assertPluginKeyword(args[1]);
-      await requireClient().setKeyword(String(args[0]), keyword, args[2] as string | undefined);
+      const emailId = assertEmailId(args[0], 'email.setKeyword');
+      const keyword = assertMailKeyword(args[1]);
+      const accountId = assertOptionalAccountId(args[2], 'email.setKeyword');
+      await requireClient().setKeyword(emailId, keyword, accountId);
       return undefined;
     }
+    case 'email.updateKeywords': return doEmailUpdateKeywords(args[0], args[1], args[2]);
     case 'email.removeKeyword': {
-      const keyword = assertPluginKeyword(args[1]);
-      await requireClient().removeKeyword(String(args[0]), keyword, args[2] as string | undefined);
+      const emailId = assertEmailId(args[0], 'email.removeKeyword');
+      const keyword = assertMailKeyword(args[1]);
+      const accountId = assertOptionalAccountId(args[2], 'email.removeKeyword');
+      await requireClient().removeKeyword(emailId, keyword, accountId);
       return undefined;
     }
 
     case 'keywords.list': return doKeywordsList();
-    case 'keywords.add': return doKeywordsAdd(args[0]);
+    case 'keywords.add': return doKeywordsAdd(plugin, args[0]);
+    case 'keywords.update': return doKeywordsUpdate(plugin, args[0]);
+    case 'keywords.remove': return doKeywordsRemove(plugin, args[0]);
     case 'keywords.reorder': return doKeywordsReorder(args[0], args[1]);
     case 'keywords.discover': return doKeywordsDiscover(args[0]);
     case 'keywords.getCounts': return doKeywordsGetCounts(args[0]);
@@ -1635,6 +2252,14 @@ export async function dispatchApiCall(
     case 'tabs.refreshCounts': return doTabsRefreshCounts();
     case 'tabs.categorize': return doTabsCategorize(args[0], args[1]);
 
+    case 'search.run': return doSearchRun(plugin, args[0], args[1]);
+
+    case 'oauth.createState': return createOAuthState(plugin.id);
+    case 'oauth.getRedirectUri': {
+      const locale = (globalThis as unknown as { __APP_LOCALE__?: string }).__APP_LOCALE__ || 'en';
+      return `${window.location.origin}${withBasePath(`/${encodeURIComponent(locale)}/plugins/oauth/callback`)}`;
+    }
+
     case 'sieve.isSupported': {
       const { client } = useAuthStore.getState();
       return !!client?.supportsSieve();
@@ -1648,6 +2273,56 @@ export async function dispatchApiCall(
       await doSieveRegenerate();
       return undefined;
     }
+
+    case 'calendar.listCalendars': return doCalendarListCalendars();
+    case 'calendar.getEvents': return doCalendarGetEvents(args[0]);
+    case 'calendar.getEvent': return doCalendarGetEvent(args[0]);
+    case 'calendar.createEvent': return doCalendarCreateEvent(args[0], plugin.id);
+    case 'calendar.updateEvent': return doCalendarUpdateEvent(args[0], args[1]);
+    case 'calendar.deleteEvent': return doCalendarDeleteEvent(args[0]);
+
+    case 'tasks.list': return doTasksList(args[0]);
+    case 'tasks.get': return doTasksGet(args[0]);
+    case 'tasks.create': return doTasksCreate(args[0]);
+    case 'tasks.update': return doTasksUpdate(args[0], args[1]);
+    case 'tasks.setComplete': return doTasksSetComplete(args[0], args[1]);
+    case 'tasks.delete': return doTasksDelete(args[0]);
+
+    case 'templates.list': return doTemplatesList();
+    case 'templates.get': return doTemplatesGet(args[0]);
+    case 'templates.create': return doTemplatesCreate(args[0]);
+    case 'templates.update': return doTemplatesUpdate(args[0], args[1]);
+    case 'templates.delete': doTemplatesDelete(args[0]); return undefined;
+
+    case 'identities.update': return doIdentitiesUpdate(args[0], args[1]);
+
+    case 'vacation.get': return doVacationGet();
+    case 'vacation.set': return doVacationSet(args[0]);
+
+    case 'email.get': return doEmailGet(args[0], args[1]);
+    case 'email.list': return doEmailList(args[0]);
+    case 'email.search': return doEmailSearch(args[0]);
+    case 'mailboxes.list': return doMailboxesList();
+    case 'email.getAttachment': return doEmailGetAttachment(args[0], args[1], args[2]);
+    case 'email.getRaw': return doEmailGetRaw(args[0], args[1]);
+    case 'email.move': return doEmailMove(plugin.id, args[0], args[1]);
+    case 'email.archive': return doEmailArchive(plugin.id, args[0]);
+    case 'email.forward': return doEmailForward(plugin, args[0], args[1], {
+      confirm: (input) => awaitDialog({ pluginId: plugin.id, kind: 'confirm', ...input }),
+      markForwarded: (emailId, accountId) => doEmailUpdateKeywords(emailId, { $forwarded: true }, accountId),
+    });
+
+    case 'compose.open': return doComposeOpen(plugin, args[0]);
+    case 'compose.reply': return doComposeReply(plugin, args[0], args[1]);
+    case 'drafts.create': return doDraftsCreate(plugin, args[0]);
+
+    case 'notifications.show': return doNotificationsShow(plugin, args[0]);
+
+    case 'composer.getBody': return doComposerGetBody(plugin, args[0]);
+    case 'composer.getSelection': return doComposerGetSelection(plugin, args[0]);
+    case 'composer.replaceSelection': return doComposerReplaceSelection(plugin, args[0], args[1], args[2]);
+    case 'composer.replaceBody': return doComposerReplaceBody(plugin, args[0], args[1]);
+    case 'composer.attach': return doComposerAttach(plugin, args[0], args[1]);
 
     default:
       throw new Error(`Unhandled method "${method}"`);
