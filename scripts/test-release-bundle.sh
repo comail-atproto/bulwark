@@ -2,6 +2,7 @@
 set -euo pipefail
 
 bundle=$(readlink -f "${1:?built standalone bundle}")
+shift
 test -f "$bundle/server.js"
 test -f "$bundle/.next/BUILD_ID"
 test -x "$bundle/node_modules/@esbuild/linux-x64/bin/esbuild"
@@ -24,6 +25,8 @@ for _ in $(seq 1 50); do
       const value = JSON.parse(process.env.BODY);
       if (value.status !== "healthy" || value.release_identity !== process.env.EXPECTED_IDENTITY) process.exit(1);
     '; then
+    # An optional candidate check receives the live loopback port before teardown.
+    if (( $# )); then "$@" "$port"; fi
     exit 0
   fi
   if ! kill -0 "$server_pid" 2>/dev/null; then break; fi
