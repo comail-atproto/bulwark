@@ -84,14 +84,14 @@ export function SearchSuggestions({
 
         const heading =
           (i === 0 && hasRecent && suggestion.kind === "recent" && (
-            <div className="px-3 pt-1 pb-0.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+            <div className="px-3 pt-1 pb-0.5 text-[0.6875rem] font-medium text-muted-foreground">
               {t("suggestions_recent")}
             </div>
           )) ||
           (i === firstContactIndex && (
             <div
               className={cn(
-                "px-3 pt-1 pb-0.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground",
+                "px-3 pt-1 pb-0.5 text-[0.6875rem] font-medium text-muted-foreground",
                 hasRecent && "mt-1 border-t border-border pt-2",
               )}
             >
@@ -154,7 +154,7 @@ export function SearchSuggestions({
                 onSelect(suggestion);
               }}
             >
-              <Avatar name={suggestion.name} email={suggestion.email} size="sm" className="shrink-0 w-6 h-6 text-[10px]" />
+              <Avatar name={suggestion.name} email={suggestion.email} size="sm" className="shrink-0 w-6 h-6 text-[0.625rem]" />
               <span className="flex-1 min-w-0 flex items-baseline gap-1.5 truncate">
                 {suggestion.name ? (
                   <>
@@ -165,7 +165,7 @@ export function SearchSuggestions({
                   <HighlightedText text={suggestion.email} query={query} className="truncate" />
                 )}
               </span>
-              <span className="shrink-0 flex items-center gap-1 text-[11px]">
+              <span className="shrink-0 flex items-center gap-1 text-[0.6875rem]">
                 <span className="px-1.5 py-0.5 rounded bg-primary/10 text-primary font-medium">{t("from")}</span>
                 <button
                   type="button"

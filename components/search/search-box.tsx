@@ -2,9 +2,7 @@
 
 import { useCallback, useId, useMemo, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
-import { Search, X } from "@/components/icons";
-import { cn } from "@/lib/utils";
-import { Input } from "@/components/ui/input";
+import { ToolbarSearch } from "@/components/ui/toolbar";
 import { useContactStore } from "@/stores/contact-store";
 import { useSearchHistoryStore } from "@/stores/search-history-store";
 import { buildSearchSuggestions, type ContactSuggestion, type SearchSuggestion } from "@/lib/search-suggestions";
@@ -24,6 +22,10 @@ interface SearchBoxProps {
   title?: string;
   /** Focus on mount — the mobile search panel opens straight to the keyboard. */
   autoFocus?: boolean;
+  /** Overrides the default placeholder, which carries the `/` shortcut hint. */
+  placeholder?: string;
+  /** A control at the end of the field, after the clear button (the filter toggle). */
+  trailing?: React.ReactNode;
 }
 
 /**
@@ -33,13 +35,25 @@ interface SearchBoxProps {
  * reuses the composer's contact autocomplete lookup so directory principals,
  * address-book contacts and recent recipients all surface here too.
  */
-export function SearchBox({ value, onChange, onSubmit, onClear, onSelectContact, disabled = false, title, autoFocus }: SearchBoxProps) {
+export function SearchBox({ value, onChange, onSubmit, onClear, onSelectContact, disabled = false, title, autoFocus, placeholder, trailing }: SearchBoxProps) {
   const t = useTranslations("sidebar");
   const listId = `search-suggestions-${useId().replace(/:/g, "")}`;
 
   const containerRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(-1);
+  // The text being typed belongs to the box until it is submitted, cleared or
+  // the box loses focus. `value` is the search in force; handing it every
+  // keystroke re-rendered the whole mail view per character typed.
+  const [draft, setDraft] = useState(value);
+  const [adopted, setAdopted] = useState(value);
+  if (value !== adopted) {
+    setAdopted(value);
+    setDraft(value);
+  }
+  const commitDraft = () => {
+    if (draft !== value) onChange(draft);
+  };
 
   const getAutocomplete = useContactStore((s) => s.getAutocomplete);
   // Subscribed only so the memo below recomputes as the lookup's inputs load.
@@ -50,13 +64,13 @@ export function SearchBox({ value, onChange, onSubmit, onClear, onSelectContact,
   const removeRecentSearch = useSearchHistoryStore((s) => s.removeRecentSearch);
 
   const suggestions = useMemo<SearchSuggestion[]>(() => {
-    const query = value.trim();
+    const query = draft.trim();
     const matches = query ? getAutocomplete(query).filter((r) => !r.group && r.email) : [];
-    return buildSearchSuggestions(value, recentSearches, matches);
+    return buildSearchSuggestions(draft, recentSearches, matches);
     // The three store slices are inputs of getAutocomplete (read via get()),
     // not of this closure — list them so the memo recomputes when they load.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [value, recentSearches, getAutocomplete, contacts, recentRecipients, directoryPrincipals]);
+  }, [draft, recentSearches, getAutocomplete, contacts, recentRecipients, directoryPrincipals]);
 
   const showDropdown = open && !disabled && suggestions.length > 0;
   const activeIndex = showDropdown && selectedIndex < suggestions.length ? selectedIndex : -1;
@@ -70,6 +84,7 @@ export function SearchBox({ value, onChange, onSubmit, onClear, onSelectContact,
     (suggestion: SearchSuggestion) => {
       close();
       if (suggestion.kind === "recent") {
+        setDraft(suggestion.query);
         onChange(suggestion.query);
         onSubmit(suggestion.query);
       } else {
@@ -110,21 +125,25 @@ export function SearchBox({ value, onChange, onSubmit, onClear, onSelectContact,
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          if (value.trim()) {
+          if (draft.trim()) {
             close();
-            onSubmit(value);
+            onSubmit(draft);
+          } else if (value) {
+            // Enter on an emptied box leaves the search, as the clear button does.
+            close();
+            onClear();
           }
         }}
-        className="relative"
       >
-        <Search className="absolute start-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-        <Input
-          type="text"
+        <ToolbarSearch
           autoFocus={autoFocus}
-          placeholder={t("search_placeholder_hint")}
-          value={value}
+          // Short, so a narrow list column doesn't cut it; the "/" shortcut
+          // shows as a key cap instead of in the text.
+          placeholder={placeholder ?? t("search_placeholder")}
+          shortcut="/"
+          value={draft}
           onChange={(e) => {
-            onChange(e.target.value);
+            setDraft(e.target.value);
             setOpen(true);
             setSelectedIndex(-1);
           }}
@@ -134,10 +153,19 @@ export function SearchBox({ value, onChange, onSubmit, onClear, onSelectContact,
             // Focus moving into the dropdown (e.g. its action buttons) keeps it open.
             const next = e.relatedTarget as Node | null;
             if (next && containerRef.current?.contains(next)) return;
+            // Anything that reads the query from outside (the filter panel's
+            // search) sees what was typed once focus moves to it.
+            commitDraft();
             close();
           }}
           onKeyDown={handleKeyDown}
-          className={cn("ps-9 h-9", value && "pe-8")}
+          onClear={() => {
+            setDraft("");
+            close();
+            onClear();
+          }}
+          clearLabel={t("clear_search")}
+          trailing={trailing}
           role="combobox"
           aria-expanded={showDropdown}
           aria-controls={listId}
@@ -149,24 +177,11 @@ export function SearchBox({ value, onChange, onSubmit, onClear, onSelectContact,
           disabled={disabled}
           title={title}
         />
-        {value && (
-          <button
-            type="button"
-            onClick={() => {
-              close();
-              onClear();
-            }}
-            className="absolute end-2 top-1/2 transform -translate-y-1/2 p-1 rounded-full hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
-            aria-label={t("clear_search")}
-          >
-            <X className="w-4 h-4" />
-          </button>
-        )}
       </form>
       {showDropdown && (
         <SearchSuggestions
           id={listId}
-          query={value}
+          query={draft}
           suggestions={suggestions}
           selectedIndex={activeIndex}
           onSelect={select}
