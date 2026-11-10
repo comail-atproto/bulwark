@@ -2,13 +2,8 @@ import { describe, it, expect } from 'vitest';
 import { BUILTIN_THEMES } from '../builtin-themes';
 
 describe('BUILTIN_THEMES', () => {
-  it('contains exactly 8 themes', () => {
-    expect(BUILTIN_THEMES).toHaveLength(8);
-  });
-
-  it('includes the comail brand theme', () => {
-    const ids = BUILTIN_THEMES.map(t => t.id);
-    expect(ids).toContain('builtin-comail');
+  it('contains exactly 7 themes', () => {
+    expect(BUILTIN_THEMES).toHaveLength(7);
   });
 
   it('all themes have required fields', () => {

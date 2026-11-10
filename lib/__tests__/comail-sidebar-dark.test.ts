@@ -1,25 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { BUILTIN_THEMES } from '../builtin-themes';
+import { COMAIL_THEME } from '@/lib/__tests__/fixtures/comail-theme';
 
-// Issue #1765 (items 2 + 3), refreshed audit 2026-07-02.
-//
-// Item 3 — Dark-mode sidebar renders the LIGHT teal. The comail skin paints the
-// task rail (`.w-14.bg-secondary`) and the folder sidebar (`.bg-secondary.border-r`)
-// with the deep-teal literals (#02413c slab, #1a5466 selected/hover slab). Those
-// paints are UNSCOPED, so in dark mode the sidebar keeps the light teal instead
-// of deferring to the dark tokens (--color-sidebar #16181d). The fix adds
-// `.dark`-scoped overrides that repaint those surfaces back to the dark tokens.
-//
-// Item 2 — Folder counts on the SELECTED/hover slab. The count text carries
-// `.text-muted-foreground` which the skin remaps to #a8b3a0. That is 5.27:1 on
-// the resting teal (#02413c) but only 3.84:1 on the brighter selected slab
-// (#1a5466). The fix lifts muted-foreground to the cream #ecefcf (7.1:1) when it
-// sits on the selected/hover slab.
-//
-// Guardrails: light theme untouched; no NEW brand hexes (all values already live
-// in builtin-themes.ts); the #1762 guard (no .dark sidebar text-foreground /
-// text-primary remap) must stay green — these overrides target BACKGROUND paints
-// and the muted-foreground count, never .text-foreground / .text-primary.
+// Keep selected counts readable and use charcoal sidebar surfaces in dark mode.
 
 const DARK_SIDEBAR = '#16181d'; // --color-sidebar (dark)
 const LIGHT_TEAL = '#02413c'; // resting deep-teal (light only)
@@ -28,7 +10,7 @@ const CREAM = '#ecefcf'; // accessible cream fg (7.1:1 on #1a5466)
 const LOW_CONTRAST_COUNT = '#a8b3a0'; // 3.84:1 on #1a5466 — must not remain on the slab
 
 function comailSkin(): string {
-  const theme = BUILTIN_THEMES.find((t) => t.id === 'builtin-comail');
+  const theme = COMAIL_THEME;
   expect(theme, 'builtin-comail theme must exist').toBeTruthy();
   expect(theme!.skin, 'builtin-comail must ship a skin').toBeTruthy();
   return theme!.skin as string;

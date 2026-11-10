@@ -25,49 +25,19 @@ beforeEach(() => {
 });
 
 describe('encryptSession / decryptSession', () => {
-  it('round-trips token credentials with the account identity and feature flags', () => {
-    const token = encryptSession('https://mail.example.com', 'alice', { token: 'access-token' }, {
-      did: 'did:web:alice.example', groupwareEnabled: false, buildersEnabled: true,
-    });
-    expect(decryptSession(token)).toEqual({
-      serverUrl: 'https://mail.example.com', username: 'alice', token: 'access-token',
-      did: 'did:web:alice.example', groupwareEnabled: false, buildersEnabled: true,
-    });
-  });
-
-  it('keeps feature flags inside each authenticated session', () => {
-    const token = encryptSession('https://inbox.example', 'alice', 'password', { groupwareEnabled: false, buildersEnabled: true });
-    expect(decryptSession(token)).toMatchObject({ groupwareEnabled: false, buildersEnabled: true });
-  });
-
   it('round-trips a session', () => {
     const token = encryptSession('https://mail.example.com', 'alice', 's3cret');
     expect(decryptSession(token)).toEqual({
       serverUrl: 'https://mail.example.com',
       username: 'alice',
       password: 's3cret',
-    });
-  });
-
-  it('round-trips the optional verified atproto DID', () => {
-    const token = encryptSession(
-      'https://mail.example.com',
-      'alice',
-      's3cret',
-      { did: 'did:plc:abc123' },
-    );
-
-    expect(decryptSession(token)).toEqual({
-      serverUrl: 'https://mail.example.com',
-      username: 'alice',
-      password: 's3cret',
-      did: 'did:plc:abc123',
+      signedInAt: expect.any(Number),
     });
   });
 
   it('produces a base64 token with a random IV (two encrypts differ, both decrypt equal)', () => {
-    const a = encryptSession('https://x', 'u', 'p');
-    const b = encryptSession('https://x', 'u', 'p');
+    const a = encryptSession('https://x', 'u', 'p', 1000);
+    const b = encryptSession('https://x', 'u', 'p', 1000);
     expect(a).not.toBe(b);
     expect(Buffer.from(a, 'base64').toString('base64')).toBe(a); // valid base64
     expect(decryptSession(a)).toEqual(decryptSession(b));

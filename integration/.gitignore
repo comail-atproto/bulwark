@@ -3,7 +3,6 @@
 
 # Arch-specific stalwart-cli binary, fetched by stalwart/prepare-stalwart-cli.sh
 stalwart/stalwart-cli
-stalwart/stalwart-cli.version
 
 # Playwright/test artifacts
 node_modules/
