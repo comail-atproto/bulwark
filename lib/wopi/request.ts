@@ -16,6 +16,7 @@ export async function wopiContext(
 ): Promise<{ payload: WopiTokenPayload; ctx: WopiJmapContext } | null> {
   const payload = verifyWopiToken(request.nextUrl.searchParams.get('access_token'), documentId);
   if (!payload) return null;
+  if (payload.kind !== 'attachment' && process.env.INBOX_FILES_BRIDGE_URL) return null;
   if (payload.kind !== 'attachment' && !await groupwareMailboxAllowed(payload.username, 'files')) return null;
   // Signed out since the editor was opened.
   if (await isWopiTokenRevoked(payload)) return null;
