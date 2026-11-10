@@ -13,13 +13,16 @@ describe('JMAP groupware transport', () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(Response.json(session));
     vi.stubGlobal('fetch', fetchMock);
     await client.connect();
-    fetchMock.mockReset().mockResolvedValue(new Response('{"error":"Not found"}', { status: 404 }));
+    fetchMock.mockReset().mockImplementation(async (url: string) => url === '/api/contacts/book?slot=2'
+      ? Response.json({ error: 'not_configured' }, { status: 404 })
+      : new Response('{"error":"Not found"}', { status: 404 }));
     try {
       await expect(client.getAddressBooks({ throwOnError: true })).rejects.toThrow();
-      expect(fetchMock).toHaveBeenCalledTimes(1);
-      expect(fetchMock.mock.calls[0][0]).toBe('/api/account/stalwart/jmap');
-      expect(fetchMock.mock.calls[0][1].headers).toMatchObject({ 'X-JMAP-Cookie-Slot': '2' });
-      expect(fetchMock.mock.calls[0][1].headers.Authorization).toBeUndefined();
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(fetchMock.mock.calls[0][0]).toBe('/api/contacts/book?slot=2');
+      expect(fetchMock.mock.calls[1][0]).toBe('/api/account/stalwart/jmap');
+      expect(fetchMock.mock.calls[1][1].headers).toMatchObject({ 'X-JMAP-Cookie-Slot': '2' });
+      expect(fetchMock.mock.calls[1][1].headers.Authorization).toBeUndefined();
     } finally { client.disconnect(); }
   });
 });

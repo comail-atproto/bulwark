@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -47,6 +47,7 @@ import {
   normalizeBasePath,
   parseBool,
   parseLiteTarget,
+  readNotFoundMessages,
   readZipEntry,
   resolveStalwartBoot,
   rewriteFlightForMount,
@@ -161,7 +162,7 @@ describe('lite build helpers', () => {
     const headers = buildHeaders({ basePath: '', connectSrc: 'https://mail.example.com' });
     expect(headers).toContain("script-src 'self' 'unsafe-inline'");
     expect(headers).toContain("connect-src 'self' https://mail.example.com");
-    expect(headers).toContain("frame-ancestors 'none'");
+    expect(headers).toContain("frame-ancestors 'self'");
     expect(headers).toContain('/_next/static/*');
     expect(buildHeaders({ basePath: '/w', connectSrc: '*' })).toMatch(/^\/w\/\*/);
   });
@@ -195,6 +196,19 @@ describe('lite build helpers', () => {
     expect(withScriptHashCsp('<html><script>1</script></html>')).toMatch(/^<html><meta http-equiv="Content-Security-Policy"[^>]*><script>/);
   });
 
+  it('fences a page built with no third-party traffic to its own origin and the JMAP server (#903)', () => {
+    const strict = buildScriptHashCsp([], { noThirdParty: true, connectSrc: 'https://mail.example.com' });
+    expect(strict).toContain("connect-src 'self' https://mail.example.com");
+    expect(strict).toContain("img-src 'self' data: blob: https://mail.example.com");
+    expect(strict).toContain("font-src 'self' data:");
+    expect(strict).not.toMatch(/ https:( |;|$)/);
+    expect(buildScriptHashCsp([], { noThirdParty: true })).toContain("connect-src 'self' *");
+    const header = buildHeaders({ basePath: '', connectSrc: 'https://mail.example.com', noThirdParty: true });
+    expect(header).toContain("img-src 'self' data: blob: https://mail.example.com");
+    expect(header).not.toMatch(/img-src[^;]* https:( |;)/);
+    expect(buildHeaders({ basePath: '', connectSrc: '*' })).toContain("img-src 'self' data: blob: https:");
+  });
+
   it('writes a 404 shim that parks deep links for known locale/surface pairs only', () => {
     const html = buildNotFoundShim({ basePath: '/webmail', locales: ['de', 'en'] });
     expect(html).toContain('var base = "/webmail"');
@@ -207,6 +221,63 @@ describe('lite build helpers', () => {
     expect(html).toContain('href="/webmail/"');
     // The key the shim writes is the one the app reads.
     expect(LITE_PENDING_PATH_KEY).toBe(APP_LITE_PENDING_PATH_KEY);
+  });
+
+  it('sends a path without a locale to the same path in the reader locale', () => {
+    const html = buildNotFoundShim({ basePath: '/webmail', locales: ['de', 'en', 'zh-TW'], defaultLocale: 'en' });
+    const script = html.match(/<script>([\s\S]*?)<\/script>/)![1];
+    const run = (pathname: string, languages: string[], stored: string | null = null) => {
+      const replace = vi.fn();
+      const location = { pathname, search: '?a=1', hash: '', replace };
+      const storage = { getItem: () => stored, setItem: () => {} };
+      new Function('location', 'navigator', 'localStorage', 'sessionStorage', script)(
+        location, { languages, language: languages[0] }, storage, storage,
+      );
+      return replace.mock.calls[0]?.[0];
+    };
+    expect(run('/webmail/login', ['de-DE'])).toBe('/webmail/de/login?a=1');
+    expect(run('/webmail/mail/thread/x', ['fr-FR'])).toBe('/webmail/en/mail/thread/x?a=1');
+    expect(run('/webmail/login', ['en'], JSON.stringify({ state: { locale: 'zh-TW' } }))).toBe('/webmail/zh-TW/login?a=1');
+    // With a locale the surface logic applies as before; unknown pages stay a 404.
+    expect(run('/webmail/en/nope', ['de'])).toBeUndefined();
+    expect(run('/webmail/de/mail/thread/x', ['en'])).toBe('/webmail/de/mail/');
+    // Outside the mount nothing happens.
+    expect(run('/other/login', ['de'])).toBeUndefined();
+  });
+
+  // /de/gibtsnicht showed the shim's English "This page could not be found".
+  it('shows a page that stays a 404 in the language of its URL, else the reader one', () => {
+    const messages = readNotFoundMessages(process.cwd(), ['ar', 'de', 'en']);
+    const html = buildNotFoundShim({ basePath: '/webmail', locales: ['ar', 'de', 'en'], defaultLocale: 'en', messages });
+    // Without scripts the page reads in English.
+    expect(html).toContain(`<h1 id="not-found-title">${messages.en.title}</h1>`);
+    const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)][1][1];
+    const run = (pathname: string, languages: string[], stored: string | null = null) => {
+      const node = () => ({ textContent: '', attrs: {} as Record<string, string>, setAttribute(k: string, v: string) { this.attrs[k] = v; } });
+      const nodes: Record<string, ReturnType<typeof node>> = { 'not-found-title': node(), 'not-found-text': node(), 'not-found-home': node() };
+      const document = { documentElement: { lang: 'en', dir: '' }, title: '404', getElementById: (id: string) => nodes[id] };
+      new Function('location', 'navigator', 'localStorage', 'document', script)(
+        { pathname }, { languages, language: languages[0] }, { getItem: () => stored }, document,
+      );
+      return {
+        lang: document.documentElement.lang, dir: document.documentElement.dir, title: nodes['not-found-title'].textContent,
+        text: nodes['not-found-text'].textContent, home: nodes['not-found-home'].textContent, href: nodes['not-found-home'].attrs.href,
+      };
+    };
+    expect(run('/webmail/de/gibtsnicht', ['en-US'])).toEqual({
+      lang: 'de', dir: 'ltr', title: messages.de.title, text: messages.de.description, home: messages.de.home, href: '/webmail/de/',
+    });
+    expect(run('/webmail/ar/nope', ['de'])).toMatchObject({ lang: 'ar', dir: 'rtl', title: messages.ar.title, href: '/webmail/ar/' });
+    // No locale in the URL: the one picked in Settings, then the browser's.
+    expect(run('/webmail/', ['fr'], JSON.stringify({ state: { locale: 'ar' } }))).toMatchObject({ lang: 'ar' });
+    expect(run('/webmail/', ['de-AT'])).toMatchObject({ lang: 'de', title: messages.de.title });
+    expect(run('/webmail/', ['fr'])).toMatchObject({ lang: 'en', title: messages.en.title });
+  });
+
+  it('has not-found texts for every locale', () => {
+    const locales = readdirSync(join(process.cwd(), 'locales'));
+    const messages = readNotFoundMessages(process.cwd(), locales);
+    expect(Object.keys(messages).sort()).toEqual([...locales].sort());
   });
 
   it('renders host snippets and the README for the built variant', () => {
@@ -229,7 +300,16 @@ describe('lite build helpers', () => {
     const readme = buildReadme({ version: '1.10.0', commit: 'abc1234', basePath: '/w', locales: ['en'], jmapServerUrl: 'https://m.example', demoMode: true });
     expect(readme).toContain('# Bulwark Lite 1.10.0 (abc1234)');
     expect(readme).toContain('Demo mode is ON');
-    expect(readme).toContain('permissive-cors = true');
+    // Since 0.16 CORS is the registry setting Http.usePermissiveCors (the same
+    // on 1.0); the old TOML key is not read.
+    expect(readme).toContain('Settings > Network > HTTP > Security');
+    expect(readme).toContain('stalwart-cli update Http --field usePermissiveCors=true');
+    expect(readme).toContain('{"update": {"singleton": {"usePermissiveCors": true}}}');
+    expect(readme).toContain('ReloadSettings');
+    // The 1.0 pre-releases can't reload settings while the stock spam-filter
+    // rules use a function 1.0 removed; a restart applies the change there.
+    expect(readme).toMatch(/On the current 1\.0 pre-releases `ReloadSettings` fails while the\s+stock spam-filter rules are loaded, so restart Stalwart there instead\./);
+    expect(readme).not.toContain('permissive-cors = true');
     expect(readme).toContain('currently `https://m.example`');
   });
 
@@ -627,7 +707,7 @@ describe('Stalwart target: the entry document', () => {
   it('documents the install, reserved prefixes, updates and the redirect URI', () => {
     const readme = buildStalwartReadme({ version: '1.10.0', commit: 'abc1234', locales: ['en'], buildId: 'b' });
     // A tagged release by default: Stalwart verifies nothing it downloads.
-    expect(readme).toContain(`resourceUrl='https://github.com/bulwarkmail/webmail/releases/download/v`);
+    expect(readme).toContain(`resourceUrl='https://github.com/bulwarkmail/webmail/releases/download/1.10.0/`);
     expect(readme).not.toContain(`resourceUrl='https://github.com/bulwarkmail/webmail/releases/latest`);
     expect(readme).toContain(`sha256sum -c ${STALWART_ZIP_NAME}.sha256`);
     expect(readme).toContain('stalwart-cli create Application');
@@ -639,9 +719,39 @@ describe('Stalwart target: the entry document', () => {
     expect(readme).toContain('sysApplicationCreate');
     expect(readme).toContain('actionUpdateApps');
     expect(readme).toContain('autoUpdateFrequency');
-    expect(readme).toContain(`releases/download/v1.10.0/${STALWART_ZIP_NAME}`);
+    // Release tags carry no "v" prefix (since 1.3.0); the v-URL 404s.
+    expect(readme).toContain(`releases/download/1.10.0/${STALWART_ZIP_NAME}`);
+    expect(readme).not.toContain('releases/download/v1.10.0/');
     expect(readme).toContain('https://mail.example.com/webmail/');
     for (const segment of ['`mail`', '`calendar`', '`admin`', '`account`']) expect(readme).toContain(segment);
+  });
+
+  it('states the Stalwart floor and what a failed download does on each version', () => {
+    const readme = buildStalwartReadme({ version: '1.10.0', commit: 'abc1234', locales: ['en'], buildId: 'b' });
+    expect(readme).toContain('Requires: Stalwart 0.16.6 or later (0.16.19 for `oauthClientId`), or 1.0.');
+    // Only 0.16.23 keeps the running bundle; 0.16.0-0.16.22 and the 1.0
+    // pre-releases unmount the Application and delete the cached zip, so any
+    // later unpack downloads again: a restart, UpdateApps, or a reload of the
+    // Applications (cluster peers run one after UpdateApps). A restart with an
+    // expired cache and an unreachable URL leaves it unmounted everywhere.
+    expect(readme).not.toContain('A failed download keeps the previous bundle online');
+    expect(readme).toMatch(/On 0\.16\.23 the\s+running bundle stays online/);
+    expect(readme).not.toContain('until a later `UpdateApps` succeeds');
+    expect(readme).toMatch(/Older 0\.16 releases and the 1\.0 pre-releases\s+unmount the Application and drop the cached copy\./);
+    expect(readme).toMatch(/The next restart,\s+`UpdateApps` or reload of the Applications \(the other nodes of a cluster\s+reload them after `UpdateApps`\) downloads `resourceUrl` again and mounts the\s+bundle once that works\./);
+    expect(readme).toMatch(/On every version, a restart after the cached copy\s+has expired/);
+    expect(readme).toMatch(/check that `resourceUrl` downloads before running\s+`UpdateApps`/);
+  });
+
+  it('names the web admin action, asks for HTTPS and keeps single sign-on off the missing list', () => {
+    const readme = buildStalwartReadme({ version: '1.10.0', commit: 'abc1234', locales: ['en'], buildId: 'b' });
+    expect(readme).toContain('**Actions > Update applications**');
+    // Without a secure context there is no crypto.subtle for PKCE, so the
+    // sign-in falls back to a tab-scoped password session.
+    expect(readme).toMatch(/Serve Stalwart over HTTPS\./);
+    // Outside CI the build refuses to delete files unless told the tree is throwaway.
+    expect(readme).toContain('npm run build:lite -- --in-place --target=stalwart');
+    expect(readme).not.toContain('OAuth/SSO via an external identity provider');
   });
 });
 
@@ -780,6 +890,9 @@ describe('Stalwart target: postbuild + verify against a fake checkout', () => {
       const names = listZipEntries(readFileSync(result.zipPath!)).map((e) => e.name);
       expect(names).toContain('index.html');
       expect(names).toContain('en/mail/index.html');
+      // Stalwart 1.0 refuses a bundle without this manifest at the root.
+      expect(names).toContain('stalwart-app.json');
+      expect(JSON.parse(readFileSync(join(out, 'stalwart-app.json'), 'utf8'))).toEqual({ id: 'bulwark-webmail', version: expect.stringMatching(/^\d+\.\d+\.\d+/) });
       expect(names.some((n) => n.startsWith('out/'))).toBe(false);
 
       const verdict = verifyExport({ root });

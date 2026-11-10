@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { JMAPClient } from '../jmap/client';
-import { jmapSession } from './fixtures/jmap-session';
 
 /**
  * #907: Stalwart lazily creates an account's default calendar / address book on
@@ -11,6 +10,41 @@ import { jmapSession } from './fixtures/jmap-session';
  * request on the wire until the first one for that account has settled, while
  * leaving unrelated requests (Mailbox/get) unaffected.
  */
+
+function makeSession() {
+  return {
+    capabilities: {
+      'urn:ietf:params:jmap:core': {},
+      'urn:ietf:params:jmap:mail': {},
+      'urn:ietf:params:jmap:calendars': {},
+      'urn:ietf:params:jmap:contacts': {},
+    },
+    accounts: {
+      'acct-1': {
+        name: 'test',
+        isPersonal: true,
+        accountCapabilities: {
+          'urn:ietf:params:jmap:mail': {},
+          'urn:ietf:params:jmap:calendars': {},
+          'urn:ietf:params:jmap:contacts': {},
+        },
+      },
+    },
+    primaryAccounts: {
+      'urn:ietf:params:jmap:mail': 'acct-1',
+      'urn:ietf:params:jmap:calendars': 'acct-1',
+      'urn:ietf:params:jmap:contacts': 'acct-1',
+    },
+    apiUrl: 'https://mail.example.com/jmap/api',
+    downloadUrl: 'https://mail.example.com/jmap/download/{accountId}/{blobId}/{name}',
+    uploadUrl: 'https://mail.example.com/jmap/upload/{accountId}/',
+    eventSourceUrl: 'https://mail.example.com/jmap/eventsource',
+  };
+}
+
+function jsonResponse(body: unknown): Response {
+  return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
+}
 
 interface Pending {
   methods: string[];
@@ -33,25 +67,7 @@ describe('JMAPClient first-touch ordering (#907)', () => {
   });
 
   async function connectedClient(): Promise<JMAPClient> {
-    fetchSpy.mockResolvedValueOnce(Response.json(jmapSession({
-      accountCapabilities: {
-        'urn:ietf:params:jmap:mail': {},
-        'urn:ietf:params:jmap:calendars': {},
-        'urn:ietf:params:jmap:contacts': {},
-      },
-      serverCapabilities: {
-        'urn:ietf:params:jmap:mail': {},
-        'urn:ietf:params:jmap:calendars': {},
-        'urn:ietf:params:jmap:contacts': {},
-      },
-      overrides: {
-        primaryAccounts: {
-          'urn:ietf:params:jmap:mail': 'acct-1',
-          'urn:ietf:params:jmap:calendars': 'acct-1',
-          'urn:ietf:params:jmap:contacts': 'acct-1',
-        },
-      },
-    })));
+    fetchSpy.mockResolvedValueOnce(jsonResponse(makeSession()));
     const client = new JMAPClient('https://mail.example.com', 'user@test.com', 'pass123');
     await client.connect();
     // Every API call from here on is parked until the test releases it, in the
@@ -61,7 +77,7 @@ describe('JMAPClient first-touch ordering (#907)', () => {
       return new Promise<Response>((resolve) => {
         onWire.push({
           methods: (body.methodCalls ?? []).map((c) => c[0]),
-          resolve: (responseBody) => resolve(Response.json(responseBody)),
+          resolve: (responseBody) => resolve(jsonResponse(responseBody)),
         });
       });
     });
@@ -84,8 +100,9 @@ describe('JMAPClient first-touch ordering (#907)', () => {
     await flush();
 
     // The synthetic-id probe (lib/recurrence-instances.ts) rides along in
-    // the Calendar/get request, so the query needs no request of its own first.
-    expect(onWire[0].methods).toEqual(['Calendar/get', 'CalendarEvent/set']);
+    // the Calendar/get request, and so does the time zone check unless the
+    // zone is UTC: the query needs no request of its own first.
+    expect(onWire[0].methods.slice(0, 2)).toEqual(['Calendar/get', 'CalendarEvent/set']);
     expect(onWire.map((p) => p.methods[0])).toEqual(['Calendar/get', 'CalendarEvent/query']);
     onWire[1].resolve(emptyResponse('CalendarEvent/query'));
     await expect(events).resolves.toEqual([]);
