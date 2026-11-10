@@ -17,6 +17,8 @@
 /.next/
 /out/
 /lite-image/
+# scripts/build-plugin-sandbox.mjs
+/public/plugin-sandbox-assets/
 
 # production
 /build
@@ -24,6 +26,8 @@
 # misc
 .DS_Store
 *.pem
+# BIMI test certificates (public; the keys stay out)
+!lib/__tests__/fixtures/bimi/*.pem
 
 # debug
 npm-debug.log*
@@ -57,3 +61,9 @@ result-*
 # Local review captures and retired tracker state.
 review-evidence/
 .chainlink/
+
+# Assembled upstream source with the Comail layer.
+/.bulwark/
+
+# Integration bootstrap version cache.
+/integration/stalwart/stalwart-cli.version

@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { settingsSubResults } from '@/lib/settings-search';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
@@ -120,14 +121,10 @@ describe('BYOMC settings tab gating (atmosphere-mail #1791)', () => {
     expect(settingsSrc).toMatch(/byomcEnabled,\s*\n/);
   });
 
-  it('includes the byomc search path so its haystack is built', () => {
-    // tabSearchPaths.byomc points at the settings.byomc translation namespace.
-    // The haystack builder iterates Object.keys(tabSearchPaths), so a present
-    // entry is what makes the tab searchable. When the tab is flag-gated out of
-    // the tab LIST it still has a haystack entry, but matchesQuery only runs
-    // against tabs that survive into groupedTabs (visibleTabs → tabs filtered
-    // by the conditional spread), so a flag-off tab is never searched.
-    expect(readFileSync(resolve(componentsDir, '..', 'lib', 'settings-search.ts'), 'utf8')).toContain("byomc: ['settings.byomc'],");
+  it('indexes the Connect a mail client setting', () => {
+    const messages = { settings: { byomc: { title: 'Connect a mail client' } } };
+    expect(settingsSubResults(messages, 'byomc', 'Comail').map((row) => row.label))
+      .toContain('Connect a mail client');
   });
 
   it('renders <ByomcSettings /> for the byomc tab', () => {

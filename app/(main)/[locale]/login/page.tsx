@@ -1,25 +1,32 @@
 "use client";
 
-import { Suspense, useState, useEffect, useRef, useCallback } from "react";
+import { InboxWaitlist } from "@/components/atproto/inbox-waitlist";
+import { InboxRecovery } from "@/components/inbox-recovery";
+import { ComailWordmark } from "@/components/atproto/comail-wordmark";
+import { ComailLoginEnvelopes, comailLoginArtwork, type ComailLoginTheme } from "@/components/atproto/comail-login-envelopes";
+
+import { Suspense, useState, useEffect, useRef, useCallback, useId } from "react";
 import { useRouter } from "@/i18n/navigation";
 import { useParams, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { Button } from "@/components/ui/button";
+import { IconButton } from "@/components/ui/icon-button";
 import { Input } from "@/components/ui/input";
-import { useAuthStore, consumeSignedOut } from "@/stores/auth-store";
+import { useAuthStore, consumeSignedOut, SESSION_EXPIRED_DRAFTS_UNSAVED_KEY } from "@/stores/auth-store";
 import { useAccountStore } from "@/stores/account-store";
 import { useThemeStore } from "@/stores/theme-store";
+import { usePolicyStore } from "@/stores/policy-store";
 import { useShallow } from "zustand/react/shallow";
 import { useConfig } from "@/hooks/use-config";
 import { useMenuNavigation } from "@/hooks/use-menu-navigation";
 import { apiFetch, getPathPrefix, toRouterPath, withBasePath } from "@/lib/browser-navigation";
 import { cn } from "@/lib/utils";
-import { AlertCircle, Loader2, X, Info, Eye, EyeOff, LogIn, Sun, Moon, Monitor, Check, Shield, Play, Copy, KeyRound } from "@/components/icons";
+import { AlertCircle, Loader2, X, Info, Eye, EyeOff, LogIn, Sun, Moon, Monitor, Check, Shield, Play, Copy, KeyRound, Sparkles } from "@/components/icons";
 import { type OAuthMetadata } from "@/lib/oauth/discovery";
 import { generateCodeVerifier, generateCodeChallenge, generateState } from "@/lib/oauth/pkce";
 import { HandleCombobox } from "@/components/atproto/handle-combobox";
 import { resolveHandle } from "@/lib/atproto/handle";
-import { DEFAULT_OAUTH_SCOPES } from "@/lib/oauth/scopes";
+import { DEFAULT_OAUTH_SCOPES, withProviderDataScopes } from "@/lib/oauth/scopes";
 import { useUpdateStore, selectBanner } from "@/stores/update-store";
 import { buildVersionLines } from "@/lib/version-display";
 import { offersOwnOAuth, type PublicJmapServerEntry } from "@/lib/admin/jmap-servers";
@@ -33,6 +40,11 @@ import {
   type LiteOAuthDiscovery,
 } from "@/lib/auth/lite-oauth";
 import { toAsciiDomain } from "@/lib/idn";
+import { usePrefetchMailView } from "@/hooks/use-prefetch-mail-view";
+import { buildMobileHandoffUrl, mobileHandoffTarget, signedInLoginAction } from "@/lib/auth/mobile-handoff";
+import { MobileHandoffConsent } from "@/components/auth/mobile-handoff-consent";
+import { HelpLinks } from "@/components/layout/help-links";
+import { consumeSessionEnd, type SessionEndReason } from "@/lib/session-policy/sign-out-reason";
 
 /** The domain of a complete address (`user@example.com`), or '' while it is still being typed. */
 function completeAddressDomain(username: string): string {
@@ -56,18 +68,50 @@ function findServerByDomain(servers: PublicJmapServerEntry[], email: string | un
 const APP_VERSION = process.env.NEXT_PUBLIC_APP_VERSION || "0.0.0";
 const GIT_COMMIT = process.env.NEXT_PUBLIC_GIT_COMMIT || "unknown";
 
+/** Labels are keys under settings.appearance.theme. */
 const THEME_OPTIONS = [
+  { value: "light" as const, icon: Sun, label: "light" },
+  { value: "dark" as const, icon: Moon, label: "dark" },
+  { value: "system" as const, icon: Monitor, label: "system" },
+];
+
+const COMAIL_THEME_OPTIONS = [
   { value: "light" as const, icon: Sun, label: "Light" },
   { value: "dark" as const, icon: Moon, label: "Dark" },
-  { value: "system" as const, icon: Monitor, label: "System" },
+  { value: "spooky" as const, icon: Sparkles, label: "Spooky" },
 ];
 
 function VersionBadge() {
+  const t = useTranslations("login.version");
   const [copied, setCopied] = useState(false);
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const detailsId = useId();
   const banner = useUpdateStore(useShallow(selectBanner));
   const startPolling = useUpdateStore((s) => s.startPolling);
 
   useEffect(() => { startPolling(); }, [startPolling]);
+
+  // Opened by click or keyboard (hover alone left keyboard and touch users
+  // without it): closed again by Escape or a click elsewhere.
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      setOpen(false);
+      triggerRef.current?.focus();
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
 
   const versionLines = buildVersionLines({
     version: APP_VERSION,
@@ -90,10 +134,10 @@ function VersionBadge() {
   const triggerText = !banner
     ? `v${APP_VERSION}`
     : banner.severity === "security"
-      ? "Security update available"
+      ? t("security_update")
       : banner.severity === "deprecated"
-        ? "Version no longer supported"
-        : "New version available";
+        ? t("unsupported")
+        : t("new_version");
 
   const triggerColor = !banner
     ? "text-muted-foreground/40"
@@ -102,53 +146,61 @@ function VersionBadge() {
       : "text-amber-600/80 dark:text-amber-400/80 hover:text-amber-600 dark:hover:text-amber-400";
 
   const triggerClass = cn(
-    "peer text-center text-xs transition-colors",
+    "peer text-center text-xs transition-colors rounded-sm underline-offset-2 hover:underline",
+    "focus-visible:outline-hidden",
     triggerColor,
-    banner?.url ? "cursor-pointer underline-offset-2 hover:underline" : "cursor-default",
-  );
-
-  const trigger = banner?.url ? (
-    <a href={banner.url} target="_blank" rel="noopener noreferrer" className={triggerClass}>
-      {triggerText}
-    </a>
-  ) : (
-    <p className={triggerClass}>{triggerText}</p>
   );
 
   return (
-    <div className="relative inline-flex justify-center">
-      {trigger}
-      <div className="absolute bottom-full start-0 mb-1.5 px-3 py-2 rounded-md bg-popover text-popover-foreground text-xs shadow-md border border-border invisible opacity-0 peer-hover:visible peer-hover:opacity-100 hover:visible hover:opacity-100 transition-opacity whitespace-nowrap z-10 before:absolute before:inset-x-0 before:top-full before:h-1.5">
+    <div ref={rootRef} className="relative inline-flex justify-center">
+      <button
+        ref={triggerRef}
+        type="button"
+        className={triggerClass}
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-controls={detailsId}
+      >
+        {triggerText}
+      </button>
+      <div
+        id={detailsId}
+        role="group"
+        aria-label={t("details")}
+        className={cn(
+          "absolute bottom-full start-0 mb-1.5 px-3 py-2 rounded-md bg-popover text-popover-foreground text-xs shadow-md border border-border transition-opacity whitespace-nowrap z-10 before:absolute before:inset-x-0 before:top-full before:h-1.5",
+          // Hover still previews it; only an opened one takes the focus.
+          open ? "visible opacity-100" : "invisible opacity-0 peer-hover:visible peer-hover:opacity-100 hover:visible hover:opacity-100",
+        )}
+      >
         <div className="flex items-center gap-2">
           <div className="space-y-0.5">
             {versionLines.map((line) => (
               <p key={line.label}>{line.label}: <span className="font-medium">{line.value}</span></p>
             ))}
             {banner?.advisory && (
-              <p className="text-red-500 dark:text-red-400">{banner.advisory}</p>
+              <p className="text-red-600 dark:text-red-400">{banner.advisory}</p>
+            )}
+            {banner?.url && (
+              <a href={banner.url} target="_blank" rel="noopener noreferrer" className="text-primary underline-offset-2 hover:underline">
+                {t("release_notes")}
+              </a>
             )}
           </div>
-          <button
-            onClick={handleCopy}
-            className="p-1 rounded hover:bg-muted transition-colors"
-            aria-label="Copy version info"
-          >
-            {copied ? <Check className="w-3.5 h-3.5 text-green-500" /> : <Copy className="w-3.5 h-3.5" />}
-          </button>
+          <IconButton label={t("copy")} onClick={handleCopy}>
+            {copied ? <Check className="w-3.5 h-3.5 text-green-600 dark:text-green-400" /> : <Copy className="w-3.5 h-3.5" />}
+          </IconButton>
         </div>
       </div>
     </div>
   );
 }
 
-// Only redirect targets matching this scheme are honored by the mobile
-// handoff path. Without the check the login page becomes an open redirector
-// that funnels password and token material to any caller-supplied URL.
-const MOBILE_REDIRECT_SCHEME = "bulwarkmobile://";
-
 function LoginPageContent() {
   const router = useRouter();
   const t = useTranslations("login");
+  const tSessionLimits = useTranslations("session_limits");
+  const tTheme = useTranslations("settings.appearance.theme");
   const params = useParams();
   const searchParams = useSearchParams();
   const isAddAccountMode = searchParams.get("mode") === "add-account";
@@ -157,17 +209,28 @@ function LoginPageContent() {
   // these params. We grab them once at mount and stash them in a ref so any
   // login path that completes (password or OAuth) can hand control back to
   // the app instead of routing into /mail.
-  const rawMobileRedirectUri = searchParams.get("mobile_redirect_uri") ?? "";
+  // Only the app's own callback link is a handoff target, and nothing is
+  // handed over before the user confirms it (lib/auth/mobile-handoff.ts).
   const rawMobileState = searchParams.get("mobile_state") ?? "";
-  const mobileRedirectUri = rawMobileRedirectUri.startsWith(MOBILE_REDIRECT_SCHEME)
-    ? rawMobileRedirectUri
-    : "";
+  const mobileRedirectUri = mobileHandoffTarget(searchParams.get("mobile_redirect_uri"));
   const mobileState = mobileRedirectUri ? rawMobileState : "";
   const isMobileHandoff = Boolean(mobileRedirectUri);
+  const [pendingHandoff, setPendingHandoff] = useState<{ url: string; username: string } | null>(null);
+  usePrefetchMailView(!isMobileHandoff);
   const { login, loginWithToken, loginDemo, isLoading, error, clearError, isAuthenticated } = useAuthStore();
   const { theme, setTheme, initializeTheme } = useThemeStore(useShallow((s) => ({ theme: s.theme, setTheme: s.setTheme, initializeTheme: s.initializeTheme })));
-  const { appName, jmapServerUrl: configuredServerUrl, oauthEnabled, oauthOnly, oauthClientId: globalOauthClientId, oauthIssuerUrl: globalOauthIssuerUrl, oauthScopes, rememberMeEnabled, devMode, demoMode, loginLogoLightUrl, loginLogoDarkUrl, loginCompanyName, loginImprintUrl, loginPrivacyPolicyUrl, loginWebsiteUrl, sourceCodeUrl: configSourceCodeUrl, loginLogoMaxHeight, loginLogoMaxWidth, loginShowHeading, loginShowSubtitle, loginShowTotp, loginShowTokenLogin, loginShowVersion, isLoading: configLoading, error: configError, autoSsoEnabled, atprotoLoginUrl, embeddedMode: _embeddedMode, allowCustomJmapEndpoint, jmapServers, jmapServerAutoPickByDomain } = useConfig();
+  const { appName, jmapServerUrl: configuredServerUrl, oauthEnabled, oauthOnly, oauthClientId: globalOauthClientId, oauthIssuerUrl: globalOauthIssuerUrl, oauthScopes, rememberMeEnabled, devMode, demoMode, loginLogoLightUrl, loginLogoDarkUrl, loginCompanyName, sourceCodeUrl: configSourceCodeUrl, loginImprintUrl, loginPrivacyPolicyUrl, loginWebsiteUrl, loginUsernamePlaceholder, loginLogoMaxHeight, loginLogoMaxWidth, loginShowHeading, loginShowSubtitle, loginShowTotp, loginShowTokenLogin, loginShowRememberMe, loginShowVersion, isLoading: configLoading, error: configError, autoSsoEnabled, atprotoLoginUrl, embeddedMode: _embeddedMode, allowCustomJmapEndpoint, jmapServers, jmapServerAutoPickByDomain } = useConfig();
+  const [comailLoginTheme, setComailLoginTheme] = useState<ComailLoginTheme>("spooky");
+  const loginArtwork = comailLoginArtwork[comailLoginTheme === "spooky" ? "spooky" : "default"];
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("comail-login-theme");
+      if (saved === "light" || saved === "dark" || saved === "spooky") setComailLoginTheme(saved);
+    } catch { /* The picker still works without browser storage. */ }
+  }, []);
   const resolvedTheme = useThemeStore((s) => s.resolvedTheme);
+  const colorModeLocked = usePolicyStore((s) => s.getColorModePolicy().locked);
+  const waitlistView = Boolean(atprotoLoginUrl) && !devMode && searchParams.get("state") === "waitlist";
 
   // Login logo sizing: when a max height/width is configured, drop the fixed
   // 64×64 box so the logo (e.g. a wide wordmark) can render at its true size.
@@ -177,7 +240,8 @@ function LoginPageContent() {
     : undefined;
 
   const [formData, setFormData] = useState({
-    username: "",
+    // An account restored from the list backup opens this form with its address.
+    username: isAddAccountMode ? searchParams.get("username") ?? "" : "",
     password: "",
   });
   const [jmapEndpoint, setJmapEndpoint] = useState("");
@@ -214,6 +278,9 @@ function LoginPageContent() {
   // those sessions then only last as long as the tab (lib/auth/lite-tokens.ts).
   const [liteTokenLoginSupported, setLiteTokenLoginSupported] = useState<boolean | null>(null);
   const [sessionExpired, setSessionExpired] = useState(false);
+  // Signed out by the organisation's idle timeout or maximum session length.
+  const [sessionEnd, setSessionEnd] = useState<SessionEndReason | null>(null);
+  const [expiredDraftsUnsaved, setExpiredDraftsUnsaved] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [shakeError, setShakeError] = useState(false);
   const [showThemeMenu, setShowThemeMenu] = useState(false);
@@ -235,9 +302,26 @@ function LoginPageContent() {
   const [atprotoHandleError, setAtprotoHandleError] = useState(false);
   const [atprotoResolving, setAtprotoResolving] = useState(false);
 
-  const suggestionsRef = useRef<HTMLDivElement>(null);
+  // The error box and the recent-accounts list, tied to the fields they
+  // belong to so a screen reader reads them with the field.
+  const formId = useId();
+  const errorId = `${formId}-error`;
+  const suggestionsId = `${formId}-suggestions`;
+  const suggestionsHintId = `${formId}-suggestions-hint`;
+  const suggestionId = (index: number) => `${formId}-suggestion-${index}`;
+  // Which field the error is about. A wrong code with a code typed blames
+  // the code; the server and network errors blame no field.
+  const totpBlamed = error === "totp_required" || (error === "invalid_credentials" && showTotpField && !!totpCode);
+  const credentialsBlamed = error === "invalid_credentials" && !totpBlamed;
+  const tokenBlamed = error === "invalid_token";
+  const errorProps = (blamed: boolean) =>
+    blamed ? { "aria-invalid": true as const, "aria-describedby": errorId } : {};
+  const suggestionsOpen = showSuggestions && filteredSuggestions.length > 0;
+  const suggestionsRef = useRef<HTMLUListElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const justSelectedSuggestion = useRef(false);
+  // A removal updated the list itself; the filter effect leaves it open.
+  const justRemovedSuggestion = useRef(false);
   const totpInputRef = useRef<HTMLInputElement>(null);
   const tokenInputRef = useRef<HTMLInputElement>(null);
   const prevError = useRef<string | null>(null);
@@ -274,7 +358,15 @@ function LoginPageContent() {
       clearTimeout(timer);
     };
   }, [probeTarget]);
-  const showRememberMe = rememberMeEnabled && (!IS_LITE || liteTokenLoginSupported !== false);
+  const canRememberSession = rememberMeEnabled && (!IS_LITE || liteTokenLoginSupported !== false);
+  // Sign-ins are remembered without asking unless the admin offers the box
+  // (LOGIN_SHOW_REMEMBER_ME).
+  const showRememberMe = canRememberSession && loginShowRememberMe;
+  const persistSession = canRememberSession && (!loginShowRememberMe || rememberMe);
+  // A provider sign-in follows the box whenever it is shown, the automatic
+  // one included (it starts unticked), and is remembered otherwise. Lite
+  // keeps the provider's tokens in the browser like any other sign-in.
+  const persistProviderSession = IS_LITE ? persistSession : !showRememberMe || rememberMe;
 
   // Lite on Stalwart: which provider signs the typed account in
   // (lib/auth/lite-oauth.ts). A domain Stalwart delegates to an external
@@ -303,11 +395,13 @@ function LoginPageContent() {
   // The admin gave the Application an OAuth client: offer SSO next to the form.
   const liteSsoOffered = LITE_OAUTH_AVAILABLE && !liteSsoRequired && getLiteInjectedClientId() !== "";
 
+  // The tab says what the page is for, not only whose it is (WCAG 2.4.2).
+  const pageTitle = `${isAddAccountMode ? t("add_account_title") : t("sign_in")} - ${appName}`;
   useEffect(() => {
     if (serverUrl) {
-      document.title = appName;
+      document.title = pageTitle;
     }
-  }, [appName, serverUrl]);
+  }, [pageTitle, serverUrl]);
 
   useEffect(() => {
     if (serverUrl && !jmapEndpoint) {
@@ -342,11 +436,21 @@ function LoginPageContent() {
         setSessionExpired(true);
         sessionStorage.removeItem('session_expired');
       }
+      // The expired session tried to save the open messages first (auth store).
+      if (sessionStorage.getItem(SESSION_EXPIRED_DRAFTS_UNSAVED_KEY) === 'true') {
+        setExpiredDraftsUnsaved(true);
+        sessionStorage.removeItem(SESSION_EXPIRED_DRAFTS_UNSAVED_KEY);
+      }
     } catch { /* sessionStorage unavailable */ }
+    const ended = consumeSessionEnd();
+    if (ended) {
+      setSessionEnd(ended);
+      setSessionExpired(true);
+    }
   }, []);
 
   useEffect(() => {
-    if (error && error !== prevError.current) {
+    if (error && error !== 'totp_required' && error !== prevError.current) {
       setShakeError(true);
       const timer = setTimeout(() => setShakeError(false), 400);
       return () => clearTimeout(timer);
@@ -375,21 +479,40 @@ function LoginPageContent() {
     }
   }, [serverUrl]);
 
+  // Mobile handoff: hand the verified credentials back to the mobile app
+  // instead of opening the mailbox. handleSubmit captured the values needed
+  // for the fragment. Runs once per sign-in: whichever of the effect below
+  // and handleSubmit gets here first takes the payload.
+  const offerMobileHandoff = useCallback(() => {
+    const payload = mobileHandoffPayloadRef.current;
+    if (!payload) return;
+    mobileHandoffPayloadRef.current = null;
+    // Shown to the user first; the navigation happens on their confirmation.
+    setPendingHandoff({
+      url: buildMobileHandoffUrl(mobileRedirectUri, { flow: "password", ...payload, state: mobileState }),
+      username: payload.username,
+    });
+  }, [mobileRedirectUri, mobileState]);
+
   useEffect(() => {
-    if (isAuthenticated && !isAddAccountMode) {
-      // Mobile handoff: the password path completes here once the auth store
-      // flips isAuthenticated. Hand the verified credentials back to the
-      // mobile app instead of pushing to /mail. handleSubmit captured the
-      // values needed for the fragment.
-      if (isMobileHandoff && mobileHandoffPayloadRef.current) {
-        const fragment = new URLSearchParams({
-          flow: "password",
-          ...mobileHandoffPayloadRef.current,
-          state: mobileState,
-        });
-        window.location.replace(`${mobileRedirectUri}#${fragment.toString()}`);
-        return;
-      }
+    if (!isAuthenticated) return;
+    const action = signedInLoginAction({
+      isMobileHandoff,
+      isAddAccountMode,
+      hasHandoffPayload: mobileHandoffPayloadRef.current !== null,
+      isWaitlistView: waitlistView,
+    });
+    if (action === "handoff") {
+      // The password path completes here once the auth store flips
+      // isAuthenticated.
+      offerMobileHandoff();
+      return;
+    }
+    // A browser that was already signed in keeps the form: the app needs a
+    // sign-in of its own, and the mailbox would strand the user in the app's
+    // sign-in sheet. handleSubmit offers the hand-off after they sign in
+    // (isAuthenticated stays true, so this effect doesn't run again).
+    if (action === "mailbox") {
       let redirectTo = '/';
       try {
         const saved = sessionStorage.getItem('redirect_after_login');
@@ -400,7 +523,7 @@ function LoginPageContent() {
       } catch { /* ignore */ }
       router.push(toRouterPath(redirectTo));
     }
-  }, [isAuthenticated, router, isAddAccountMode, isMobileHandoff, mobileRedirectUri, mobileState]);
+  }, [isAuthenticated, router, isAddAccountMode, waitlistView, isMobileHandoff, offerMobileHandoff]);
 
   useEffect(() => {
     clearError();
@@ -410,6 +533,10 @@ function LoginPageContent() {
     if (!serverUrl) return;
     if (justSelectedSuggestion.current) {
       justSelectedSuggestion.current = false;
+      return;
+    }
+    if (justRemovedSuggestion.current) {
+      justRemovedSuggestion.current = false;
       return;
     }
 
@@ -499,6 +626,7 @@ function LoginPageContent() {
           redirect_uri: redirectUri,
           locale: params.locale,
           server_id: selectedServer?.id,
+          remember: persistProviderSession,
           ...(isMobileHandoff
             ? { mobile_redirect_uri: mobileRedirectUri, mobile_state: mobileState }
             : {}),
@@ -528,7 +656,7 @@ function LoginPageContent() {
     } catch {
       setOauthLoading(false);
     }
-  }, [params.locale, selectedServer?.id, isMobileHandoff, mobileRedirectUri, mobileState]);
+  }, [params.locale, selectedServer?.id, persistProviderSession, isMobileHandoff, mobileRedirectUri, mobileState]);
 
   useEffect(() => {
     // After signing out, show the login page rather than signing straight
@@ -536,7 +664,7 @@ function LoginPageContent() {
     if (signedOutOnPurpose.current === null) signedOutOnPurpose.current = consumeSignedOut();
     if (signedOutOnPurpose.current) return;
     if (!autoSsoEnabled || !oauthOnly || !oauthDiscoveryDone || !oauthMetadata) return;
-    if (ssoError || isAddAccountMode || isAuthenticated) return;
+    if (ssoError || isAddAccountMode || isAuthenticated || waitlistView) return;
     if (autoSsoTriggered.current) return;
     // With a multi-server list the target isn't implied - auto-redirecting
     // would silently pin every user to the first entry and make the picker
@@ -553,12 +681,19 @@ function LoginPageContent() {
 
     autoSsoTriggered.current = true;
     startServerSideSso();
-  }, [autoSsoEnabled, oauthOnly, oauthDiscoveryDone, oauthMetadata, ssoError, isAddAccountMode, isAuthenticated, jmapServers.length, startServerSideSso]);
+  }, [autoSsoEnabled, oauthOnly, oauthDiscoveryDone, oauthMetadata, ssoError, isAddAccountMode, isAuthenticated, waitlistView, jmapServers.length, startServerSideSso]);
 
   const handleThemeSelect = useCallback((newTheme: "light" | "dark" | "system") => {
     setTheme(newTheme);
     setShowThemeMenu(false);
   }, [setTheme]);
+
+  const handleComailThemeSelect = (newTheme: ComailLoginTheme) => {
+    setComailLoginTheme(newTheme);
+    try { localStorage.setItem("comail-login-theme", newTheme); }
+    catch { /* Keep the selection for this visit when storage is blocked. */ }
+    setShowThemeMenu(false);
+  };
 
   const handleAtprotoLogin = useCallback(async () => {
     if (!atprotoLoginUrl) return;
@@ -590,6 +725,7 @@ function LoginPageContent() {
       returnUrl.searchParams.set("mobile_redirect_uri", mobileRedirectUri);
       returnUrl.searchParams.set("mobile_state", mobileState);
     }
+    if (returnUrl.origin === window.location.origin && returnUrl.pathname === "/webmail/login") returnUrl.searchParams.set("waitlist_ui", "inline");
     if (h) returnUrl.searchParams.set("handle", h);
     window.location.href = returnUrl.toString();
   }, [atprotoLoginUrl, mobileRedirectUri, mobileState, atprotoHandle]);
@@ -660,14 +796,18 @@ function LoginPageContent() {
     }
   };
 
-  const removeUsername = (username: string, e: React.MouseEvent) => {
-    e.stopPropagation();
+  const removeUsername = (username: string, e?: React.SyntheticEvent) => {
+    e?.stopPropagation();
+    justRemovedSuggestion.current = true;
     const updated = savedUsernames.filter(u => u !== username);
     localStorage.setItem("webmail_usernames", JSON.stringify(updated));
     setSavedUsernames(updated);
-    setFilteredSuggestions(updated.filter(u =>
+    const remaining = updated.filter(u =>
       u.toLowerCase().includes(formData.username.toLowerCase())
-    ));
+    );
+    setFilteredSuggestions(remaining);
+    if (remaining.length === 0) setShowSuggestions(false);
+    setSelectedSuggestionIndex(prev => Math.min(prev, remaining.length - 1));
   };
 
   const handleUsernameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -691,7 +831,28 @@ function LoginPageContent() {
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    // Down arrow opens the recent accounts, as in any combobox.
+    if (!showSuggestions && e.key === "ArrowDown") {
+      const candidates = formData.username === ""
+        ? savedUsernames
+        : savedUsernames.filter(u => u.toLowerCase().includes(formData.username.toLowerCase()));
+      if (candidates.length > 0) {
+        e.preventDefault();
+        setFilteredSuggestions(candidates);
+        setShowSuggestions(true);
+        setSelectedSuggestionIndex(0);
+      }
+      return;
+    }
     if (!showSuggestions || filteredSuggestions.length === 0) return;
+
+    // Delete on a highlighted account takes it off the list, like the
+    // browser's own autofill. Without a highlight it edits the text.
+    if ((e.key === "Delete" || (e.key === "Backspace" && e.shiftKey)) && selectedSuggestionIndex >= 0) {
+      e.preventDefault();
+      removeUsername(filteredSuggestions[selectedSuggestionIndex]);
+      return;
+    }
 
     if (e.key === "ArrowDown") {
       e.preventDefault();
@@ -746,7 +907,7 @@ function LoginPageContent() {
       tokenEndpoint: discovery.metadata.token_endpoint,
       clientId,
       redirectUri,
-      persistent: rememberMeEnabled && rememberMe,
+      persistent: persistSession,
       revocationEndpoint: discovery.metadata.revocation_endpoint,
     });
 
@@ -829,6 +990,8 @@ function LoginPageContent() {
     if (isAddAccountMode) {
       sessionStorage.setItem("oauth_add_account_mode", "true");
     }
+    // Read back by loginWithOAuth (stores/auth-store.ts) for the code exchange.
+    sessionStorage.setItem("oauth_remember", String(persistProviderSession));
 
     // Persist the next-free cookie slot so loginWithOAuth (in stores/auth-store.ts)
     // writes the refresh token to the correct per-account jmap_rt_<slot> cookie.
@@ -844,7 +1007,7 @@ function LoginPageContent() {
     authUrl.searchParams.set("response_type", "code");
     authUrl.searchParams.set("client_id", clientId);
     authUrl.searchParams.set("redirect_uri", redirectUri);
-    authUrl.searchParams.set("scope", oauthScopes || DEFAULT_OAUTH_SCOPES);
+    authUrl.searchParams.set("scope", withProviderDataScopes(oauthScopes || DEFAULT_OAUTH_SCOPES, metadata.scopes_supported));
     authUrl.searchParams.set("state", state);
     authUrl.searchParams.set("code_challenge", challenge);
     authUrl.searchParams.set("code_challenge_method", "S256");
@@ -863,7 +1026,7 @@ function LoginPageContent() {
     const effectiveServerUrl = selectedServer?.url
       || (allowCustomJmapEndpoint ? jmapEndpoint : serverUrl);
     if (signInWithToken) {
-      if (await loginWithToken(effectiveServerUrl, accessToken, rememberMeEnabled && rememberMe)) {
+      if (await loginWithToken(effectiveServerUrl, accessToken, persistSession)) {
         router.push('/');
       }
       return;
@@ -897,16 +1060,19 @@ function LoginPageContent() {
       // Only persist credentials when the server actually supports it
       // (a SESSION_SECRET is configured). Prevents a broken cookie write
       // when the remember-me feature is disabled server-side.
-      rememberMeEnabled && rememberMe
+      persistSession
     );
 
     if (success) {
       // Suggested again on this browser only when the user did not decline
       // being remembered: on a shared computer the next person sees the list.
-      if (!rememberMeEnabled || rememberMe) saveUsername(formData.username);
+      if (!rememberMeEnabled || persistSession) saveUsername(formData.username);
       if (isMobileHandoff) {
-        // The isAuthenticated effect handles the redirect; nothing else to
-        // do here. Don't push to / - that would race the deep link.
+        // Usually the isAuthenticated effect has offered the hand-off by
+        // now. A browser that was already signed in doesn't flip
+        // isAuthenticated, so offer it here (a no-op once taken). Don't push
+        // to / - that would race the deep link.
+        offerMobileHandoff();
         return;
       }
       router.push('/');
@@ -945,6 +1111,8 @@ function LoginPageContent() {
 
   const currentThemeOption = THEME_OPTIONS.find(o => o.value === theme) || THEME_OPTIONS[2];
   const CurrentThemeIcon = currentThemeOption.icon;
+  const hostedThemeOption = COMAIL_THEME_OPTIONS.find(option => option.value === comailLoginTheme)!;
+  const HostedThemeIcon = hostedThemeOption.icon;
 
   // Server picker (when admin has configured a server list). Rendered by both
   // the password form and the OAuth-only branch - with several servers the user
@@ -968,7 +1136,7 @@ function LoginPageContent() {
         ))}
       </select>
       {domainAutoLocked && (
-        <p className="text-[11px] text-muted-foreground leading-snug">
+        <p className="text-[0.6875rem] text-muted-foreground leading-snug">
           {t("jmap_server_auto_picked")}
         </p>
       )}
@@ -987,7 +1155,7 @@ function LoginPageContent() {
       key={s.id}
       type="button"
       variant="outline"
-      className="w-full h-11 font-medium text-[15px] rounded-xl border-border/60 hover:bg-muted/50"
+      className="w-full h-11 font-medium text-[0.9375rem] rounded-xl border-border/60 hover:bg-muted/50"
       onClick={() => handleOAuthLogin(s)}
       disabled={oauthLoading || isLoading}
     >
@@ -996,12 +1164,33 @@ function LoginPageContent() {
     </Button>
   ));
 
+  const rememberMeBox = (
+    <label className="flex items-center gap-2.5 cursor-pointer group select-none pt-1">
+      <span className="relative flex items-center justify-center">
+        <input
+          type="checkbox"
+          checked={rememberMe}
+          onChange={(e) => setRememberMe(e.target.checked)}
+          className="peer sr-only"
+        />
+        <span className="flex items-center justify-center w-[18px] h-[18px] rounded-[5px] border border-border/80 bg-muted/40 peer-checked:bg-primary peer-checked:border-primary peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-[var(--focus-ring-color)] transition-all duration-200">
+          {rememberMe && (
+            <Check className="w-3 h-3 text-primary-foreground" stroke={3} aria-hidden="true" />
+          )}
+        </span>
+      </span>
+      <span className="text-sm text-muted-foreground group-hover:text-foreground transition-colors">
+        {t("remember_me")}
+      </span>
+    </label>
+  );
+
   // Demo-only mode: show only a large demo login button
   if (demoMode && !isAddAccountMode) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center bg-gradient-to-br from-background via-muted/10 to-muted/30 relative px-4">
-        {/* Theme toggle */}
-        <div className="absolute top-5 right-5" ref={themeMenuRef} suppressHydrationWarning>
+        {/* Theme toggle, hidden while the theme policy locks the mode (#1280) */}
+        <div className="absolute top-5 end-5" ref={themeMenuRef} hidden={colorModeLocked} suppressHydrationWarning>
           <button
             type="button"
             ref={themeButtonRef}
@@ -1012,21 +1201,21 @@ function LoginPageContent() {
                 ? "bg-secondary border-border text-foreground shadow-md"
                 : "bg-background/60 backdrop-blur-sm border-border/50 text-muted-foreground hover:text-foreground hover:bg-secondary/80 hover:border-border"
             )}
-            aria-label={`Theme: ${currentThemeOption.label}`}
+            aria-label={`${tTheme("label")}: ${tTheme(currentThemeOption.label)}`}
             aria-expanded={showThemeMenu}
             aria-haspopup="menu"
           >
             <CurrentThemeIcon className="w-4 h-4" />
-            <span className="hidden sm:inline" suppressHydrationWarning>{currentThemeOption.label}</span>
+            <span className="hidden sm:inline" suppressHydrationWarning>{tTheme(currentThemeOption.label)}</span>
           </button>
 
           {showThemeMenu && (
             <div
               ref={themeListRef}
               onKeyDown={onThemeMenuKeyDown}
-              className="absolute right-0 top-full mt-2 w-40 rounded-xl border border-border bg-background shadow-lg overflow-hidden animate-fade-in z-50"
+              className="absolute end-0 top-full mt-2 w-40 rounded-xl border border-border bg-background shadow-lg overflow-hidden animate-fade-in z-50"
               role="menu"
-              aria-label="Theme selection"
+              aria-label={tTheme("label")}
             >
               {THEME_OPTIONS.map((option) => {
                 const Icon = option.icon;
@@ -1046,7 +1235,7 @@ function LoginPageContent() {
                     )}
                   >
                     <Icon className="w-4 h-4" />
-                    <span className="flex-1 text-start">{option.label}</span>
+                    <span className="flex-1 text-start">{tTheme(option.label)}</span>
                     {isActive && <Check className="w-3.5 h-3.5 text-primary" />}
                   </button>
                 );
@@ -1077,12 +1266,12 @@ function LoginPageContent() {
             {/* Large demo button */}
             <div className="px-8 pb-10 pt-4">
               {error && (
-                <div className={cn(
+                <div role="alert" className={cn(
                   "mb-5 p-3 rounded-xl border border-destructive/20 bg-destructive/5 flex items-start gap-3",
                   shakeError && "animate-shake"
                 )}>
                   <div className="w-10 h-10 rounded-full bg-destructive/15 text-destructive flex items-center justify-center flex-shrink-0 shadow-sm">
-                    <AlertCircle className="w-5 h-5" />
+                    <AlertCircle className="w-5 h-5" aria-hidden="true" />
                   </div>
                   <div className="flex-1 min-w-0 self-center">
                     <p className="text-sm text-destructive leading-relaxed">
@@ -1120,29 +1309,30 @@ function LoginPageContent() {
           {/* Footer */}
           <div className="mt-6 flex flex-col items-center gap-2">
             {loginCompanyName && (
-              <p className="text-center text-xs text-muted-foreground/60 font-medium">
+              <p className="text-center text-xs text-muted-foreground font-medium">
                 {loginCompanyName}
               </p>
             )}
             {(loginImprintUrl || loginPrivacyPolicyUrl || loginWebsiteUrl) && (
               <div className="flex items-center gap-3 flex-wrap justify-center">
                 {loginWebsiteUrl && (
-                  <a href={loginWebsiteUrl} target="_blank" rel="noopener noreferrer" className="text-xs text-muted-foreground/50 hover:text-muted-foreground transition-colors">
+                  <a href={loginWebsiteUrl} target="_blank" rel="noopener noreferrer" className="text-xs text-muted-foreground hover:text-muted-foreground transition-colors">
                     {t("website")}
                   </a>
                 )}
                 {loginImprintUrl && (
-                  <a href={loginImprintUrl} target="_blank" rel="noopener noreferrer" className="text-xs text-muted-foreground/50 hover:text-muted-foreground transition-colors">
+                  <a href={loginImprintUrl} target="_blank" rel="noopener noreferrer" className="text-xs text-muted-foreground hover:text-muted-foreground transition-colors">
                     {t("imprint")}
                   </a>
                 )}
                 {loginPrivacyPolicyUrl && (
-                  <a href={loginPrivacyPolicyUrl} target="_blank" rel="noopener noreferrer" className="text-xs text-muted-foreground/50 hover:text-muted-foreground transition-colors">
+                  <a href={loginPrivacyPolicyUrl} target="_blank" rel="noopener noreferrer" className="text-xs text-muted-foreground hover:text-muted-foreground transition-colors">
                     {t("privacy_policy")}
                   </a>
                 )}
               </div>
             )}
+            <HelpLinks listClassName="justify-center" />
             {loginShowVersion && <VersionBadge />}
           </div>
         </main>
@@ -1150,204 +1340,188 @@ function LoginPageContent() {
     );
   }
 
-  // Hosted Comail entry. Keep upstream/self-hosted password and OAuth modes on
-  // the generic card below; ATPROTO_LOGIN_URL is the explicit signal that this
-  // instance should wear the full Comail marketing shell.
+  // Hosted branding stays separate from the mailbox skin and generic login modes.
   if (atprotoLoginUrl && !devMode) {
     return (
-      <div
-        data-testid="comail-atproto-login"
-        className="min-h-screen bg-background text-foreground lg:grid lg:grid-cols-[minmax(320px,1fr)_minmax(520px,1fr)]"
-      >
-        <aside className="hidden min-h-screen border-r border-border bg-background px-12 py-14 text-foreground lg:flex lg:flex-col lg:justify-between xl:px-16">
-          <div className="mx-auto my-auto flex w-full max-w-md flex-col items-center text-center">
-            <img
-              src={withBasePath("/branding/comail/cammie-wiggle.gif")}
-              alt=""
-              className="h-auto w-56 object-contain"
-            />
-            <img
-              src={withBasePath("/branding/comail/comail-logo.svg")}
-              alt="comail"
-              className="mt-8 h-auto w-44"
-            />
-            <p className="mt-4 text-lg font-medium text-muted-foreground">
-              your inbox, atproto-native
+      <div data-testid="comail-atproto-login" className="comail-login" data-comail-theme={comailLoginTheme}>
+        <ComailLoginEnvelopes theme={comailLoginTheme} />
+        <header className="comail-login-header mx-auto flex w-full max-w-6xl items-center justify-between gap-4 px-6 py-6 sm:px-8">
+          <a href="https://comail.at" className="flex shrink-0 items-center gap-3" aria-label="comail">
+            <img src={withBasePath(`/branding/comail/${loginArtwork.staticMascot}`)} alt="" className="h-10 w-10 object-contain" />
+            <ComailWordmark theme={comailLoginTheme} className="comail-login-wordmark" />
+          </a>
+          <div className="flex items-center gap-4 sm:gap-6">
+            <p className="comail-login-builders text-sm text-muted-foreground">
+              <span className="hidden lg:inline">{t("comail_relay_hint")} </span>
+              <a href="https://build.comail.at" className="font-bold">{t("comail_builders")}</a>
             </p>
-          </div>
-          <p className="text-center text-sm text-muted-foreground">
-            cooperative email for atproto
-          </p>
-        </aside>
-
-        <section className="relative flex min-h-screen flex-col bg-sidebar text-sidebar-foreground">
-          <div className="absolute right-5 top-5 z-20" ref={themeMenuRef} suppressHydrationWarning>
-            <button
-              type="button"
-              onClick={() => setShowThemeMenu(!showThemeMenu)}
-              className={cn(
-                "flex items-center gap-2 rounded-md border px-3 py-2 text-sm transition-colors",
-                showThemeMenu
-                  ? "border-sidebar-border bg-sidebar-accent text-sidebar-accent-foreground"
-                  : "border-sidebar-border bg-sidebar/80 text-sidebar-foreground/75 hover:bg-sidebar-accent hover:text-sidebar-foreground",
-              )}
-              aria-label={`Theme: ${currentThemeOption.label}`}
-              aria-expanded={showThemeMenu}
-              aria-haspopup="listbox"
-            >
-              <CurrentThemeIcon className="h-4 w-4" />
-              <span className="hidden sm:inline" suppressHydrationWarning>{currentThemeOption.label}</span>
-            </button>
-            {showThemeMenu && (
-              <div
-                className="absolute right-0 top-full z-50 mt-2 w-40 overflow-hidden rounded-md border border-border bg-popover text-popover-foreground shadow-lg"
-                role="listbox"
-                aria-label="Theme selection"
+            <div className="relative z-20" ref={themeMenuRef} suppressHydrationWarning>
+              <button
+                type="button"
+                ref={themeButtonRef}
+                onClick={() => setShowThemeMenu(!showThemeMenu)}
+                className={cn(
+                  "flex items-center gap-2 rounded-md border px-3 py-2 text-sm transition-colors",
+                  showThemeMenu
+                    ? "border-sidebar-border bg-sidebar-accent text-sidebar-accent-foreground"
+                    : "border-sidebar-border bg-sidebar/80 text-sidebar-foreground/75 hover:bg-sidebar-accent hover:text-sidebar-foreground",
+                )}
+                aria-label={`Theme: ${hostedThemeOption.label}`}
+                aria-expanded={showThemeMenu}
+                aria-haspopup="listbox"
               >
-                {THEME_OPTIONS.map((option) => {
-                  const Icon = option.icon;
-                  const isActive = theme === option.value;
-                  return (
-                    <button
-                      key={option.value}
-                      type="button"
-                      role="option"
-                      aria-selected={isActive}
-                      onClick={() => handleThemeSelect(option.value)}
-                      className={cn(
-                        "flex w-full items-center gap-3 px-3.5 py-2.5 text-sm transition-colors",
-                        isActive
-                          ? "bg-accent font-medium text-accent-foreground"
-                          : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                      )}
-                    >
-                      <Icon className="h-4 w-4" />
-                      <span className="flex-1 text-start">{option.label}</span>
-                      {isActive && <Check className="h-3.5 w-3.5 text-primary" />}
-                    </button>
-                  );
-                })}
+                <HostedThemeIcon className="h-4 w-4" />
+                <span className="hidden sm:inline" suppressHydrationWarning>{hostedThemeOption.label}</span>
+              </button>
+              {showThemeMenu && (
+                <div
+                  className="absolute end-0 top-full z-50 mt-2 w-40 overflow-hidden rounded-md border border-border bg-popover text-popover-foreground shadow-lg"
+                  role="listbox"
+                  aria-label="Theme selection"
+                  ref={themeListRef}
+                  onKeyDown={onThemeMenuKeyDown}
+                >
+                  {COMAIL_THEME_OPTIONS.map((option) => {
+                    const Icon = option.icon;
+                    const isActive = comailLoginTheme === option.value;
+                    return (
+                      <button
+                        key={option.value}
+                        type="button"
+                        role="option"
+                        aria-selected={isActive}
+                        onClick={() => handleComailThemeSelect(option.value)}
+                        className={cn(
+                          "flex w-full items-center gap-3 px-3.5 py-2.5 text-sm transition-colors",
+                          isActive
+                            ? "bg-accent font-medium text-accent-foreground"
+                            : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                        )}
+                      >
+                        <Icon className="h-4 w-4" />
+                        <span className="flex-1 text-start">{option.label}</span>
+                        {isActive && <Check className="h-3.5 w-3.5 text-primary" />}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        </header>
+        <main className="comail-login-main mx-auto grid w-full max-w-5xl flex-1 items-center gap-12 px-6 py-10 sm:px-8 lg:grid-cols-2 lg:gap-24 lg:py-16">
+          <section className="comail-login-intro hidden lg:block" aria-label={t("comail_intro")}>
+            <picture>
+              <source media="(prefers-reduced-motion: reduce)" srcSet={withBasePath(`/branding/comail/${loginArtwork.staticMascot}`)} />
+              <img src={withBasePath(`/branding/comail/${loginArtwork.mascot}`)} alt="" className="mb-6 h-48 w-48 object-contain" />
+            </picture>
+            <h2 className="text-[2.625rem] leading-[1.2]">{t("comail_headline")}<br /><em>{t("comail_headline_emphasis")}</em></h2>
+            <p className="mt-5 text-lg text-muted-foreground">{t("comail_tagline")}</p>
+          </section>
+          <section className="mx-auto w-full max-w-md">
+            <p className="comail-login-eyebrow mb-5 text-xs font-bold uppercase tracking-[0.15em] text-muted-foreground">comail inbox</p>
+            {waitlistView ? <InboxWaitlist loginUrl={atprotoLoginUrl} callbackError={searchParams.get("error")} /> : <>
+            <h1 className="text-4xl leading-tight">{isAddAccountMode ? t("add_account_title") : t("comail_welcome")}</h1>
+            <p className="mt-4 text-base leading-relaxed text-muted-foreground">{isAddAccountMode ? t("add_account_subtitle") : t("comail_signin_hint")}</p>
+            {sessionExpired && (
+              <div
+                className="mt-6 flex items-start gap-3 rounded-md border border-sidebar-border bg-sidebar-accent p-3"
+                role="status"
+                aria-live="polite"
+              >
+                <Info className="mt-0.5 h-5 w-5 flex-shrink-0 text-sidebar-accent-foreground" />
+                <p className="flex-1 text-sm leading-relaxed text-sidebar-accent-foreground">{t("session_expired")}</p>
+                <button
+                  type="button"
+                  onClick={() => setSessionExpired(false)}
+                  className="rounded p-1 text-sidebar-accent-foreground/70 hover:bg-sidebar hover:text-sidebar-foreground"
+                  aria-label={t("dismiss")}
+                >
+                  <X className="h-4 w-4" />
+                </button>
               </div>
             )}
-          </div>
 
-          <header className="flex items-center gap-3 border-b border-sidebar-border px-5 py-4 pr-28 lg:hidden">
-            <img
-              src={withBasePath("/branding/comail/cammie-mark.png")}
-              alt=""
-              className="h-10 w-10 object-contain"
-            />
-            <img
-              src={withBasePath("/branding/comail/comail-logo-dark.svg")}
-              alt="comail"
-              className="h-auto w-28"
-            />
-          </header>
-
-          <main className="flex flex-1 items-center justify-center px-6 py-16 sm:px-10">
-            <div className="w-full max-w-md">
-              <p className="mb-3 text-xs font-bold uppercase tracking-[0.16em] text-sidebar-foreground/70">
-                comail inbox
-              </p>
-              <h1 className="text-4xl text-sidebar-foreground">
-                {isAddAccountMode ? t("add_account_title") : t("sign_in")}
-              </h1>
-              <p className="mt-2 text-base leading-relaxed text-sidebar-foreground/75">
-                {isAddAccountMode ? t("add_account_subtitle") : t("atproto_only_hint")}
-              </p>
-
-              {sessionExpired && (
-                <div
-                  className="mt-6 flex items-start gap-3 rounded-md border border-sidebar-border bg-sidebar-accent p-3"
-                  role="status"
-                  aria-live="polite"
-                >
-                  <Info className="mt-0.5 h-5 w-5 flex-shrink-0 text-sidebar-accent-foreground" />
-                  <p className="flex-1 text-sm leading-relaxed text-sidebar-accent-foreground">{t("session_expired")}</p>
-                  <button
-                    type="button"
-                    onClick={() => setSessionExpired(false)}
-                    className="rounded p-1 text-sidebar-accent-foreground/70 hover:bg-sidebar hover:text-sidebar-foreground"
-                    aria-label={t("dismiss")}
-                  >
-                    <X className="h-4 w-4" />
-                  </button>
-                </div>
-              )}
-
-              {error && (
-                <div
-                  className={cn(
-                    "mt-6 flex items-start gap-3 rounded-md border border-destructive/40 bg-card p-3",
-                    shakeError && "animate-shake",
-                  )}
-                  role="alert"
-                >
-                  <AlertCircle className="mt-0.5 h-5 w-5 flex-shrink-0 text-destructive" />
-                  <p className="text-sm leading-relaxed text-destructive">
-                    {t(`error.${error}`) || t("error.generic")}
-                  </p>
-                </div>
-              )}
-
-              <form
-                onSubmit={(e) => { e.preventDefault(); handleAtprotoLogin(); }}
-                className="mt-8 space-y-5"
-                aria-label={t("sign_in")}
+            {error && (
+              <div
+                className={cn(
+                  "mt-6 flex items-start gap-3 rounded-md border border-destructive/40 bg-card p-3",
+                  shakeError && "animate-shake",
+                )}
+                role="alert"
               >
-                <div className="space-y-2">
-                  <label htmlFor="atproto-handle" className="block text-sm font-bold text-sidebar-foreground">
-                    {t("atproto_handle_label")}
-                  </label>
-                  <HandleCombobox
-                    id="atproto-handle"
-                    value={atprotoHandle}
-                    onChange={(v) => {
-                      setAtprotoHandle(v);
-                      if (atprotoHandleError) setAtprotoHandleError(false);
-                    }}
-                    className="h-12 rounded-md border-sidebar-border bg-card px-3.5 text-card-foreground focus:border-ring"
-                    placeholder={t("atproto_handle_placeholder")}
-                    aria-invalid={atprotoHandleError}
-                    aria-describedby={atprotoHandleError ? "atproto-handle-error" : "atproto-handle-help"}
-                    autoFocus
-                  />
-                  {atprotoHandleError ? (
-                    <p id="atproto-handle-error" role="alert" className="text-sm leading-snug text-destructive">
-                      {t("atproto_handle_invalid")}
-                    </p>
-                  ) : (
-                    <p id="atproto-handle-help" className="text-sm text-sidebar-foreground/75">
-                      Your Bluesky or atproto handle. Comail never asks for your password.
-                    </p>
-                  )}
-                </div>
-                <Button
-                  type="submit"
-                  className="h-12 w-full rounded-md bg-card text-base font-bold text-card-foreground shadow-sm hover:bg-card/90"
-                  disabled={isLoading || atprotoResolving || !atprotoHandle.trim()}
-                >
-                  {isLoading || atprotoResolving ? (
-                    <div className="flex items-center gap-2">
-                      <Loader2 className="h-5 w-5 animate-spin" />
-                      {t("signing_in")}
-                    </div>
-                  ) : (
-                    t("sign_in")
-                  )}
-                </Button>
-              </form>
-            </div>
-          </main>
+                <AlertCircle className="mt-0.5 h-5 w-5 flex-shrink-0 text-destructive" />
+                <p className="text-sm leading-relaxed text-destructive">
+                  {t(`error.${error}`) || t("error.generic")}
+                </p>
+              </div>
+            )}
 
-          <footer className="mx-auto w-[calc(100%-3rem)] max-w-xl border-t border-sidebar-border py-5 text-xs leading-relaxed text-sidebar-foreground/70 sm:w-[calc(100%-5rem)]">
+            <InboxRecovery />
+            <form
+              onSubmit={(e) => { e.preventDefault(); handleAtprotoLogin(); }}
+              className="mt-8 space-y-5"
+              aria-label={t("sign_in")}
+            >
+              <div className="space-y-2">
+                <label htmlFor="atproto-handle" className="block text-sm font-bold text-sidebar-foreground">
+                  {t("atproto_handle_label")}
+                </label>
+                <HandleCombobox
+                  id="atproto-handle"
+                  value={atprotoHandle}
+                  onChange={(v) => {
+                    setAtprotoHandle(v);
+                    if (atprotoHandleError) setAtprotoHandleError(false);
+                  }}
+                  className="h-12 rounded-sm px-4 text-base"
+                  placeholder={t("atproto_handle_placeholder")}
+                  aria-invalid={atprotoHandleError}
+                  aria-describedby={atprotoHandleError ? "atproto-handle-error" : "atproto-handle-help"}
+                  autoFocus
+                />
+                {atprotoHandleError ? (
+                  <p id="atproto-handle-error" role="alert" className="text-sm leading-snug text-destructive">
+                    {t("atproto_handle_invalid")}
+                  </p>
+                ) : (
+                  <p id="atproto-handle-help" className="text-sm text-sidebar-foreground/75">
+                    {t("comail_handle_help")}
+                  </p>
+                )}
+              </div>
+              <Button
+                type="submit"
+                variant="ghost"
+                className="comail-login-submit h-12 w-full justify-between rounded-sm text-base font-bold"
+                disabled={isLoading || atprotoResolving || !atprotoHandle.trim()}
+              >
+                {isLoading || atprotoResolving ? (
+                  <div className="flex items-center gap-2">
+                    <Loader2 className="h-5 w-5 animate-spin" />
+                    {t("signing_in")}
+                  </div>
+                ) : (
+                  <><span>{t("comail_continue")}</span><span aria-hidden="true">→</span></>
+                )}
+              </Button>
+            </form>
+            <p className="mt-5 text-sm text-muted-foreground">{t("comail_next")}</p>
+            </>}
+          </section>
+        </main>
+        <footer className="comail-login-footer mx-auto w-full max-w-6xl px-6 py-6 text-xs leading-relaxed text-muted-foreground sm:px-8">
+          <div>
             <p>
-              <strong className="text-sidebar-foreground">comail</strong>
+              <ComailWordmark theme={comailLoginTheme} />
               <span aria-hidden="true"> · </span>
               Atmosphere Mail LLC
               <span aria-hidden="true"> · </span>
               cooperative email for atproto
             </p>
+            <div className="mt-1"><VersionBadge /></div>
+          </div>
+          <div>
             <nav className="mt-1 flex flex-wrap gap-x-1" aria-label="footer">
               {[
                 ["Terms", "https://comail.at/terms"],
@@ -1356,7 +1530,7 @@ function LoginPageContent() {
                 ["Docs", "https://comail.at/docs"],
                 ["FAQ", "https://comail.at/faq"],
                 ["About", "https://comail.at/about"],
-                ["Source", configSourceCodeUrl || process.env.NEXT_PUBLIC_CORRESPONDING_SOURCE_URL || "https://github.com/comail-atproto/bulwark"],
+                ["Source", configSourceCodeUrl || process.env.NEXT_PUBLIC_CORRESPONDING_SOURCE_URL],
               ].map(([label, href], index) => (
                 <span key={href}>
                   {index > 0 && <span aria-hidden="true"> · </span>}
@@ -1365,20 +1539,26 @@ function LoginPageContent() {
               ))}
             </nav>
             <div className="mt-1 flex flex-wrap items-center gap-x-2">
-              <VersionBadge />
-              <span aria-hidden="true">·</span>
               <span>Follow us <a className="underline decoration-sidebar-border underline-offset-2 hover:text-sidebar-foreground" href="https://bsky.app/profile/comail.at">@comail.at</a></span>
             </div>
-          </footer>
-        </section>
+          </div>
+        </footer>
       </div>
     );
   }
 
   return (
     <div className="min-h-screen flex flex-col items-center justify-center bg-gradient-to-br from-background via-muted/10 to-muted/30 relative px-4">
-      {/* Theme toggle - top right, dropdown style */}
-      <div className="absolute top-5 right-5" ref={themeMenuRef} suppressHydrationWarning>
+      <MobileHandoffConsent
+        url={pendingHandoff?.url ?? null}
+        username={pendingHandoff?.username ?? ""}
+        onCancel={() => {
+          setPendingHandoff(null);
+          router.push('/');
+        }}
+      />
+      {/* Theme toggle - top right, dropdown style; hidden while the theme policy locks the mode (#1280) */}
+      <div className="absolute top-5 end-5" ref={themeMenuRef} hidden={colorModeLocked} suppressHydrationWarning>
         <button
           type="button"
           ref={themeButtonRef}
@@ -1389,21 +1569,21 @@ function LoginPageContent() {
               ? "bg-secondary border-border text-foreground shadow-md"
               : "bg-background/60 backdrop-blur-sm border-border/50 text-muted-foreground hover:text-foreground hover:bg-secondary/80 hover:border-border"
           )}
-          aria-label={`Theme: ${currentThemeOption.label}`}
+          aria-label={`${tTheme("label")}: ${tTheme(currentThemeOption.label)}`}
           aria-expanded={showThemeMenu}
           aria-haspopup="menu"
         >
           <CurrentThemeIcon className="w-4 h-4" />
-          <span className="hidden sm:inline" suppressHydrationWarning>{currentThemeOption.label}</span>
+          <span className="hidden sm:inline" suppressHydrationWarning>{tTheme(currentThemeOption.label)}</span>
         </button>
 
         {showThemeMenu && (
           <div
             ref={themeListRef}
             onKeyDown={onThemeMenuKeyDown}
-            className="absolute right-0 top-full mt-2 w-40 rounded-xl border border-border bg-background shadow-lg overflow-hidden animate-fade-in z-50"
+            className="absolute end-0 top-full mt-2 w-40 rounded-xl border border-border bg-background shadow-lg overflow-hidden animate-fade-in z-50"
             role="menu"
-            aria-label="Theme selection"
+            aria-label={tTheme("label")}
           >
             {THEME_OPTIONS.map((option) => {
               const Icon = option.icon;
@@ -1423,7 +1603,7 @@ function LoginPageContent() {
                   )}
                 >
                   <Icon className="w-4 h-4" />
-                  <span className="flex-1 text-start">{option.label}</span>
+                  <span className="flex-1 text-start">{tTheme(option.label)}</span>
                   {isActive && <Check className="w-3.5 h-3.5 text-primary" />}
                 </button>
               );
@@ -1452,7 +1632,7 @@ function LoginPageContent() {
             )}
             {loginShowSubtitle && (
               <p className="text-sm text-muted-foreground mt-1.5">
-                {isAddAccountMode ? t("add_account_subtitle") : (t("title") !== appName ? t("title") : "Sign in to your account")}
+                {isAddAccountMode ? t("add_account_subtitle") : t("subtitle")}
               </p>
             )}
           </div>
@@ -1470,8 +1650,15 @@ function LoginPageContent() {
                   <Info className="w-5 h-5" />
                 </div>
                 <div className="flex-1 min-w-0 self-center flex items-center gap-2">
-                  <p className="text-sm text-info flex-1 leading-relaxed">
-                    {t("session_expired")}
+                  <p className="text-sm text-info flex-1 leading-relaxed" data-testid="session-expired-reason">
+                    {sessionEnd?.kind === "idle"
+                      ? tSessionLimits("reason_idle", { minutes: sessionEnd.minutes })
+                      : sessionEnd?.kind === "max"
+                        ? tSessionLimits("reason_max", { hours: sessionEnd.hours })
+                        : t("session_expired")}
+                    {(sessionEnd?.draftsUnsaved || expiredDraftsUnsaved) && (
+                      <span className="block mt-1" data-testid="session-drafts-not-saved">{tSessionLimits("drafts_not_saved")}</span>
+                    )}
                   </p>
                   <button
                     type="button"
@@ -1485,17 +1672,26 @@ function LoginPageContent() {
               </div>
             )}
 
-            {/* Error Message */}
+            {/* Error Message. Asking for the code is the next step of a
+                sign-in that worked so far, not a failure (#1422). */}
             {error && (
-              <div className={cn(
-                "mb-5 p-3 rounded-xl border border-destructive/20 bg-destructive/5 flex items-start gap-3",
-                shakeError && "animate-shake"
-              )}>
-                <div className="w-10 h-10 rounded-full bg-destructive/15 text-destructive flex items-center justify-center flex-shrink-0 shadow-sm">
-                  <AlertCircle className="w-5 h-5" />
+              <div
+                className={cn(
+                  "mb-5 p-3 rounded-xl border flex items-start gap-3",
+                  error === 'totp_required' ? "border-info/20 bg-info/5" : "border-destructive/20 bg-destructive/5",
+                  shakeError && "animate-shake"
+                )}
+                data-testid="login-error"
+                role={error === 'totp_required' ? "status" : "alert"}
+              >
+                <div className={cn(
+                  "w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 shadow-sm",
+                  error === 'totp_required' ? "bg-info/15 text-info" : "bg-destructive/15 text-destructive"
+                )}>
+                  {error === 'totp_required' ? <Info className="w-5 h-5" aria-hidden="true" /> : <AlertCircle className="w-5 h-5" aria-hidden="true" />}
                 </div>
                 <div className="flex-1 min-w-0 self-center">
-                  <p className="text-sm text-destructive leading-relaxed">
+                  <p id={errorId} className={cn("text-sm leading-relaxed", error === 'totp_required' ? "text-info" : "text-destructive")}>
                     {error === 'invalid_credentials' && showTotpField && totpCode
                       ? t('error.totp_invalid')
                       : t(`error.${error}`) || t("error.generic")}
@@ -1535,6 +1731,7 @@ function LoginPageContent() {
                  ?handle= so it skips its own form and goes straight to the
                  member's PDS OAuth. */
               <form onSubmit={(e) => { e.preventDefault(); handleAtprotoLogin(); }} className="space-y-4">
+                <InboxRecovery />
                 <div className="space-y-1.5">
                   <label htmlFor="atproto-handle" className="block text-sm font-medium text-foreground">
                     {t("atproto_handle_label")}
@@ -1556,7 +1753,7 @@ function LoginPageContent() {
                     <p
                       id="atproto-handle-error"
                       role="alert"
-                      className="text-[13px] text-destructive leading-snug"
+                      className="text-[0.8125rem] text-destructive leading-snug"
                     >
                       {t("atproto_handle_invalid")}
                     </p>
@@ -1587,10 +1784,11 @@ function LoginPageContent() {
               /* OAuth-only mode: server picker (if any) plus the SSO button */
               <div className="space-y-4">
                 {serverPicker}
+                {oauthMetadata && showRememberMe && rememberMeBox}
                 {oauthMetadata ? (
                   <Button
                     type="button"
-                    className="w-full h-11 font-medium text-[15px] bg-primary hover:bg-primary/90 transition-all duration-200 rounded-xl shadow-md shadow-primary/15 hover:shadow-lg hover:shadow-primary/20"
+                    className="w-full h-11 font-medium text-[0.9375rem] bg-primary hover:bg-primary/90 transition-all duration-200 rounded-xl shadow-md shadow-primary/15 hover:shadow-lg hover:shadow-primary/20"
                     onClick={() => handleOAuthLogin()}
                     disabled={oauthLoading}
                   >
@@ -1643,7 +1841,7 @@ function LoginPageContent() {
                         placeholder={t("jmap_endpoint_placeholder")}
                         required
                       />
-                      <p className="text-[11px] text-muted-foreground leading-snug">
+                      <p className="text-[0.6875rem] text-muted-foreground leading-snug">
                         {t("jmap_endpoint_cors_hint")}
                       </p>
                     </div>
@@ -1665,41 +1863,66 @@ function LoginPageContent() {
                         onFocus={handleUsernameFocus}
                         onKeyDown={handleKeyDown}
                         className="h-11 px-3.5 bg-muted/40 border-border/60 rounded-xl focus:bg-background focus:border-primary/50 transition-all duration-200"
-                        placeholder={t("username_placeholder")}
+                        placeholder={loginUsernamePlaceholder || t("username_placeholder")}
                         required={!signInWithToken}
-                        autoComplete="off"
-                        data-form-type="other"
-                        data-lpignore="true"
+                        // Password managers fill and save the pair by this (WCAG 3.3.8).
+                        autoComplete="username"
                         autoFocus
+                        // The recent accounts are a combobox's list: the arrow
+                        // keys move through them while the focus stays here.
+                        role={savedUsernames.length > 0 ? "combobox" : undefined}
+                        aria-autocomplete={savedUsernames.length > 0 ? "list" : undefined}
+                        aria-expanded={savedUsernames.length > 0 ? suggestionsOpen : undefined}
+                        aria-controls={suggestionsOpen ? suggestionsId : undefined}
+                        aria-activedescendant={suggestionsOpen && selectedSuggestionIndex >= 0 ? suggestionId(selectedSuggestionIndex) : undefined}
+                        aria-invalid={credentialsBlamed || undefined}
+                        aria-describedby={[credentialsBlamed ? errorId : null, suggestionsOpen ? suggestionsHintId : null].filter(Boolean).join(" ") || undefined}
                       />
 
-                      {/* Custom autocomplete dropdown */}
-                      {showSuggestions && filteredSuggestions.length > 0 && (
-                        <div
-                          ref={suggestionsRef}
-                          className="absolute top-full mt-1.5 w-full bg-background border border-border rounded-xl shadow-lg z-50 overflow-hidden"
-                        >
-                          {filteredSuggestions.map((username, index) => (
-                            <div
-                              key={username}
-                              className={cn(
-                                "px-3.5 py-2.5 flex items-center justify-between hover:bg-muted cursor-pointer transition-colors",
-                                index === selectedSuggestionIndex && "bg-muted"
-                              )}
-                              onClick={() => selectSuggestion(username)}
-                            >
-                              <span className="text-sm text-foreground">{username}</span>
-                              <button
-                                type="button"
-                                onClick={(e) => removeUsername(username, e)}
-                                className="p-1 hover:bg-secondary rounded-md transition-colors"
-                                title={t("remove_from_history")}
+                      {/* Recent accounts on this device */}
+                      {suggestionsOpen && (
+                        <>
+                          <span id={suggestionsHintId} className="sr-only">{t("recent_accounts_hint")}</span>
+                          <ul
+                            ref={suggestionsRef}
+                            id={suggestionsId}
+                            role="listbox"
+                            aria-label={t("recent_accounts")}
+                            className="absolute top-full mt-1.5 w-full bg-background border border-border rounded-xl shadow-lg z-50 overflow-hidden"
+                          >
+                            {filteredSuggestions.map((username, index) => (
+                              <li
+                                key={username}
+                                id={suggestionId(index)}
+                                role="option"
+                                aria-selected={index === selectedSuggestionIndex}
+                                aria-label={username}
+                                className={cn(
+                                  "px-3.5 py-2.5 flex items-center justify-between hover:bg-muted cursor-pointer transition-colors",
+                                  index === selectedSuggestionIndex && "bg-muted"
+                                )}
+                                // Keep the focus (and the caret) in the field.
+                                onMouseDown={(e) => e.preventDefault()}
+                                onClick={() => selectSuggestion(username)}
                               >
-                                <X className="w-3 h-3 text-muted-foreground" />
-                              </button>
-                            </div>
-                          ))}
-                        </div>
+                                <span className="text-sm text-foreground">{username}</span>
+                                {/* Out of the tab order: from the keyboard, Delete
+                                    removes the highlighted account. Named, so
+                                    voice control can still press it. */}
+                                <button
+                                  type="button"
+                                  tabIndex={-1}
+                                  onClick={(e) => removeUsername(username, e)}
+                                  className="p-1 hover:bg-secondary rounded-md transition-colors"
+                                  aria-label={t("remove_account_from_list", { username })}
+                                  title={t("remove_from_history")}
+                                >
+                                  <X className="w-3 h-3 text-muted-foreground" aria-hidden="true" />
+                                </button>
+                              </li>
+                            ))}
+                          </ul>
+                        </>
                       )}
                     </div>
                   </div>
@@ -1721,18 +1944,23 @@ function LoginPageContent() {
                         placeholder={t("password_placeholder")}
                         required={!liteSsoRequired && !signInWithToken}
                         autoComplete="current-password"
+                        {...errorProps(credentialsBlamed)}
                       />
+                      {/* In the tab order, so keyboard users can check what
+                          they typed. One name, the state in aria-pressed. */}
                       <button
                         type="button"
                         onClick={() => setShowPassword(!showPassword)}
-                        className="absolute right-3 top-1/2 -translate-y-1/2 p-1 rounded-md text-muted-foreground hover:text-foreground transition-colors"
-                        aria-label={showPassword ? t("hide_password") : t("show_password")}
-                        tabIndex={-1}
+                        className="absolute end-3 top-1/2 -translate-y-1/2 p-1 rounded-md text-muted-foreground hover:text-foreground transition-colors"
+                        aria-label={t("show_password")}
+                        aria-pressed={showPassword}
+                        aria-controls="password"
+                        title={showPassword ? t("hide_password") : t("show_password")}
                       >
                         {showPassword ? (
-                          <EyeOff className="w-4 h-4" />
+                          <EyeOff className="w-4 h-4" aria-hidden="true" />
                         ) : (
-                          <Eye className="w-4 h-4" />
+                          <Eye className="w-4 h-4" aria-hidden="true" />
                         )}
                       </button>
                     </div>
@@ -1755,8 +1983,9 @@ function LoginPageContent() {
                         autoComplete="off"
                         spellCheck={false}
                         data-lpignore="true"
+                        {...errorProps(tokenBlamed)}
                       />
-                      <p className="text-[11px] text-muted-foreground leading-snug">
+                      <p className="text-[0.6875rem] text-muted-foreground leading-snug">
                         {t("token_hint")}
                       </p>
                     </div>
@@ -1799,7 +2028,7 @@ function LoginPageContent() {
                         )}
                         placeholder={t("totp_placeholder")}
                         autoComplete="one-time-code"
-                        aria-label={t("totp_label")}
+                        {...errorProps(totpBlamed)}
                       />
                     </div>
                   )}
@@ -1819,34 +2048,13 @@ function LoginPageContent() {
                     </button>
                   )}
 
-                  {/* Remember me */}
-                  {showRememberMe && (
-                    <label className="flex items-center gap-2.5 cursor-pointer group select-none pt-1">
-                      <span className="relative flex items-center justify-center">
-                        <input
-                          type="checkbox"
-                          checked={rememberMe}
-                          onChange={(e) => setRememberMe(e.target.checked)}
-                          className="peer sr-only"
-                        />
-                        <span className="flex items-center justify-center w-[18px] h-[18px] rounded-[5px] border border-border/80 bg-muted/40 peer-checked:bg-primary peer-checked:border-primary peer-focus-visible:ring-2 peer-focus-visible:ring-ring peer-focus-visible:ring-offset-2 peer-focus-visible:ring-offset-background transition-all duration-200">
-                          {rememberMe && (
-                            <svg className="w-3 h-3 text-primary-foreground" viewBox="0 0 12 12" fill="none">
-                              <path d="M2 6L5 9L10 3" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                            </svg>
-                          )}
-                        </span>
-                      </span>
-                      <span className="text-sm text-muted-foreground group-hover:text-foreground transition-colors">
-                        {t("remember_me")}
-                      </span>
-                    </label>
-                  )}
+                  {/* Remember me, for the password and the SSO buttons below */}
+                  {showRememberMe && rememberMeBox}
                 </fieldset>
 
                 <Button
                   type="submit"
-                  className="w-full h-11 font-medium text-[15px] bg-primary hover:bg-primary/90 transition-all duration-200 rounded-xl shadow-md shadow-primary/15 hover:shadow-lg hover:shadow-primary/20"
+                  className="w-full h-11 font-medium text-[0.9375rem] bg-primary hover:bg-primary/90 transition-all duration-200 rounded-xl shadow-md shadow-primary/15 hover:shadow-lg hover:shadow-primary/20"
                   disabled={isLoading || (liteSsoRequired && oauthLoading)}
                 >
                   {isLoading || (liteSsoRequired && oauthLoading) ? (
@@ -1868,7 +2076,7 @@ function LoginPageContent() {
                       <div className="absolute inset-0 flex items-center">
                         <span className="w-full border-t border-border/60" />
                       </div>
-                      <div className="relative flex justify-center text-xs uppercase">
+                      <div className="relative flex justify-center text-xs">
                         <span className="bg-background/80 px-3 text-muted-foreground">{t("or")}</span>
                       </div>
                     </div>
@@ -1877,7 +2085,7 @@ function LoginPageContent() {
                       <Button
                         type="button"
                         variant="outline"
-                        className="w-full h-11 font-medium text-[15px] rounded-xl border-border/60 hover:bg-muted/50"
+                        className="w-full h-11 font-medium text-[0.9375rem] rounded-xl border-border/60 hover:bg-muted/50"
                         onClick={() => handleOAuthLogin()}
                         disabled={oauthLoading || isLoading}
                       >
@@ -1927,7 +2135,7 @@ function LoginPageContent() {
                 <Button
                   type="button"
                   variant="outline"
-                  className="w-full h-11 font-medium text-[15px] rounded-xl border-border/60 hover:bg-muted/50"
+                  className="w-full h-11 font-medium text-[0.9375rem] rounded-xl border-border/60 hover:bg-muted/50"
                   onClick={handleDemoLogin}
                   disabled={demoLoading || isLoading}
                 >
@@ -1954,7 +2162,7 @@ function LoginPageContent() {
         {/* Company name & links - below card */}
         <div className="mt-6 flex flex-col items-center gap-2">
           {loginCompanyName && (
-            <p className="text-center text-xs text-muted-foreground/60 font-medium">
+            <p className="text-center text-xs text-muted-foreground font-medium">
               {loginCompanyName}
             </p>
           )}
@@ -1965,7 +2173,7 @@ function LoginPageContent() {
                   href={loginWebsiteUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-xs text-muted-foreground/50 hover:text-muted-foreground transition-colors"
+                  className="text-xs text-muted-foreground hover:text-muted-foreground transition-colors"
                 >
                   {t("website")}
                 </a>
@@ -1975,7 +2183,7 @@ function LoginPageContent() {
                   href={loginImprintUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-xs text-muted-foreground/50 hover:text-muted-foreground transition-colors"
+                  className="text-xs text-muted-foreground hover:text-muted-foreground transition-colors"
                 >
                   {t("imprint")}
                 </a>
@@ -1985,13 +2193,14 @@ function LoginPageContent() {
                   href={loginPrivacyPolicyUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-xs text-muted-foreground/50 hover:text-muted-foreground transition-colors"
+                  className="text-xs text-muted-foreground hover:text-muted-foreground transition-colors"
                 >
                   {t("privacy_policy")}
                 </a>
               )}
             </div>
           )}
+          <HelpLinks listClassName="justify-center" />
           {loginShowVersion && <VersionBadge />}
         </div>
       </main>

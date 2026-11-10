@@ -1,0 +1,11 @@
+{
+  "deployed_at": "2026-11-02T06:21:37Z",
+  "eligible_at": "2026-11-09T06:21:37Z",
+  "license": "AGPL-3.0-only",
+  "payload_sha256": "3a8778cc6d03f2fc6273b1e20aafefbbf119c7c987733dd20c93a03ed11b9ebe",
+  "release_identity": "ea2187bd12d4c268845794ca6fbebaf3ec6ddc48-c73d1a0aaf601bcb",
+  "schema": 1,
+  "source_sha": "ea2187bd12d4c268845794ca6fbebaf3ec6ddc48",
+  "upstream_commit": "4887ed457c729722b31bc5ddd1ffb87eee52eebe",
+  "upstream_version": "1.19.1"
+}
