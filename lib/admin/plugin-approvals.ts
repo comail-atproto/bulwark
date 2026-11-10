@@ -10,10 +10,12 @@
 // admin), 'approved' (admin signed off), 'denied' (admin refused - kept so we
 // don't keep asking).
 
-import { readFile, writeFile, rename } from 'node:fs/promises';
+import { readFile, writeFile, rename, mkdir, unlink } from 'node:fs/promises';
+import nodePath from 'node:path';
 import { existsSync } from 'node:fs';
 import { logger } from '@/lib/logger';
 import { ensureConfigDir, getConfigPath, assertWritable } from './paths';
+import type { CredentialSpec } from '@/lib/plugin-secrets/credentials';
 
 export type ApprovalStatus = 'pending' | 'approved' | 'denied';
 
@@ -30,6 +32,8 @@ export interface ApprovalEntry {
     permissions?: string[];
     httpOrigins?: string[];
     apiPostPaths?: string[];
+    /** The credentials it may use through the plugin proxy (lib/plugin-secrets). */
+    credentials?: Record<string, CredentialSpec>;
   };
   requestedBy: string;     // JMAP username who triggered the request
   requestedAt: string;     // ISO 8601
@@ -43,6 +47,31 @@ interface ApprovalsFile {
 
 const APPROVALS_FILE = 'plugin-approvals.json';
 const MAX_ENTRIES = 500; // hard cap so a misbehaving client can't grow the file unboundedly
+/** Open requests one user may have at a time, so one account can't crowd out the rest. */
+export const MAX_PENDING_PER_USER = 10;
+
+/** The package a user asked to have approved, kept so the admin can read the code. */
+function bundlePath(pluginId: string, bundleHash: string): string {
+  return nodePath.join(getConfigPath('plugin-approvals'), `${pluginId}-${bundleHash}.zip`);
+}
+
+export async function saveApprovalBundle(pluginId: string, bundleHash: string, zip: Uint8Array): Promise<void> {
+  assertWritable('plugin-approvals.saveBundle');
+  await mkdir(getConfigPath('plugin-approvals'), { recursive: true });
+  await writeFile(bundlePath(pluginId, bundleHash), zip);
+}
+
+export async function readApprovalBundle(pluginId: string, bundleHash: string): Promise<Uint8Array | null> {
+  try {
+    return new Uint8Array(await readFile(bundlePath(pluginId, bundleHash)));
+  } catch {
+    return null;
+  }
+}
+
+async function deleteApprovalBundle(pluginId: string, bundleHash: string): Promise<void> {
+  try { await unlink(bundlePath(pluginId, bundleHash)); } catch { /* none */ }
+}
 
 let cached: ApprovalsFile | null = null;
 let loadPromise: Promise<void> | null = null;
@@ -70,7 +99,18 @@ async function ensureLoaded(): Promise<void> {
   await loadPromise;
 }
 
-async function flushToDisk(): Promise<void> {
+// Writes run one after another. Requests of several users at once shared the
+// one ".tmp" file, and every rename after the first failed: the user got a
+// 500 and the server kept no ZIP for the admin to review.
+let flushQueue: Promise<void> = Promise.resolve();
+
+function flushToDisk(): Promise<void> {
+  const run = flushQueue.then(writeToDisk, writeToDisk);
+  flushQueue = run.catch(() => {});
+  return run;
+}
+
+async function writeToDisk(): Promise<void> {
   if (!cached) return;
   await ensureConfigDir();
   assertWritable('plugin-approvals.flushToDisk');
@@ -122,12 +162,21 @@ export async function requestApproval(
   const file = cached!;
   const existing = findEntry(file, pluginId, bundleHash);
   if (existing) return existing;
+  assertWritable('request plugin approval');
+  const pendingByUser = file.entries.filter(e => e.status === 'pending' && e.requestedBy === requestedBy).length;
+  if (pendingByUser >= MAX_PENDING_PER_USER) {
+    throw new ApprovalLimitError(`You already have ${MAX_PENDING_PER_USER} plugins waiting for approval`);
+  }
   if (file.entries.length >= MAX_ENTRIES) {
     // Drop the oldest pending entry so a new request can land. Approved/denied
     // entries are preserved.
     const oldestPendingIdx = file.entries.findIndex(e => e.status === 'pending');
-    if (oldestPendingIdx >= 0) file.entries.splice(oldestPendingIdx, 1);
-    else throw new Error('plugin-approvals file is full');
+    if (oldestPendingIdx >= 0) {
+      const [dropped] = file.entries.splice(oldestPendingIdx, 1);
+      await deleteApprovalBundle(dropped.pluginId, dropped.bundleHash);
+    } else {
+      throw new ApprovalLimitError('The approval queue is full; ask an administrator to clear old requests');
+    }
   }
   const entry: ApprovalEntry = {
     pluginId,
@@ -148,6 +197,7 @@ export async function decideApproval(
   decision: 'approved' | 'denied',
   decidedBy: string,
 ): Promise<ApprovalEntry> {
+  assertWritable('decide plugin approval');
   await ensureLoaded();
   const file = cached!;
   const entry = findEntry(file, pluginId, bundleHash);
@@ -160,16 +210,14 @@ export async function decideApproval(
 }
 
 export async function revokeApproval(pluginId: string, bundleHash: string): Promise<void> {
+  assertWritable('revoke plugin approval');
   await ensureLoaded();
   const file = cached!;
   const idx = file.entries.findIndex(e => e.pluginId === pluginId && e.bundleHash === bundleHash);
   if (idx < 0) return;
   file.entries.splice(idx, 1);
   await flushToDisk();
+  await deleteApprovalBundle(pluginId, bundleHash);
 }
 
-/** Force a re-read on next access. Used in tests / after a manual file edit. */
-export function invalidateApprovalsCache(): void {
-  cached = null;
-  loadPromise = null;
-}
+export class ApprovalLimitError extends Error {}

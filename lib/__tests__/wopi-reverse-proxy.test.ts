@@ -12,7 +12,6 @@ import { NextRequest } from 'next/server';
 
 const config = vi.hoisted(() => ({ values: {} as Record<string, unknown> }));
 
-vi.mock('@/lib/groupware/access', () => ({ groupwareAllowed: vi.fn().mockResolvedValue(true), groupwareMailboxAllowed: vi.fn().mockResolvedValue(true) }));
 vi.mock('@/lib/auth/session-secret', () => ({
   getSessionSecret: () => 'x'.repeat(32),
   hasSessionSecret: () => true,

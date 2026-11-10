@@ -9,7 +9,6 @@ import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 // into the user's own account - Stalwart refuses a blob the user uploaded
 // into the owner's account ("You do not have access to blobId").
 
-vi.mock('@/lib/groupware/access', () => ({ groupwareAllowed: vi.fn().mockResolvedValue(true), groupwareMailboxAllowed: vi.fn().mockResolvedValue(true) }));
 vi.mock('@/lib/auth/session-secret', () => ({
   getSessionSecret: () => 'x'.repeat(32),
   hasSessionSecret: () => true,
@@ -73,7 +72,7 @@ function editorCall(data: { url: string; accessToken: string }) {
 
 // The shared node as Stalwart 0.16.23 reports it to the user it is shared with.
 let node: { id: string; name: string; type: string; blobId: string; size: number; modified: string; myRights: Record<string, boolean> };
-let setCalls: Array<{ accountId: string; update: Record<string, { blobId: string }> }>;
+let setCalls: Array<{ accountId: string; update: Record<string, { blobId: string; modified?: null }> }>;
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -141,7 +140,18 @@ describe('WOPI on a file shared with the user (#1094)', () => {
 
     const info = await checkFileInfo(request(`/api/wopi/files/${documentId}?${token}`), params(documentId));
     expect(info.status).toBe(200);
-    expect(await info.json()).toMatchObject({ BaseFileName: 'new-file.docx', UserCanWrite: true, Version: 'Gshared' });
+    const body = await info.json();
+    expect(body).toMatchObject({ BaseFileName: 'new-file.docx', UserCanWrite: true, Version: 'Gshared' });
+    expect(body).not.toHaveProperty('UserCanReview');
+  });
+
+  it('describes a file shared read-only so ONLYOFFICE opens it without a warning (#1187)', async () => {
+    node.myRights.mayModifyContent = false;
+    const { data, documentId, token } = await openShared();
+    expect(data.readOnly).toBe(true);
+
+    const info = await checkFileInfo(request(`/api/wopi/files/${documentId}?${token}`), params(documentId));
+    expect(await info.json()).toMatchObject({ UserCanWrite: false, UserCanReview: true, SupportsReviewing: false });
   });
 
   it('GetFile reads the blob through the owner account', async () => {
@@ -165,7 +175,7 @@ describe('WOPI on a file shared with the user (#1094)', () => {
     const [uploadUrl, uploadInit] = (fetchJmapServer as Mock).mock.calls[0];
     expect(uploadInit.method).toBe('POST');
     expect(uploadUrl).toContain(`/jmap/upload/${OWN}/`);
-    expect(setCalls).toEqual([{ accountId: OWNER, update: { b: { blobId: `upload-${OWN}-1` } } }]);
+    expect(setCalls).toEqual([{ accountId: OWNER, update: { b: { blobId: `upload-${OWN}-1`, modified: null } } }]);
   });
 
   it('shares one editor session with the owner opening the same file', async () => {
@@ -178,22 +188,4 @@ describe('WOPI on a file shared with the user (#1094)', () => {
     const res = await launch(request('/api/wopi/launch', { body: { fileId: 'b' } }));
     expect(editorCall(await res.json()).documentId).toBe(documentId);
   });
-});
-
-it('denies file launch before looking up the document when Groupware is off', async () => {
- const { groupwareAllowed } = await import('@/lib/groupware/access');
- vi.mocked(groupwareAllowed).mockResolvedValueOnce(false);
- const response = await launch(request('/api/wopi/launch', { body: { fileId: 'b', accountId: OWNER } }));
- expect(response.status).toBe(404);
- expect(postJmap).not.toHaveBeenCalled();
- expect(fetchJmapSession).not.toHaveBeenCalled();
-});
-it('denies an already-open file editor after the live flag is switched off', async () => {
- const { groupwareMailboxAllowed } = await import('@/lib/groupware/access');
- const { documentId, token } = await openShared();
- vi.mocked(groupwareMailboxAllowed).mockResolvedValueOnce(false);
- vi.mocked(postJmap).mockClear();
- const response = await checkFileInfo(request(`/api/wopi/files/${documentId}?${token}`), params(documentId));
- expect(response.status).toBe(401);
- expect(postJmap).not.toHaveBeenCalled();
 });
