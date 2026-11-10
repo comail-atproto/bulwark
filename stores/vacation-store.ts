@@ -5,6 +5,8 @@ import { readVacationFilters, syncVacationWithFilters, type VacationFilters } fr
 import { withVacationPeriod } from '@/lib/sieve/vacation-forward';
 import { currentStoreEpoch } from '@/lib/store-epoch';
 import { debug } from '@/lib/debug';
+import { vacationHooks } from '@/lib/plugin-hooks';
+import { vacationToView } from '@/lib/plugin-projection';
 
 /** What the vacation card sets for forwarding; the period comes from the vacation. */
 export type VacationForwardSettings = Pick<VacationForward, 'enabled' | 'to' | 'keepCopy'>;
@@ -46,7 +48,11 @@ interface VacationStore {
   isSupported: boolean;
 
   fetchVacationResponse: (client: IJMAPClient, accountId?: string) => Promise<void>;
-  /** Throws VacationFiltersError when only the filters script part could not be saved. */
+  /**
+   * Saves the out-of-office reply. Resolves false when a plugin stopped the
+   * change (onBeforeVacationUpdate), true once it was saved. Throws
+   * VacationFiltersError when only the filters script part could not be saved.
+   */
   updateVacationResponse: (client: IJMAPClient, updates: {
     isEnabled?: boolean;
     fromDate?: string | null;
@@ -58,7 +64,7 @@ interface VacationStore {
     forward?: VacationForwardSettings | null;
     /** null lets everyone have the auto-reply, leaving it out keeps it as it is. */
     audience?: VacationAudience | null;
-  }, accountId?: string) => Promise<void>;
+  }, accountId?: string) => Promise<boolean>;
   setSupported: (supported: boolean) => void;
   clearState: () => void;
 }
@@ -73,6 +79,15 @@ function fromFilters(filters: VacationFilters) {
     notRunning: filters.notRunning,
     otherForwards: filters.otherForwards,
   };
+}
+
+/**
+ * Whether the account has a filters script to read and sync. A shared
+ * account goes by its own capabilities, which can lack Sieve where the
+ * session has it (#1263); the own account by the session.
+ */
+function hasSieve(client: IJMAPClient, accountId?: string): boolean {
+  return accountId ? client.accountSupports(accountId, 'urn:ietf:params:jmap:sieve') : client.supportsSieve();
 }
 
 // Each load, and each account switch (the store epoch), outdates the answers
@@ -107,13 +122,16 @@ export const useVacationStore = create<VacationStore>()((set, get) => ({
       const vacation = await client.getVacationResponse(accountId);
       let isEnabled = vacation.isEnabled;
       let filters: VacationFilters | null = null;
-      if (client.supportsSieve()) {
+      if (hasSieve(client, accountId)) {
         filters = await readVacationFilters(client, accountId).catch(() => null);
         // Running from the filters script leaves the vacation script itself
         // inactive, so VacationResponse reports it as off.
         if (filters) isEnabled = isEnabled || filters.includesVacation;
       }
       if (stale()) return;
+      if (vacationHooks.onVacationLoaded.size > 0) {
+        void vacationHooks.onVacationLoaded.emit(vacationToView({ ...vacation, isEnabled }));
+      }
       set({
         isEnabled,
         fromDate: vacation.fromDate,
@@ -145,8 +163,20 @@ export const useVacationStore = create<VacationStore>()((set, get) => ({
     const generation = loadGeneration;
     const epoch = currentStoreEpoch();
     const superseded = () => generation !== loadGeneration || currentStoreEpoch() !== epoch;
-    set({ isSaving: true, error: null });
     const { forward: forwardSettings, audience, ...vacationUpdates } = updates;
+    const before = get();
+    const next = vacationToView({
+      id: 'singleton',
+      isEnabled: before.isEnabled,
+      fromDate: before.fromDate,
+      toDate: before.toDate,
+      subject: before.subject,
+      textBody: before.textBody,
+      htmlBody: before.htmlBody,
+      ...vacationUpdates,
+    });
+    if (!(await vacationHooks.onBeforeVacationUpdate.intercept(next))) return false;
+    set({ isSaving: true, error: null });
     try {
       await client.setVacationResponse(vacationUpdates, accountId);
     } catch (error) {
@@ -165,7 +195,7 @@ export const useVacationStore = create<VacationStore>()((set, get) => ({
     let filtersError: VacationFiltersError | null = null;
     let filtersState: Partial<VacationStore> = {};
     const needsSync = vacationUpdates.isEnabled !== undefined || forwardSettings !== undefined || audience !== undefined;
-    if (needsSync && client.supportsSieve()) {
+    if (needsSync && hasSieve(client, accountId)) {
       let synced = false;
       try {
         await syncVacationWithFilters(
@@ -200,7 +230,10 @@ export const useVacationStore = create<VacationStore>()((set, get) => ({
     set((current) => (superseded()
       ? { ...current, isSaving: false }
       : { ...current, ...vacationUpdates, ...filtersState, isSaving: false }));
+    // The reply itself is saved even when its filters part failed.
+    void vacationHooks.onVacationUpdate.emit(next);
     if (filtersError) throw filtersError;
+    return true;
   },
 
   setSupported: (supported) => set({ isSupported: supported }),

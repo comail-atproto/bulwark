@@ -6,6 +6,7 @@ import {
   injectThemeCSS,
   removeThemeCSS,
   sanitizeThemeCSS,
+  sanitizeSkinCSS,
   injectThemeSkinCSS,
   removeThemeSkinCSS,
 } from '@/lib/theme-loader';
@@ -13,6 +14,7 @@ import { extractTheme } from '@/lib/plugin-validator';
 import { BUILTIN_THEMES } from '@/lib/builtin-themes';
 import { usePolicyStore } from '@/stores/policy-store';
 import { apiFetch } from '@/lib/browser-navigation';
+import { fetchServerPluginList } from '@/lib/server-plugin-list';
 import { themeHooks } from '@/lib/plugin-hooks';
 import { syncThemeColorMeta } from '@/lib/theme-color-meta';
 import { IS_LITE } from '@/lib/lite';
@@ -31,8 +33,22 @@ function getForcedThemeId(installedThemes: InstalledTheme[]): string | null {
   return installedThemes.find((theme) => theme.forceEnabled)?.id ?? null;
 }
 
+/**
+ * The mode to use for `theme` (#1280): the theme policy's locked mode
+ * whatever the user picked, its default while they have not picked one.
+ */
+function policyColorMode(theme: Theme, chosen: boolean): Theme {
+  const { mode, locked } = usePolicyStore.getState().getColorModePolicy();
+  return mode && (locked || !chosen) ? mode : theme;
+}
+
 interface ThemeState {
   theme: Theme;
+  /**
+   * The user picked `theme` themselves (#1280). Until they do, the theme
+   * policy's defaultColorMode applies. Synced with the settings.
+   */
+  themeChosen: boolean;
   resolvedTheme: 'light' | 'dark';
   hydrated: boolean;
 
@@ -40,9 +56,12 @@ interface ThemeState {
   installedThemes: InstalledTheme[];
   activeThemeId: string | null; // null = built-in default
 
-  setTheme: (theme: Theme) => void;
+  /** `chosen: false` sets a mode the user did not pick (a synced one they never chose). */
+  setTheme: (theme: Theme, opts?: { chosen?: boolean }) => void;
   toggleTheme: () => void;
   initializeTheme: () => void;
+  /** Applies the theme policy's color mode; runs whenever the policy changes. */
+  applyColorModePolicy: () => void;
 
   // Custom theme management
   installTheme: (file: File) => Promise<{ success: boolean; error?: string; warnings?: string[] }>;
@@ -50,6 +69,8 @@ interface ThemeState {
   activateTheme: (id: string | null) => void;
   syncServerThemes: () => Promise<void>;
 }
+
+type PersistedThemeState = Pick<ThemeState, 'theme' | 'themeChosen' | 'activeThemeId' | 'installedThemes'>;
 
 const getSystemTheme = (): 'light' | 'dark' => {
   if (typeof window === 'undefined') return 'light';
@@ -84,15 +105,18 @@ export const useThemeStore = create<ThemeState>()(
   persist(
     (set, get) => ({
       theme: 'system',
+      themeChosen: false,
       resolvedTheme: 'light',
       hydrated: false,
       installedThemes: [...BUILTIN_THEMES],
       activeThemeId: null,
 
-      setTheme: (theme) => {
+      setTheme: (requested, opts) => {
+        const themeChosen = opts?.chosen ?? true;
+        const theme = policyColorMode(requested, themeChosen);
         const resolvedTheme = theme === 'system' ? getSystemTheme() : theme;
         applyTheme(resolvedTheme);
-        set({ theme, resolvedTheme });
+        set({ theme, resolvedTheme, themeChosen });
         // Re-apply active custom theme for new mode
         const { activeThemeId, installedThemes } = get();
         if (activeThemeId) {
@@ -107,6 +131,11 @@ export const useThemeStore = create<ThemeState>()(
           theme === 'light' ? 'dark' :
           theme === 'dark' ? 'system' : 'light';
         get().setTheme(nextTheme);
+      },
+
+      applyColorModePolicy: () => {
+        const { theme, themeChosen } = get();
+        if (policyColorMode(theme, themeChosen) !== theme) get().setTheme(theme, { chosen: themeChosen });
       },
 
       initializeTheme: () => {
@@ -340,11 +369,11 @@ export const useThemeStore = create<ThemeState>()(
 
         themeSyncPromise = (async () => {
           try {
-            const res = await apiFetch('/api/plugins');
+            const res = await fetchServerPluginList();
             if (!res.ok) return;
 
-            const data: { themes: ServerThemeInfo[] } = await res.json();
-            if (!data.themes || !Array.isArray(data.themes)) return;
+            const data = res.data as { themes: ServerThemeInfo[] };
+            if (!data?.themes || !Array.isArray(data.themes)) return;
 
             const serverThemes = data.themes;
 
@@ -353,10 +382,12 @@ export const useThemeStore = create<ThemeState>()(
 
               if (!local) {
                 // Download and install new server theme
-                const css = await downloadThemeCSS(st.id);
+                const css = await downloadThemeAsset(st, 'css');
                 if (!css) continue;
+                const skin = st.hasSkin ? await downloadThemeAsset(st, 'skin') : null;
 
                 const sanitized = sanitizeThemeCSS(css);
+                const sanitizedSkin = skin ? sanitizeSkinCSS(skin).css : undefined;
                 const theme: InstalledTheme = {
                   id: st.id,
                   name: st.name,
@@ -369,9 +400,12 @@ export const useThemeStore = create<ThemeState>()(
                   builtIn: false,
                   managed: true,
                   forceEnabled: st.forceEnabled,
+                  contentHash: st.contentHash,
+                  ...(sanitizedSkin ? { skin: sanitizedSkin } : {}),
                 };
 
                 await pluginStorage.saveThemeCSS(st.id, sanitized.css);
+                if (sanitizedSkin) await pluginStorage.saveThemeSkin(st.id, sanitizedSkin);
                 set(state => {
                   if (state.installedThemes.some(t => t.id === st.id)) {
                     return {};
@@ -383,14 +417,24 @@ export const useThemeStore = create<ThemeState>()(
 
               } else if (!local.builtIn) {
                 let css = local.css;
+                let skin = local.skin;
+                // The hash catches a re-upload of the same version.
+                const changed = local.version !== st.version
+                  || (!!st.contentHash && local.contentHash !== st.contentHash);
 
-                if (local.version !== st.version || !css) {
-                  const downloadedCss = await downloadThemeCSS(st.id);
+                if (changed || !css) {
+                  const downloadedCss = await downloadThemeAsset(st, 'css');
                   if (!downloadedCss) continue;
 
                   const sanitized = sanitizeThemeCSS(downloadedCss);
                   css = sanitized.css;
                   await pluginStorage.saveThemeCSS(st.id, sanitized.css);
+                }
+                if (changed) {
+                  const downloadedSkin = st.hasSkin ? await downloadThemeAsset(st, 'skin') : null;
+                  skin = downloadedSkin ? sanitizeSkinCSS(downloadedSkin).css : undefined;
+                  if (skin) await pluginStorage.saveThemeSkin(st.id, skin);
+                  else await pluginStorage.deleteThemeSkin(st.id);
                 }
 
                 const updatedTheme = {
@@ -400,9 +444,11 @@ export const useThemeStore = create<ThemeState>()(
                   author: st.author,
                   description: st.description || '',
                   css,
+                  skin,
                   variants: st.variants as ThemeVariant[],
                   managed: true,
                   forceEnabled: st.forceEnabled,
+                  contentHash: st.contentHash,
                 };
 
                 set(state => ({
@@ -416,6 +462,29 @@ export const useThemeStore = create<ThemeState>()(
                   applyCustomThemeCSS(updatedTheme, get().resolvedTheme);
                 }
               }
+            }
+
+            // A managed theme the server no longer lists was deleted or
+            // disabled by the admin. Without this it stayed installed, and
+            // its local forceEnabled flag kept forcing it on forever.
+            const serverIds = new Set(serverThemes.map(t => t.id));
+            const stale = get().installedThemes.filter(t => t.managed && !t.builtIn && !serverIds.has(t.id));
+            if (stale.length > 0) {
+              const staleIds = new Set(stale.map(t => t.id));
+              const activeId = get().activeThemeId;
+              if (activeId && staleIds.has(activeId)) {
+                removeThemeCSS();
+                removeThemeSkinCSS();
+                set({ activeThemeId: null });
+              }
+              for (const id of staleIds) {
+                void pluginStorage.deleteThemeCSS(id);
+                void pluginStorage.deleteThemeSkin(id);
+                void pluginStorage.deletePreview(id);
+              }
+              set(state => ({
+                installedThemes: state.installedThemes.filter(t => !staleIds.has(t.id)),
+              }));
             }
 
             set(state => ({
@@ -444,8 +513,10 @@ export const useThemeStore = create<ThemeState>()(
     }),
     {
       name: 'theme-storage',
-      partialize: (state) => ({
+      version: 1,
+      partialize: (state): PersistedThemeState => ({
         theme: state.theme,
+        themeChosen: state.themeChosen,
         activeThemeId: state.activeThemeId,
         // Store theme metadata but NOT full CSS / skin (those go in IndexedDB)
         installedThemes: state.installedThemes.map(t => ({
@@ -455,6 +526,13 @@ export const useThemeStore = create<ThemeState>()(
           preview: undefined, // previews also in IndexedDB
         })),
       }),
+      // v1: themeChosen (#1280). Earlier builds did not record it, so a mode
+      // other than the built-in default is taken as chosen.
+      migrate: (persisted, version) => {
+        const state = persisted as PersistedThemeState;
+        if (version < 1) state.themeChosen = state.theme !== 'system';
+        return state;
+      },
       onRehydrateStorage: () => {
         return (state) => {
           if (state) {
@@ -564,6 +642,8 @@ interface ServerThemeInfo {
   description: string;
   variants: string[];
   forceEnabled: boolean;
+  hasSkin?: boolean;
+  contentHash?: string;
 }
 
 function dedupeInstalledThemes(themes: InstalledTheme[]): InstalledTheme[] {
@@ -589,13 +669,32 @@ function dedupeInstalledThemes(themes: InstalledTheme[]): InstalledTheme[] {
   return [...byId.values()];
 }
 
-async function downloadThemeCSS(themeId: string): Promise<string | null> {
+async function downloadThemeAsset(theme: ServerThemeInfo, kind: 'css' | 'skin'): Promise<string | null> {
+  // The content hash in the URL keeps a browser cache from serving the
+  // previous upload.
+  const version = theme.contentHash ? `?v=${encodeURIComponent(theme.contentHash)}` : '';
   try {
-    const res = await apiFetch(`/api/admin/themes/${encodeURIComponent(themeId)}/css`);
+    const res = await apiFetch(`/api/admin/themes/${encodeURIComponent(theme.id)}/${kind}${version}`);
     if (!res.ok) return null;
     return await res.text();
   } catch {
-    console.warn(`[theme-store] Failed to download CSS for theme "${themeId}"`);
+    console.warn(`[theme-store] Failed to download ${kind} for theme "${theme.id}"`);
     return null;
   }
 }
+// The policy arrives after this store has rehydrated (and again in full once
+// signed in), so its color mode applies whenever it changes (#1280).
+usePolicyStore.subscribe((state, prev) => {
+  if (state.policy !== prev.policy) useThemeStore.getState().applyColorModePolicy();
+});
+
+// Plugins hear about every change of scheme or theme, whichever path made it
+// (settings, the system switching to dark, a forced admin theme).
+useThemeStore.subscribe((state, prev) => {
+  if (state.theme !== prev.theme || state.resolvedTheme !== prev.resolvedTheme) {
+    void themeHooks.onThemeChange.emit({ theme: state.theme, resolved: state.resolvedTheme });
+  }
+  if (state.activeThemeId !== prev.activeThemeId) {
+    void themeHooks.onCustomThemeChange.emit({ themeId: state.activeThemeId });
+  }
+});
