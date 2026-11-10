@@ -34,6 +34,7 @@ export function CalendarSettings() {
   const defaultIdentityId = participantIdentities.find((i) => i.isDefault)?.id ?? participantIdentities[0]?.id ?? '';
   const {
     showTimeInMonthView,
+    calendarTintedEvents,
     showWeekNumbers,
     calendarFreeScroll,
     enableCalendarTasks,
@@ -45,6 +46,7 @@ export function CalendarSettings() {
     calendarDayEndHour,
     calendarHideNonWorkingDays,
     calendarWorkingDays,
+    calendarInvitationParsingEnabled,
     timeFormat,
     firstDayOfWeek,
     updateSetting,
@@ -79,7 +81,7 @@ export function CalendarSettings() {
   };
 
   return (
-    <SettingsSection title={t('title')}>
+    <SettingsSection id="calendar" title={t('title')}>
       <SettingItem label={t('default_view')}>
         <Select
           value={viewMode}
@@ -113,6 +115,17 @@ export function CalendarSettings() {
         </SettingItem>
       )}
 
+      {/* Not a notification: whether .ics attachments get calendar actions. Was under Notifications. */}
+      <SettingItem
+        label={t('invitation_parsing')}
+        description={t('invitation_parsing_desc')}
+      >
+        <ToggleSwitch
+          checked={calendarInvitationParsingEnabled}
+          onChange={(checked) => updateSetting('calendarInvitationParsingEnabled', checked)}
+        />
+      </SettingItem>
+
       <SettingItem
         label={t('show_time_in_month_view')}
         description={t('show_time_in_month_view_desc')}
@@ -120,6 +133,16 @@ export function CalendarSettings() {
         <ToggleSwitch
           checked={showTimeInMonthView}
           onChange={(checked) => updateSetting('showTimeInMonthView', checked)}
+        />
+      </SettingItem>
+
+      <SettingItem
+        label={t('tinted_events')}
+        description={t('tinted_events_desc')}
+      >
+        <ToggleSwitch
+          checked={calendarTintedEvents}
+          onChange={(checked) => updateSetting('calendarTintedEvents', checked)}
         />
       </SettingItem>
 

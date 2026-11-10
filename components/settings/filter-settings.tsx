@@ -1,9 +1,14 @@
 "use client";
 
+import { MoveButtons } from "@/components/ui/move-buttons";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useTranslations } from "next-intl";
 import { SettingsSection, ToggleSwitch } from "./settings-section";
 import { Button } from "@/components/ui/button";
+import { TermInfo } from "@/components/ui/term";
+import { IconButton } from "@/components/ui/icon-button";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { useConfirmDialog } from "@/hooks/use-confirm-dialog";
 import { FilterRuleModal } from "@/components/filters/filter-rule-modal";
 import { SieveEditorModal } from "@/components/filters/sieve-editor-modal";
 import { useFilterStore } from "@/stores/filter-store";
@@ -21,7 +26,7 @@ import { useManagedAccountStore } from "@/stores/managed-account-store";
 import {
   Plus,
   GripVertical,
-  X,
+  Trash2,
   Code,
   AlertTriangle,
   Loader2,
@@ -123,7 +128,7 @@ export function VisualRuleSummary({ rule }: { rule: FilterRule }) {
   return (
     <div className="mt-1.5 space-y-1 text-xs">
       <div className="flex items-baseline gap-1.5 flex-wrap">
-        <span className="text-[10px] font-semibold uppercase tracking-wider text-blue-500 dark:text-blue-400">
+        <span className="text-[0.6875rem] font-semibold text-blue-500 dark:text-blue-400">
           {t("if")}
         </span>
         {rule.conditions.map((c, i) => {
@@ -134,7 +139,7 @@ export function VisualRuleSummary({ rule }: { rule: FilterRule }) {
           return (
             <span key={i} className="contents">
               {i > 0 && (
-                <span className="text-[10px] text-muted-foreground/70 italic">{joiner}</span>
+                <span className="text-[0.625rem] text-muted-foreground italic">{joiner}</span>
               )}
               <span className="inline-flex min-w-0 max-w-full items-baseline gap-1 px-1.5 py-px rounded-sm bg-muted/60 text-foreground">
                 <span className="shrink-0 font-medium text-blue-600 dark:text-blue-400">{field}</span>
@@ -149,7 +154,7 @@ export function VisualRuleSummary({ rule }: { rule: FilterRule }) {
                     {(Array.isArray(c.value) ? c.value : [c.value]).map((v, k) => (
                       <span key={k} className="min-w-0 wrap-anywhere">
                         {k > 0 && (
-                          <span className="text-muted-foreground/70 italic">{t("or")} </span>
+                          <span className="text-muted-foreground italic">{t("or")} </span>
                         )}
                         “{v}”
                       </span>
@@ -160,11 +165,11 @@ export function VisualRuleSummary({ rule }: { rule: FilterRule }) {
             </span>
           );
         })}
-        <span className="text-[10px] text-muted-foreground/60 italic">({matchLabel})</span>
+        <span className="text-[0.625rem] text-muted-foreground italic">({matchLabel})</span>
       </div>
 
       <div className="flex items-baseline gap-1.5 flex-wrap">
-        <span className="text-[10px] font-semibold uppercase tracking-wider text-emerald-500 dark:text-emerald-400">
+        <span className="text-[0.6875rem] font-semibold text-emerald-500 dark:text-emerald-400">
           {t("then")}
         </span>
         {rule.actions.map((a, i) => {
@@ -172,7 +177,7 @@ export function VisualRuleSummary({ rule }: { rule: FilterRule }) {
           return (
             <span key={i} className="contents">
               {i > 0 && (
-                <span className="text-muted-foreground/50">›</span>
+                <span className="text-muted-foreground">›</span>
               )}
               <span className="inline-flex min-w-0 max-w-full items-baseline gap-1 px-1.5 py-px rounded-sm bg-muted/60 text-foreground">
                 <span className="shrink-0 font-medium text-emerald-600 dark:text-emerald-400">{action}</span>
@@ -185,14 +190,14 @@ export function VisualRuleSummary({ rule }: { rule: FilterRule }) {
 
       {period && (
         <div className="flex items-baseline gap-1.5 flex-wrap">
-          <span className="text-[10px] font-semibold uppercase tracking-wider text-violet-500 dark:text-violet-400">
+          <span className="text-[0.6875rem] font-semibold text-violet-500 dark:text-violet-400">
             {t("period_title")}
           </span>
           <span className="min-w-0 max-w-full px-1.5 py-px rounded-sm bg-muted/60 text-foreground wrap-anywhere">
             {period.range}
           </span>
           {period.status && (
-            <span className="text-[10px] text-muted-foreground/60 italic">({period.status})</span>
+            <span className="text-[0.625rem] text-muted-foreground italic">({period.status})</span>
           )}
         </div>
       )}
@@ -288,8 +293,6 @@ export function FilterSettings() {
   const [editingRule, setEditingRule] = useState<FilterRule | undefined>();
   const [showRuleModal, setShowRuleModal] = useState(false);
   const [showSieveEditor, setShowSieveEditor] = useState(false);
-  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
-  const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const draggedIndexRef = useRef<number | null>(null);
 
@@ -301,6 +304,8 @@ export function FilterSettings() {
   const runOrder = inRunOrder(rules, vacationForward);
   const tooManyForwards =
     typeof redirectLimit === "number" && redirectLimit > 0 && worstCaseForwards(runOrder) > redirectLimit;
+  // A limit of 0: the server runs no redirect, so the rules' forwards do nothing.
+  const forwardsIgnored = redirectLimit === 0 && worstCaseForwards(rules) > 0;
   // The edited rule where it is; a new one goes below Bulwark's own rules.
   const editedIndex = editingRule ? rules.findIndex((r) => r.id === editingRule.id) : -1;
   const forwardsOfEdited = forwardsAround(
@@ -334,22 +339,38 @@ export function FilterSettings() {
     [client, toggleRule, saveFilters, tNotifications]
   );
 
+  // A rule can be put back as it was, so it goes at once with an Undo (R3).
   const handleDelete = useCallback(
     async (ruleId: string) => {
-      const deletedRule = rules.find((r) => r.id === ruleId);
+      const before = useFilterStore.getState().rules;
+      const deletedRule = before.find((r) => r.id === ruleId);
+      if (!deletedRule) return;
       deleteRule(ruleId);
-      setDeleteConfirmId(null);
-      if (client) {
-        try {
-          await saveFilters(client);
-          toast.success(tNotifications("filters_deleted"));
-        } catch {
-          if (deletedRule) addRule(deletedRule);
-          toast.error(tNotifications("filters_save_failed"));
-        }
+      if (!client) return;
+      const putBack = () => useFilterStore.setState({ rules: before });
+      try {
+        await saveFilters(client);
+      } catch {
+        putBack();
+        toast.error(tNotifications("filters_save_failed"));
+        return;
       }
+      toast.success(tNotifications("filters_deleted"), {
+        action: {
+          label: tNotifications("rule_undo"),
+          onClick: () => {
+            if (useFilterStore.getState().rules.some((r) => r.id === ruleId)) return;
+            const current = useFilterStore.getState().rules;
+            putBack();
+            saveFilters(client).catch(() => {
+              useFilterStore.setState({ rules: current });
+              toast.error(tNotifications("filters_save_failed"));
+            });
+          },
+        },
+      });
     },
-    [client, rules, deleteRule, addRule, saveFilters, tNotifications]
+    [client, deleteRule, saveFilters, tNotifications]
   );
 
   const handleSaveRule = useCallback(
@@ -392,13 +413,17 @@ export function FilterSettings() {
     [client, setRawScript, saveFilters, tNotifications]
   );
 
+  const { dialogProps: confirmProps, confirm } = useConfirmDialog();
+  // The script typed in the raw editor is thrown away, so it asks first (R3).
   const handleResetToVisual = useCallback(async () => {
-    if (!showResetConfirm) {
-      setShowResetConfirm(true);
-      return;
-    }
+    const ok = await confirm({
+      title: t("reset_title"),
+      message: t("reset_warning"),
+      confirmText: t("confirm_reset"),
+      variant: "destructive",
+    });
+    if (!ok) return;
     resetToVisualBuilder();
-    setShowResetConfirm(false);
     if (client) {
       try {
         await saveFilters(client);
@@ -407,7 +432,7 @@ export function FilterSettings() {
         toast.error(tNotifications("filters_save_failed"));
       }
     }
-  }, [showResetConfirm, resetToVisualBuilder, client, saveFilters, tNotifications]);
+  }, [confirm, t, resetToVisualBuilder, client, saveFilters, tNotifications]);
 
   const handleValidate = useCallback(
     async (content: string) => {
@@ -435,13 +460,10 @@ export function FilterSettings() {
     []
   );
 
-  const handleDrop = useCallback(
-    async (e: React.DragEvent, dropIndex: number) => {
-      e.preventDefault();
-      setDragOverIndex(null);
-      const fromIndex = draggedIndexRef.current;
-      if (fromIndex === null || fromIndex === dropIndex) return;
-
+  // Dragging and the Move up / Move down buttons both end here.
+  const moveRule = useCallback(
+    async (fromIndex: number, dropIndex: number) => {
+      if (fromIndex === dropIndex || dropIndex < 0 || dropIndex >= rules.length) return;
       const previousOrder = rules.map((r) => r.id);
       const newOrder = [...previousOrder];
       const [moved] = newOrder.splice(fromIndex, 1);
@@ -458,6 +480,17 @@ export function FilterSettings() {
       }
     },
     [rules, reorderRules, client, saveFilters, tNotifications]
+  );
+
+  const handleDrop = useCallback(
+    async (e: React.DragEvent, dropIndex: number) => {
+      e.preventDefault();
+      setDragOverIndex(null);
+      const fromIndex = draggedIndexRef.current;
+      if (fromIndex === null) return;
+      await moveRule(fromIndex, dropIndex);
+    },
+    [moveRule]
   );
 
   const handleDragEnd = useCallback(() => {
@@ -503,7 +536,7 @@ export function FilterSettings() {
 
   return (
     <div className="space-y-6">
-      <SettingsSection title={t("title")} description={t("description")}>
+      <SettingsSection id="rules" title={t("title")} description={t("description")}>
         {isOpaque && (
           <div className="flex items-start gap-2 p-3 rounded-md bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 text-sm text-amber-700 dark:text-amber-400">
             <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
@@ -517,34 +550,14 @@ export function FilterSettings() {
                 >
                   {t("open_sieve_editor")}
                 </button>
-                {showResetConfirm ? (
-                  <span className="flex items-center gap-2">
-                    <span className="text-red-600 dark:text-red-400">{t("reset_warning")}</span>
-                    <button
-                      type="button"
-                      onClick={handleResetToVisual}
-                      className="text-red-600 dark:text-red-400 hover:underline font-medium"
-                    >
-                      {t("confirm_reset")}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setShowResetConfirm(false)}
-                      className="text-muted-foreground hover:underline"
-                    >
-                      {t("cancel")}
-                    </button>
-                  </span>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={handleResetToVisual}
-                    className="text-red-600 dark:text-red-400 hover:underline font-medium flex items-center gap-1"
-                  >
-                    <RotateCcw className="w-3.5 h-3.5" />
-                    {t("reset_to_visual")}
-                  </button>
-                )}
+                <button
+                  type="button"
+                  onClick={() => void handleResetToVisual()}
+                  className="text-red-600 dark:text-red-400 hover:underline font-medium flex items-center gap-1"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  {t("reset_to_visual")}
+                </button>
               </div>
             </div>
           </div>
@@ -583,6 +596,12 @@ export function FilterSettings() {
           </div>
         )}
 
+        {!isOpaque && forwardsIgnored && (
+          <p className="text-xs text-amber-600 dark:text-amber-400">
+            {t("forward_unavailable")}
+          </p>
+        )}
+
         {!isOpaque && tooManyForwards && (
           <p className="text-xs text-amber-600 dark:text-amber-400">
             {t("forward_limit", { count: redirectLimit })}
@@ -617,7 +636,7 @@ export function FilterSettings() {
                         <p className="text-sm font-medium text-foreground truncate">
                           {rule.name}
                         </p>
-                        <span className="inline-flex items-baseline px-1.5 py-px rounded-sm bg-muted/60 text-muted-foreground text-[10px]">
+                        <span className="inline-flex items-baseline px-1.5 py-px rounded-sm bg-muted/60 text-muted-foreground text-[0.625rem]">
                           {label}
                         </span>
                       </div>
@@ -663,6 +682,7 @@ export function FilterSettings() {
                     <ToggleSwitch
                       checked={rule.enabled}
                       onChange={() => handleToggle(rule.id)}
+                      ariaLabel={rule.name}
                     />
                   </div>
 
@@ -692,33 +712,20 @@ export function FilterSettings() {
                     )}
                   </div>
 
-                  {deleteConfirmId === rule.id ? (
-                    <div className="flex items-center gap-1">
-                      <Button
-                        variant="destructive"
-                        size="sm"
-                        onClick={() => handleDelete(rule.id)}
-                      >
-                        {t("confirm_delete")}
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => setDeleteConfirmId(null)}
-                      >
-                        {t("cancel")}
-                      </Button>
-                    </div>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => setDeleteConfirmId(rule.id)}
-                      className="p-1.5 rounded hover:bg-muted text-muted-foreground hover:text-red-600 dark:hover:text-red-400 transition-colors"
-                      aria-label={t("delete_rule")}
-                    >
-                      <X className="w-4 h-4" />
-                    </button>
-                  )}
+                  {/* The order decides which rule runs first: also by keyboard. */}
+                  <MoveButtons
+                    index={index}
+                    count={rules.length}
+                    name={rule.name}
+                    onMove={(from, to) => void moveRule(from, to)}
+                  />
+                  <IconButton
+                    label={t("delete_rule")}
+                    onClick={() => void handleDelete(rule.id)}
+                    className="text-muted-foreground hover:text-destructive"
+                  >
+                    <Trash2 />
+                  </IconButton>
                 </div>
               );
             })}
@@ -732,6 +739,7 @@ export function FilterSettings() {
             <Button
               variant="outline"
               size="sm"
+              data-search-label={t("add_rule")}
               onClick={() => {
                 setEditingRule(undefined);
                 setShowRuleModal(true);
@@ -744,11 +752,13 @@ export function FilterSettings() {
           <Button
             variant="outline"
             size="sm"
+            data-search-label={t("raw_editor")}
             onClick={() => setShowSieveEditor(true)}
           >
             <Code className="w-4 h-4 me-1" />
             {t("raw_editor")}
           </Button>
+          <TermInfo id="sieve" />
         </div>
 
         <div className="flex items-center gap-3">
@@ -764,6 +774,7 @@ export function FilterSettings() {
               <ToggleSwitch
                 checked={expandedFilterView}
                 onChange={(v) => updateSetting("expandedFilterView", v)}
+                ariaLabel={t("expanded_view")}
               />
             </div>
           )}
@@ -794,6 +805,7 @@ export function FilterSettings() {
           onValidate={handleValidate}
         />
       )}
+      <ConfirmDialog {...confirmProps} />
     </div>
   );
 }

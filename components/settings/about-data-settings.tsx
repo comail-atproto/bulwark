@@ -1,5 +1,7 @@
 "use client";
 
+import { GitFork } from '@/components/icons/comail';
+
 import { useState, useRef, useEffect } from 'react';
 import { useTranslations } from 'next-intl';
 import { useSettingsStore } from '@/stores/settings-store';
@@ -8,21 +10,18 @@ import { SettingsSection, SettingItem, ToggleSwitch } from './settings-section';
 import { Button } from '@/components/ui/button';
 import { usePolicyStore } from '@/stores/policy-store';
 import { useUpdateStore } from '@/stores/update-store';
-import { ExternalLink, GitFork, Scale, Server } from '@/components/icons';
+import { ExternalLink, Scale, Server } from '@/components/icons';
 import { cn } from '@/lib/utils';
 import { getPathPrefix, withBasePath } from '@/lib/browser-navigation';
 import { clearCachedData } from '@/lib/clear-cached-data';
 import { SpamSiegeGame } from './spam-siege-game';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { toast } from '@/stores/toast-store';
+import { DebugSettings } from './debug-settings';
 
 const APP_VERSION = process.env.NEXT_PUBLIC_APP_VERSION || "0.0.0";
 const GIT_COMMIT = process.env.NEXT_PUBLIC_GIT_COMMIT || "unknown";
 
-// AGPL-3.0 §13: the Corresponding Source of this modified build. Baked in at
-// build time via next.config.ts (NEXT_PUBLIC_CORRESPONDING_SOURCE_URL); falls
-// back to this fork's public repository.
-const CORRESPONDING_SOURCE_URL =
-  process.env.NEXT_PUBLIC_CORRESPONDING_SOURCE_URL ||
-  "https://github.com/comail-atproto/bulwark";
 const UPSTREAM_URL = "https://github.com/bulwarkmail/webmail";
 // The mail server this webmail fronts. Comail runs an unmodified upstream
 // build (nixpkgs stalwart-mail), so this credit + link to the public source
@@ -49,7 +48,7 @@ function VersionUpdateTag() {
   return (
     <span
       className={cn(
-        "ms-2 inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium align-middle",
+        "ms-2 inline-flex items-center rounded-full px-1.5 py-0.5 text-[0.625rem] font-medium align-middle",
         important
           ? "bg-red-500/15 text-red-700 dark:text-red-300"
           : "bg-amber-500/15 text-amber-700 dark:text-amber-300",
@@ -60,25 +59,21 @@ function VersionUpdateTag() {
   );
 }
 
-export function AboutDataSettings() {
+/**
+ * The About card, in the settings sidebar's footer: logo, version with the
+ * update tag, and the source link. A modified build must offer its own
+ * source (AGPL-3.0 §13), so a configured URL replaces the upstream link.
+ * Three clicks on the logo open Spam Siege, as before.
+ */
+export function AboutFooter() {
   const t = useTranslations('settings.advanced');
-  const tCommon = useTranslations('common');
-  const tSettings = useTranslations('settings');
-  const { settingsSyncDisabled, updateSetting, resetToDefaults, exportSettings, importSettings } =
-    useSettingsStore();
-  // A modified build must offer its own source (AGPL-3.0 §13), so a
-  // configured URL replaces the upstream repository link.
-  const { settingsSyncEnabled, sourceCodeUrl, appName, appLogoLightUrl, appLogoDarkUrl } = useConfig();
-  const sourceUrl = sourceCodeUrl || CORRESPONDING_SOURCE_URL;
+  const { sourceCodeUrl, appName, appLogoLightUrl, appLogoDarkUrl } = useConfig();
+  const sourceUrl = sourceCodeUrl || process.env.NEXT_PUBLIC_CORRESPONDING_SOURCE_URL;
   // A branded deployment (APP_NAME / APP_LOGO_*) shows its own name and logo
   // here; without them the card keeps the Bulwark mark and title. (#1160)
   const branded = appName && appName !== 'Webmail';
   const logoLight = withBasePath(appLogoLightUrl || appLogoDarkUrl) || `${getPathPrefix()}/branding/Bulwark_Logo_Color.svg`;
   const logoDark = withBasePath(appLogoDarkUrl || appLogoLightUrl) || `${getPathPrefix()}/branding/Bulwark_Logo_White.svg`;
-  const [showResetConfirm, setShowResetConfirm] = useState(false);
-  const [showRefreshConfirm, setShowRefreshConfirm] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const { isFeatureEnabled } = usePolicyStore();
   const [showGame, setShowGame] = useState(false);
   const logoClickCount = useRef(0);
   const logoClickTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -94,6 +89,65 @@ export function AboutDataSettings() {
     }
   };
 
+  return (
+    <div data-testid="settings-about" className="px-3 py-2">
+      {showGame && <SpamSiegeGame onClose={() => setShowGame(false)} />}
+      <div className="flex items-center gap-3">
+        {/* Named by what it shows (app name and version), with the focus
+            ring every other stop in the sidebar has. */}
+        <button
+          type="button"
+          onClick={handleLogoClick}
+          className="flex items-center gap-3 flex-1 min-w-0 text-start rounded-md focus-visible:outline-hidden group/about cursor-pointer"
+        >
+          <img
+            src={logoLight}
+            alt={branded ? appName : 'Bulwark'}
+            className="w-7 h-7 shrink-0 object-contain dark:hidden group-active/about:scale-95 transition-transform"
+          />
+          <img
+            src={logoDark}
+            alt={branded ? appName : 'Bulwark'}
+            className="w-7 h-7 shrink-0 object-contain hidden dark:block group-active/about:scale-95 transition-transform"
+          />
+          <div className="min-w-0">
+            <p className="text-xs font-medium text-foreground truncate">{branded ? appName : t('about.title')}</p>
+            <p className="text-[0.6875rem] text-muted-foreground truncate">
+              v{APP_VERSION} <span className="text-muted-foreground">({GIT_COMMIT})</span>
+              <VersionUpdateTag />
+            </p>
+          </div>
+        </button>
+        <a
+          href={sourceUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="shrink-0 inline-flex items-center gap-1 text-[0.6875rem] text-muted-foreground hover:text-foreground transition-colors"
+        >
+          {t('about.source_code')} <ExternalLink className="w-3 h-3" />
+        </a>
+      </div>
+
+    </div>
+  );
+}
+
+/**
+ * The Backup & reset page: keep settings (sync, export, import), fix a stale
+ * view, start over, and (Advanced, where the admin allows it) debug logging.
+ * The About card moved to the settings sidebar's footer.
+ */
+export function AboutDataSettings() {
+  const t = useTranslations('settings.advanced');
+  const tSettings = useTranslations('settings');
+  const { settingsSyncDisabled, updateSetting, resetToDefaults, exportSettings, importSettings } =
+    useSettingsStore();
+  const { settingsSyncEnabled, sourceCodeUrl } = useConfig();
+  const sourceUrl = sourceCodeUrl || process.env.NEXT_PUBLIC_CORRESPONDING_SOURCE_URL;
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
+  const [showRefreshConfirm, setShowRefreshConfirm] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const { isFeatureEnabled } = usePolicyStore();
   const handleExport = () => {
     const settingsJson = exportSettings();
     const blob = new Blob([settingsJson], { type: 'application/json' });
@@ -120,73 +174,23 @@ export function AboutDataSettings() {
       const json = event.target?.result as string;
       const success = importSettings(json);
       if (success) {
-        alert(tSettings('import_success'));
+        toast.success(tSettings('import_success'));
       } else {
-        alert(tSettings('import_error'));
+        toast.error(tSettings('import_error'));
       }
     };
     reader.readAsText(file);
-  };
-
-  const handleRefreshCache = () => {
-    if (showRefreshConfirm) {
-      clearCachedData(); // reloads the page
-    } else {
-      setShowRefreshConfirm(true);
-      setTimeout(() => setShowRefreshConfirm(false), 5000);
-    }
+    // The same file can be picked again after fixing it.
+    e.target.value = '';
   };
 
   const handleReset = () => {
-    if (showResetConfirm) {
-      resetToDefaults();
-      setShowResetConfirm(false);
-      alert(tSettings('save_success'));
-    } else {
-      setShowResetConfirm(true);
-      setTimeout(() => setShowResetConfirm(false), 5000);
-    }
+    resetToDefaults();
+    toast.success(t('reset_settings.done'));
   };
 
   return (
-    <>
-      {showGame && <SpamSiegeGame onClose={() => setShowGame(false)} />}
-      <div className="rounded-lg border border-border bg-card p-5 mb-6">
-        <div className="flex items-center gap-4">
-          <button onClick={handleLogoClick} className="flex items-center gap-4 flex-1 text-start focus:outline-none group/about cursor-pointer" aria-label="About">
-            <div className="shrink-0">
-              <img
-                src={logoLight}
-                alt={branded ? appName : 'Bulwark'}
-                className="w-12 h-12 object-contain dark:hidden group-hover/about:scale-105 group-active/about:scale-95 transition-transform"
-              />
-              <img
-                src={logoDark}
-                alt={branded ? appName : 'Bulwark'}
-                className="w-12 h-12 object-contain hidden dark:block group-hover/about:scale-105 group-active/about:scale-95 transition-transform"
-              />
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium text-foreground">
-                {branded ? appName : t('about.title')}
-              </p>
-              <p className="text-xs text-muted-foreground group-hover/about:translate-x-0.5 group-active/about:translate-y-px transition-transform">
-                v{APP_VERSION} <span className="text-muted-foreground/60">({GIT_COMMIT})</span>
-                <VersionUpdateTag />
-              </p>
-            </div>
-          </button>
-          <a
-            href={sourceUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
-          >
-            {t('about.source_code')} <ExternalLink className="w-3 h-3" />
-          </a>
-        </div>
-      </div>
-
+    <div className="space-y-8">
       <div className="rounded-lg border border-border bg-card p-4 mb-6 text-xs text-muted-foreground space-y-2">
         <p className="flex items-center gap-1.5 text-foreground/80">
           <GitFork className="w-3.5 h-3.5 shrink-0" />
@@ -230,10 +234,9 @@ export function AboutDataSettings() {
           </a>
         </div>
       </div>
-
-      <SettingsSection title={t('title')} description={t('description')}>
+      <SettingsSection id="backup" title={t('sections.backup')} description={t('sections.backup_description')}>
         {settingsSyncEnabled && (
-          <SettingItem label={t('settings_sync.label')} description={t('settings_sync.description')}>
+          <SettingItem label={t('settings_sync.label')} description={t('settings_sync.description')} term="sync">
             <ToggleSwitch checked={!settingsSyncDisabled} onChange={(checked) => updateSetting('settingsSyncDisabled', !checked)} />
           </SettingItem>
         )}
@@ -262,27 +265,41 @@ export function AboutDataSettings() {
           </>
         </SettingItem>
         )}
+      </SettingsSection>
 
-        <SettingItem label={t('refresh_cache.label')} description={t('refresh_cache.description')}>
-          <Button
-            variant={showRefreshConfirm ? 'default' : 'outline'}
-            size="sm"
-            onClick={handleRefreshCache}
-          >
-            {showRefreshConfirm ? tCommon('yes') : t('refresh_cache.button')}
+      <SettingsSection id="fix" title={t('sections.fix')} description={t('sections.fix_description')}>
+        <SettingItem label={t('refresh_cache.label')} description={t('refresh_cache.description')} term="cache">
+          <Button variant="outline" size="sm" onClick={() => setShowRefreshConfirm(true)}>
+            {t('refresh_cache.button')}
           </Button>
         </SettingItem>
 
         <SettingItem label={t('reset_settings.label')} description={t('reset_settings.description')}>
-          <Button
-            variant={showResetConfirm ? 'destructive' : 'outline'}
-            size="sm"
-            onClick={handleReset}
-          >
-            {showResetConfirm ? tCommon('yes') : t('reset_settings.button')}
+          <Button variant="outline" size="sm" onClick={() => setShowResetConfirm(true)}>
+            {t('reset_settings.button')}
           </Button>
         </SettingItem>
       </SettingsSection>
-    </>
+
+      <ConfirmDialog
+        isOpen={showRefreshConfirm}
+        onClose={() => setShowRefreshConfirm(false)}
+        onConfirm={() => clearCachedData() /* reloads the page */}
+        title={t('refresh_cache.confirm_title')}
+        message={t('refresh_cache.description')}
+        confirmText={t('refresh_cache.button')}
+      />
+      <ConfirmDialog
+        isOpen={showResetConfirm}
+        onClose={() => setShowResetConfirm(false)}
+        onConfirm={handleReset}
+        title={t('reset_settings.confirm_title')}
+        message={t('reset_settings.description')}
+        confirmText={t('reset_settings.button')}
+        variant="destructive"
+      />
+
+      <DebugSettings />
+    </div>
   );
 }

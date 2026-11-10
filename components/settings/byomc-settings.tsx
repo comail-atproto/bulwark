@@ -12,7 +12,7 @@ import {
   Plus,
   RefreshCw,
   Trash2,
-} from 'lucide-react';
+} from '@/components/icons';
 import { Button } from '@/components/ui/button';
 import { SettingsSection } from './settings-section';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
