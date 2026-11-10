@@ -1,0 +1,56 @@
+/* Match native theme skins to the logical sidebar classes without changing the upstream catalog. */
+body[data-theme-skin="builtin-roundcube-elastic"] .bg-secondary.border-e {
+  background-color: var(--color-background) !important;
+}
+
+body[data-theme-skin="builtin-roundcube-elastic"] .bg-secondary.border-e span.ms-2.flex-shrink-0.gap-1.items-baseline {
+  align-items: center !important;
+  justify-content: center;
+  min-width: 1.6rem;
+  height: 1.2rem;
+  padding: 0 0.45rem;
+  border-radius: 0.75rem;
+  background-color: #e4e8ea;
+}
+
+body[data-theme-skin="builtin-roundcube-elastic"] .bg-secondary.border-e span.ms-2.flex-shrink-0.gap-1.items-baseline > span.text-muted-foreground,
+body[data-theme-skin="builtin-roundcube-elastic"] .bg-secondary.border-e span.ms-2.flex-shrink-0.gap-1.items-baseline > span.text-muted-foreground\/60 {
+  display: none !important;
+}
+
+body[data-theme-skin="builtin-roundcube-elastic"] .bg-secondary.border-e span.ms-2.flex-shrink-0.gap-1.items-baseline > span {
+  color: #5e6b70 !important;
+  font-weight: 600 !important;
+}
+
+body[data-theme-skin="builtin-roundcube-elastic"] .bg-secondary.border-e span.ms-2.flex-shrink-0.gap-1.items-baseline:not(:has(span.font-semibold)) {
+  display: none !important;
+}
+
+.dark body[data-theme-skin="builtin-roundcube-elastic"] .bg-secondary.border-e span.ms-2.flex-shrink-0.gap-1.items-baseline {
+  background-color: #3f4e55;
+}
+
+.dark body[data-theme-skin="builtin-roundcube-elastic"] .bg-secondary.border-e span.ms-2.flex-shrink-0.gap-1.items-baseline > span {
+  color: #c9d3d5 !important;
+}
+
+body[data-theme-skin="builtin-roundcube-elastic"] .bg-secondary.border-e .border-s-2.border-primary {
+  border-left-width: 3px !important;
+}
+
+body[data-theme-skin="builtin-aurora-glass"] .bg-secondary.border-e {
+  background-color: rgba(255, 255, 255, 0.55) !important;
+  backdrop-filter: blur(26px) saturate(180%);
+  -webkit-backdrop-filter: blur(26px) saturate(180%);
+  border-color: rgba(13, 18, 45, 0.08) !important;
+}
+
+.dark body[data-theme-skin="builtin-aurora-glass"] .bg-secondary.border-e {
+  background-color: rgba(8, 9, 22, 0.82) !important;
+  border-color: rgba(255, 255, 255, 0.07) !important;
+}
+
+body[data-theme-skin="builtin-aurora-glass"] .bg-secondary.border-e .border-s-2.border-primary {
+  border-left-width: 3px !important;
+}

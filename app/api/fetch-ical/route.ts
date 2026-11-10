@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { rejectCrossOriginRequest } from '@/lib/security/same-origin';
 import { getStalwartCredentials } from '@/lib/stalwart/credentials';
 import { DisallowedUrlError, fetchPublicUrl, type PublicFetchResponse } from '@/lib/security/url-guard';
+import { readBodyCapped } from '@/lib/security/capped-body';
 
 const DEFAULT_MAX_BYTES = 25 * 1024 * 1024; // 25MB
 // Base budget for a default-sized feed; scaled up with the configured cap so a
@@ -149,8 +150,12 @@ export async function POST(request: NextRequest) {
       return tooLarge(maxResponseSize);
     }
 
-    const buffer = await response.arrayBuffer();
-    if (buffer.byteLength > maxResponseSize) {
+    // Read up to the cap and no further: a chunked body with no
+    // Content-Length used to be buffered whole before it was measured, so a
+    // feed that streams for the whole timeout could take the process's
+    // memory with it.
+    const buffer = await readBodyCapped(response, maxResponseSize, controller);
+    if (!buffer) {
       return tooLarge(maxResponseSize);
     }
 

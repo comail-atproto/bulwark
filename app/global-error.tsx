@@ -1,5 +1,7 @@
 "use client";
 
+import { InboxRecovery } from "@/components/inbox-recovery";
+
 import { useEffect } from "react";
 import { AlertTriangle, RefreshCw } from "@/components/icons";
 import "./globals.css";
@@ -48,6 +50,7 @@ export default function GlobalError({
               <RefreshCw className="w-4 h-4 me-2" />
               Try again
             </button>
+            <InboxRecovery signOut />
           </div>
         </div>
       </body>
