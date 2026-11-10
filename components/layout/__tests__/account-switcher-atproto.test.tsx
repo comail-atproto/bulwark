@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { accountState, authState, routerPush } = vi.hoisted(() => ({
+const { accountState, authState, settingsState, routerPush } = vi.hoisted(() => ({
   accountState: {
     accounts: [] as Array<Record<string, unknown>>,
     setDefaultAccount: vi.fn(),
@@ -13,6 +13,7 @@ const { accountState, authState, routerPush } = vi.hoisted(() => ({
     logout: vi.fn(),
     logoutAll: vi.fn(),
   },
+  settingsState: { interfaceLayout: "default" },
   routerPush: vi.fn(),
 }));
 
@@ -28,8 +29,16 @@ vi.mock('@/stores/account-store', () => ({
 vi.mock('@/stores/auth-store', () => ({
   useAuthStore: (selector: (state: typeof authState) => unknown) => selector(authState),
 }));
-vi.mock('@/components/ui/avatar', () => ({
-  Avatar: ({ did }: { did?: string }) => <span data-testid="account-avatar" data-did={did} />,
+vi.mock('@/stores/settings-store', () => ({
+  useSettingsStore: (selector: (state: typeof settingsState) => unknown) => selector(settingsState),
+}));
+vi.mock('@/stores/email-store', () => ({
+  useEmailStore: (selector: (state: Record<string, unknown>) => unknown) =>
+    selector({ accountMailboxes: {}, mailboxes: [], quota: null }),
+}));
+vi.mock('@/components/layout/help-links', () => ({ HelpMenuItems: () => null }));
+vi.mock('@/components/ui/atproto-avatar', () => ({
+  AtprotoAvatar: ({ did }: { did?: string }) => <span data-testid="account-avatar" data-did={did} />,
 }));
 vi.mock('@/components/ui/atproto-handle', () => ({
   AtprotoHandle: ({ did }: { did?: string }) =>
@@ -61,6 +70,7 @@ describe('AccountSwitcher atproto identity', () => {
   beforeEach(() => {
     accountState.accounts = [ACCOUNT];
     authState.activeAccountId = ACCOUNT.id;
+    settingsState.interfaceLayout = "default";
   });
 
   it('passes the verified DID to the photo and handle in the trigger and dropdown row', () => {
@@ -77,9 +87,27 @@ describe('AccountSwitcher atproto identity', () => {
   });
 });
 
+describe('AccountSwitcher Mountain View atproto identity', () => {
+  beforeEach(() => {
+    accountState.accounts = [{ ...ACCOUNT, displayName: ACCOUNT.email }];
+    authState.activeAccountId = ACCOUNT.id;
+    settingsState.interfaceLayout = 'mountain-view';
+  });
+
+  it('keeps the verified handle and omits a duplicate email in the active account card', () => {
+    render(<AccountSwitcher variant="header" />);
+    fireEvent.click(screen.getByTestId('account-switcher'));
+
+    expect(screen.getByTestId('account-handle')).toHaveAttribute('data-did', DID);
+    expect(screen.getAllByText(ACCOUNT.email)).toHaveLength(1);
+    expect(screen.getAllByTestId('account-avatar').every((node) => node.getAttribute('data-did') === DID)).toBe(true);
+  });
+});
+
 describe('AccountSwitcher headline/email dedup', () => {
   beforeEach(() => {
     authState.activeAccountId = ACCOUNT.id;
+    settingsState.interfaceLayout = "default";
   });
 
   it('hides the duplicate email line in the expanded trigger when name equals email', () => {
