@@ -2,11 +2,30 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { useThemeStore } from './theme-store';
 import { useLocaleStore } from './locale-store';
+import { usePolicyStore } from './policy-store';
+import type { SettingsPolicy, SettingRestriction } from '@/lib/admin/types';
 import type { EmailTemplate } from '@/lib/template-types';
 import type { NotificationSoundChoice } from '@/lib/notification-sound';
+import { EMPTY_NOTIFICATION_MUTES, normalizeNotificationMutes, type NotificationMutes } from '@/lib/notification-mutes';
 import { apiFetch } from '@/lib/browser-navigation';
+import { writePushPreferences } from '@/lib/push-preferences';
+import { settingsHooks } from '@/lib/plugin-hooks';
 import { generateAccountId } from '@/lib/account-utils';
+import { subscriptionOwnerFor } from '@/lib/calendar-subscription-sync';
+import type { FolderCountMode } from '@/lib/folder-counts';
+import { DEFAULT_FILES_SETTINGS, normalizeFilesSettings, type FilesSettings } from '@/lib/files-settings';
 import { orderForMailbox, sanitizeSortLevels, type MessageListOrderScope, type SortLevel } from '@/lib/message-list-order';
+import { EMPTY_SIGNATURE_DETAILS, sanitizeSignatureDetails, type SignatureDetails } from '@/lib/org-signature';
+import {
+  ACCESSIBILITY_DEFAULTS,
+  ACCESSIBILITY_KEYS,
+  UNLOCKABLE_SETTING_KEYS,
+  applyAccessibilityTo,
+  isAllowedAccessibilityValue,
+  toastDurationAtLeast,
+  type AccessibilitySettings,
+  type FontSize,
+} from '@/lib/accessibility-settings';
 import {
   DEFAULT_SUB_ADDRESS_DELIMITER,
   isValidSubAddressDelimiter,
@@ -48,7 +67,25 @@ let blockedSyncAccountId: string | null = null;
 // device settings and the first sign-in adopts them.
 const SETTINGS_OWNER_KEY = 'settings-sync-owner';
 
-function readSettingsOwner(): string | null {
+// Accounts whose settings load from the server has finished (with or
+// without a copy) since this page loaded.
+const settledLoads = new Set<string>();
+
+/** Whether this account's settings load has finished in this page. */
+export function isSettingsLoadSettled(accountId: string): boolean {
+  return settledLoads.has(accountId);
+}
+
+const settledListeners = new Set<(accountId: string) => void>();
+
+/** Called whenever an account's settings load finishes (with or without a copy). */
+export function onSettingsLoadSettled(listener: (accountId: string) => void): () => void {
+  settledListeners.add(listener);
+  return () => settledListeners.delete(listener);
+}
+
+/** The account whose server copy the local settings (and template list) mirror; null if none. */
+export function readSettingsOwner(): string | null {
   try {
     return typeof window === 'undefined' ? null : window.localStorage.getItem(SETTINGS_OWNER_KEY);
   } catch {
@@ -81,14 +118,21 @@ interface SettingsSyncJob {
 // bindings uninitialized depending on which module loads first. Instead,
 // template-store registers itself here during its own module init.
 interface TemplateSyncBridge {
-  getSyncedState: () => {
+  /**
+   * The templates of the account `accountId` (the one being synced, or the
+   * active one). `storedInAccount`: they live in the account's own server
+   * storage (JMAP metadata, Stalwart 1.0), so a sync push leaves them out
+   * and the stored blob drops them (`templatesInMetadata`).
+   */
+  getSyncedState: (opts?: { accountId?: string }) => {
     templates: EmailTemplate[];
     deletedTemplateIds: Record<string, string>;
+    storedInAccount?: boolean;
   };
   applySyncedState: (
     templates: unknown,
     deletedTemplateIds: unknown,
-    opts: { merge: boolean }
+    opts: { merge: boolean; accountId?: string }
   ) => void;
 }
 
@@ -121,13 +165,41 @@ function templateStateKey(templates: unknown, deletedTemplateIds: unknown): stri
  * Whether the local template state differs from what a server blob carries,
  * so the blob needs a push. False when there is nothing local to push.
  */
-function localTemplatesAhead(serverSettings: Record<string, unknown> | null): boolean {
-  const local = templateSyncBridge?.getSyncedState();
+function localTemplatesAhead(serverSettings: Record<string, unknown> | null, accountId?: string): boolean {
+  const local = templateSyncBridge?.getSyncedState({ accountId });
   if (!local) return false;
+  // Templates kept in the account leave the blob: push once to drop them.
+  if (local.storedInAccount) return !!serverSettings && Array.isArray(serverSettings.templates);
   if (local.templates.length === 0 && Object.keys(local.deletedTemplateIds).length === 0) return false;
   if (!serverSettings) return true;
   return templateStateKey(local.templates, local.deletedTemplateIds) !==
     templateStateKey(serverSettings.templates, serverSettings.deletedTemplateIds);
+}
+
+// --- Calendar subscription sync bridge ---------------------------------------
+// iCal subscriptions ride along in the synced settings blob to avoid turning
+// into writable/lost calendars on browser cache clear or new devices.
+interface CalendarSubscriptionSyncBridge {
+  getSyncedState: () => {
+    icalSubscriptions: Array<{ owner?: string }>;
+    deletedSubscriptionIds: Record<string, string>;
+  };
+  applySyncedState: (
+    subscriptions: unknown,
+    deletedSubscriptionIds: unknown,
+    opts: { merge: boolean; owner?: string }
+  ) => void;
+}
+
+let calendarSubscriptionSyncBridge: CalendarSubscriptionSyncBridge | null = null;
+let onCalendarSubscriptionStoreChange: (() => void) | null = null;
+
+export function registerCalendarSubscriptionSyncBridge(
+  bridge: CalendarSubscriptionSyncBridge,
+  subscribe: (listener: () => void) => void
+): void {
+  calendarSubscriptionSyncBridge = bridge;
+  subscribe(() => onCalendarSubscriptionStoreChange?.());
 }
 
 async function syncSettingsJob(job: SettingsSyncJob, retries = 1): Promise<void> {
@@ -153,19 +225,68 @@ async function syncSettingsJob(job: SettingsSyncJob, retries = 1): Promise<void>
     syncError('Settings sync failed:', body.error || `status ${res.status}`);
   } else {
     syncLog('Settings synced to server successfully');
+    void settingsHooks.onSettingsSync.emit({ direction: 'pushed' });
   }
 }
 
-export type FontSize = 'small' | 'medium' | 'large';
+/**
+ * Keys the app writes for its own bookkeeping rather than because the user
+ * changed a preference. Plugins are neither asked nor told about these: a
+ * plugin vetoing "the welcome banner was dismissed" would leave the banner
+ * stuck, and reporting it as a preference change is noise.
+ *
+ * How the line is drawn: a key belongs here when only the app writes it (a
+ * dismissed banner, a finished tour) and Settings shows no control for it.
+ * Everything else set through updateSetting is a user preference. When the
+ * app itself writes a user-facing key (a one-time migration, a default
+ * resolved on first connect), the caller passes `{ internal: true }`.
+ * Imports, resets and server loads have their own hooks (onSettingsImport,
+ * onSettingsReset, onSettingsSync) and do not fire per-key ones.
+ */
+const BOOKKEEPING_SETTING_KEYS = new Set<string>(['onboardingCompleted', 'tourCompleted']);
+
+/**
+ * Runs a user's change to one preference through the plugin hooks: asks
+ * onBeforeSettingChange first (false keeps the old value), applies it, then
+ * tells onSettingChange. With no interceptor registered the change applies
+ * synchronously, so inputs bound to the store keep behaving as before.
+ */
+function changePreference(key: string, value: unknown, previous: unknown, apply: () => void): void {
+  const commit = () => {
+    apply();
+    void settingsHooks.onSettingChange.emit({ key, value, previous });
+  };
+  if (settingsHooks.onBeforeSettingChange.size === 0) {
+    commit();
+    return;
+  }
+  void settingsHooks.onBeforeSettingChange.intercept({ key, value, previous }).then((allowed) => {
+    if (allowed) commit();
+  });
+}
+
+function toKeywordViews(keywords: KeywordDefinition[]): { id: string; name: string; color: string }[] {
+  return keywords.map((k) => ({ id: k.id, name: k.label, color: k.color }));
+}
+
+export type { FontSize } from '@/lib/accessibility-settings';
 export type Density = 'extra-compact' | 'compact' | 'regular' | 'comfortable';
-/** @deprecated Use Density instead */
-export type ListDensity = Density;
+/**
+ * Which interface layout drives the shell's geometry. `default` is the app's
+ * own layout; `mountain-view` is an optional alternative arrangement of the
+ * chrome (search-first top bar, flat 256px navigation rail, pill Compose,
+ * docked compose window) that keeps the theme's icons, type and palette.
+ */
+export type InterfaceLayout = 'default' | 'mountain-view';
+// Mountain View's inbox: Gmail's "Default" or "Unread first" (lib/unread-first.ts).
+export type MvInboxType = 'default' | 'unread-first';
 export type DeleteAction = 'trash' | 'trash-and-read' | 'permanent';
 export type ReplyMode = 'reply' | 'replyAll';
 export type SignaturePosition = 'above_quote' | 'below_quote';
 export type ReplyIdentityMatch = 'exact' | 'domain';
 /** How to handle an incoming Disposition-Notification-To (read-receipt) request. */
 export type ReadReceiptResponse = 'ask' | 'always' | 'never';
+export type MentionAddsRecipientTo = 'to' | 'cc' | 'off';
 export type DateFormat = 'smart' | 'relative' | 'full';
 /**
  * Regional ordering of numeric dates, independent of the `DateFormat` style.
@@ -185,6 +306,25 @@ export type AttachmentPosition = 'beside-sender' | 'below-header';
 export type ToolbarPosition = 'top' | 'below-subject';
 export type ArchiveMode = 'single' | 'year' | 'month';
 export type MailLayout = 'split' | 'focus' | 'horizontal';
+
+/**
+ * The mail layout the mail view actually uses.
+ *
+ * Mountain View shows the list at full width and opens a conversation in its
+ * place, which is the `focus` layout. Rather than writing `focus` into the
+ * user's saved `mailLayout`, the layout in force is derived: `focus` under
+ * Mountain View, the saved value otherwise. Switching back to the default
+ * layout therefore restores whatever the user had chosen.
+ *
+ * Read the layout through this (or `useEffectiveMailLayout`) wherever it
+ * decides what is drawn; read `mailLayout` itself only where the saved
+ * preference is being shown or edited.
+ */
+export function effectiveMailLayout(mailLayout: MailLayout, interfaceLayout: InterfaceLayout, simpleMode = false): MailLayout {
+  // Simple mode (Settings > Accessibility) is one column: the list, then the
+  // message in its place.
+  return interfaceLayout === 'mountain-view' || simpleMode ? 'focus' : mailLayout;
+}
 
 /**
  * Spacing around a message body in the reader.
@@ -207,6 +347,23 @@ export type ProtocolOpenMode = 'active-session' | 'new-tab';
  * import.
  */
 const DEVICE_LOCAL_SETTING_KEYS = new Set<string>(['proInterface']);
+
+/**
+ * Settings that shape views spanning every logged-in account. They are synced
+ * with the active account's settings like everything else, but once a device
+ * holds several logins they are that device's choice: switching to another
+ * account must not turn the merged mailbox off just because that account's
+ * stored settings predate it. A first login on a device still takes them from
+ * the server.
+ */
+const CROSS_ACCOUNT_VIEW_KEYS = new Set<string>([
+  'enableUnifiedMailbox',
+  'includeGroupInUnified',
+  'unifiedCrossAccount',
+  'enableCrossUnreadView',
+  'enableCrossStarredView',
+  'enableCrossAllView',
+]);
 
 export type HoverAction = 'delete' | 'star' | 'markRead' | 'archive' | 'tag' | 'spam';
 /** Action fired by a mobile list-row swipe. 'none' disables that direction. */
@@ -244,6 +401,7 @@ export interface KeywordDefinition {
   label: string;  // Display name
   color: string;  // Key from KEYWORD_PALETTE
   visibility?: KeywordVisibility; // Absent on tags stored before this was configurable
+  addedBy?: string; // Id of the plugin that added it with keywords.add; only that plugin may update or remove it
 }
 
 /** Resolves the sidebar visibility of a tag, defaulting to always shown. */
@@ -265,7 +423,11 @@ export interface KeywordColor {
   dot: string;
   /** The same solid colour as `dot`, for glyphs that take a text colour. */
   icon: string;
-  /** Lozenge background. */
+  /**
+   * Lozenge background. Opaque (tag-fill-*, app/globals.css) wherever `text`
+   * is a hue: a see-through fill takes on the row's colour, and the text's
+   * contrast with it.
+   */
   fill: string;
   /** Lozenge border. */
   border: string;
@@ -287,47 +449,47 @@ export interface KeywordColor {
  */
 export const KEYWORD_PALETTE: Record<string, KeywordColor> = {
   // light
-  'red-light': { dot: 'bg-red-300', icon: 'text-red-300', fill: 'bg-red-300/10', border: 'border-red-300/30', text: 'text-red-600 dark:text-red-200', rowTint: 'bg-red-50/60 dark:bg-red-950/20' },
-  'orange-light': { dot: 'bg-orange-300', icon: 'text-orange-300', fill: 'bg-orange-300/10', border: 'border-orange-300/30', text: 'text-orange-600 dark:text-orange-200', rowTint: 'bg-orange-50/60 dark:bg-orange-950/20' },
-  'amber-light': { dot: 'bg-amber-300', icon: 'text-amber-300', fill: 'bg-amber-300/10', border: 'border-amber-300/30', text: 'text-amber-600 dark:text-amber-200', rowTint: 'bg-amber-50/60 dark:bg-amber-950/20' },
-  'yellow-light': { dot: 'bg-yellow-300', icon: 'text-yellow-300', fill: 'bg-yellow-300/10', border: 'border-yellow-300/30', text: 'text-yellow-600 dark:text-yellow-200', rowTint: 'bg-yellow-50/60 dark:bg-yellow-950/20' },
-  'lime-light': { dot: 'bg-lime-300', icon: 'text-lime-300', fill: 'bg-lime-300/10', border: 'border-lime-300/30', text: 'text-lime-600 dark:text-lime-200', rowTint: 'bg-lime-50/60 dark:bg-lime-950/20' },
-  'green-light': { dot: 'bg-green-300', icon: 'text-green-300', fill: 'bg-green-300/10', border: 'border-green-300/30', text: 'text-green-600 dark:text-green-200', rowTint: 'bg-green-50/60 dark:bg-green-950/20' },
-  'teal-light': { dot: 'bg-teal-300', icon: 'text-teal-300', fill: 'bg-teal-300/10', border: 'border-teal-300/30', text: 'text-teal-600 dark:text-teal-200', rowTint: 'bg-teal-50/60 dark:bg-teal-950/20' },
-  'cyan-light': { dot: 'bg-cyan-300', icon: 'text-cyan-300', fill: 'bg-cyan-300/10', border: 'border-cyan-300/30', text: 'text-cyan-600 dark:text-cyan-200', rowTint: 'bg-cyan-50/60 dark:bg-cyan-950/20' },
-  'blue-light': { dot: 'bg-blue-300', icon: 'text-blue-300', fill: 'bg-blue-300/10', border: 'border-blue-300/30', text: 'text-blue-600 dark:text-blue-200', rowTint: 'bg-blue-50/60 dark:bg-blue-950/20' },
-  'indigo-light': { dot: 'bg-indigo-300', icon: 'text-indigo-300', fill: 'bg-indigo-300/10', border: 'border-indigo-300/30', text: 'text-indigo-600 dark:text-indigo-200', rowTint: 'bg-indigo-50/60 dark:bg-indigo-950/20' },
-  'purple-light': { dot: 'bg-purple-300', icon: 'text-purple-300', fill: 'bg-purple-300/10', border: 'border-purple-300/30', text: 'text-purple-600 dark:text-purple-200', rowTint: 'bg-purple-50/60 dark:bg-purple-950/20' },
-  'pink-light': { dot: 'bg-pink-300', icon: 'text-pink-300', fill: 'bg-pink-300/10', border: 'border-pink-300/30', text: 'text-pink-600 dark:text-pink-200', rowTint: 'bg-pink-50/60 dark:bg-pink-950/20' },
-  'gray-light': { dot: 'bg-gray-300', icon: 'text-gray-300', fill: 'bg-gray-300/10', border: 'border-gray-300/30', text: 'text-gray-600 dark:text-gray-200', rowTint: 'bg-gray-50/60 dark:bg-gray-950/20' },
+  'red-light': { dot: 'bg-red-300', icon: 'text-red-300', fill: 'tag-fill-red-300', border: 'border-red-300/30', text: 'text-red-600 dark:text-red-200', rowTint: 'bg-red-50/60 dark:bg-red-950/20' },
+  'orange-light': { dot: 'bg-orange-300', icon: 'text-orange-300', fill: 'tag-fill-orange-300', border: 'border-orange-300/30', text: 'text-orange-600 dark:text-orange-200', rowTint: 'bg-orange-50/60 dark:bg-orange-950/20' },
+  'amber-light': { dot: 'bg-amber-300', icon: 'text-amber-300', fill: 'tag-fill-amber-300', border: 'border-amber-300/30', text: 'text-amber-600 dark:text-amber-200', rowTint: 'bg-amber-50/60 dark:bg-amber-950/20' },
+  'yellow-light': { dot: 'bg-yellow-300', icon: 'text-yellow-300', fill: 'tag-fill-yellow-300', border: 'border-yellow-300/30', text: 'text-yellow-600 dark:text-yellow-200', rowTint: 'bg-yellow-50/60 dark:bg-yellow-950/20' },
+  'lime-light': { dot: 'bg-lime-300', icon: 'text-lime-300', fill: 'tag-fill-lime-300', border: 'border-lime-300/30', text: 'text-lime-600 dark:text-lime-200', rowTint: 'bg-lime-50/60 dark:bg-lime-950/20' },
+  'green-light': { dot: 'bg-green-300', icon: 'text-green-300', fill: 'tag-fill-green-300', border: 'border-green-300/30', text: 'text-green-600 dark:text-green-200', rowTint: 'bg-green-50/60 dark:bg-green-950/20' },
+  'teal-light': { dot: 'bg-teal-300', icon: 'text-teal-300', fill: 'tag-fill-teal-300', border: 'border-teal-300/30', text: 'text-teal-600 dark:text-teal-200', rowTint: 'bg-teal-50/60 dark:bg-teal-950/20' },
+  'cyan-light': { dot: 'bg-cyan-300', icon: 'text-cyan-300', fill: 'tag-fill-cyan-300', border: 'border-cyan-300/30', text: 'text-cyan-600 dark:text-cyan-200', rowTint: 'bg-cyan-50/60 dark:bg-cyan-950/20' },
+  'blue-light': { dot: 'bg-blue-300', icon: 'text-blue-300', fill: 'tag-fill-blue-300', border: 'border-blue-300/30', text: 'text-blue-600 dark:text-blue-200', rowTint: 'bg-blue-50/60 dark:bg-blue-950/20' },
+  'indigo-light': { dot: 'bg-indigo-300', icon: 'text-indigo-300', fill: 'tag-fill-indigo-300', border: 'border-indigo-300/30', text: 'text-indigo-600 dark:text-indigo-200', rowTint: 'bg-indigo-50/60 dark:bg-indigo-950/20' },
+  'purple-light': { dot: 'bg-purple-300', icon: 'text-purple-300', fill: 'tag-fill-purple-300', border: 'border-purple-300/30', text: 'text-purple-600 dark:text-purple-200', rowTint: 'bg-purple-50/60 dark:bg-purple-950/20' },
+  'pink-light': { dot: 'bg-pink-300', icon: 'text-pink-300', fill: 'tag-fill-pink-300', border: 'border-pink-300/30', text: 'text-pink-600 dark:text-pink-200', rowTint: 'bg-pink-50/60 dark:bg-pink-950/20' },
+  'gray-light': { dot: 'bg-gray-300', icon: 'text-gray-300', fill: 'tag-fill-gray-300', border: 'border-gray-300/30', text: 'text-gray-600 dark:text-gray-200', rowTint: 'bg-gray-50/60 dark:bg-gray-950/20' },
   // base
-  red: { dot: 'bg-red-500', icon: 'text-red-500', fill: 'bg-red-500/10', border: 'border-red-500/30', text: 'text-red-700 dark:text-red-300', rowTint: 'bg-red-50 dark:bg-red-950/30' },
-  orange: { dot: 'bg-orange-500', icon: 'text-orange-500', fill: 'bg-orange-500/10', border: 'border-orange-500/30', text: 'text-orange-700 dark:text-orange-300', rowTint: 'bg-orange-50 dark:bg-orange-950/30' },
-  amber: { dot: 'bg-amber-500', icon: 'text-amber-500', fill: 'bg-amber-500/10', border: 'border-amber-500/30', text: 'text-amber-700 dark:text-amber-300', rowTint: 'bg-amber-50 dark:bg-amber-950/30' },
-  yellow: { dot: 'bg-yellow-500', icon: 'text-yellow-500', fill: 'bg-yellow-500/10', border: 'border-yellow-500/30', text: 'text-yellow-700 dark:text-yellow-300', rowTint: 'bg-yellow-50 dark:bg-yellow-950/30' },
-  lime: { dot: 'bg-lime-500', icon: 'text-lime-500', fill: 'bg-lime-500/10', border: 'border-lime-500/30', text: 'text-lime-700 dark:text-lime-300', rowTint: 'bg-lime-50 dark:bg-lime-950/30' },
-  green: { dot: 'bg-green-500', icon: 'text-green-500', fill: 'bg-green-500/10', border: 'border-green-500/30', text: 'text-green-700 dark:text-green-300', rowTint: 'bg-green-50 dark:bg-green-950/30' },
-  teal: { dot: 'bg-teal-500', icon: 'text-teal-500', fill: 'bg-teal-500/10', border: 'border-teal-500/30', text: 'text-teal-700 dark:text-teal-300', rowTint: 'bg-teal-50 dark:bg-teal-950/30' },
-  cyan: { dot: 'bg-cyan-500', icon: 'text-cyan-500', fill: 'bg-cyan-500/10', border: 'border-cyan-500/30', text: 'text-cyan-700 dark:text-cyan-300', rowTint: 'bg-cyan-50 dark:bg-cyan-950/30' },
-  blue: { dot: 'bg-blue-500', icon: 'text-blue-500', fill: 'bg-blue-500/10', border: 'border-blue-500/30', text: 'text-blue-700 dark:text-blue-300', rowTint: 'bg-blue-50 dark:bg-blue-950/30' },
-  indigo: { dot: 'bg-indigo-500', icon: 'text-indigo-500', fill: 'bg-indigo-500/10', border: 'border-indigo-500/30', text: 'text-indigo-700 dark:text-indigo-300', rowTint: 'bg-indigo-50 dark:bg-indigo-950/30' },
-  purple: { dot: 'bg-purple-500', icon: 'text-purple-500', fill: 'bg-purple-500/10', border: 'border-purple-500/30', text: 'text-purple-700 dark:text-purple-300', rowTint: 'bg-purple-50 dark:bg-purple-950/30' },
-  pink: { dot: 'bg-pink-500', icon: 'text-pink-500', fill: 'bg-pink-500/10', border: 'border-pink-500/30', text: 'text-pink-700 dark:text-pink-300', rowTint: 'bg-pink-50 dark:bg-pink-950/30' },
-  gray: { dot: 'bg-gray-500', icon: 'text-gray-500', fill: 'bg-gray-500/10', border: 'border-gray-500/30', text: 'text-gray-700 dark:text-gray-300', rowTint: 'bg-gray-50 dark:bg-gray-950/30' },
+  red: { dot: 'bg-red-500', icon: 'text-red-500', fill: 'tag-fill-red-500', border: 'border-red-500/30', text: 'text-red-700 dark:text-red-300', rowTint: 'bg-red-50 dark:bg-red-950/30' },
+  orange: { dot: 'bg-orange-500', icon: 'text-orange-500', fill: 'tag-fill-orange-500', border: 'border-orange-500/30', text: 'text-orange-700 dark:text-orange-300', rowTint: 'bg-orange-50 dark:bg-orange-950/30' },
+  amber: { dot: 'bg-amber-500', icon: 'text-amber-500', fill: 'tag-fill-amber-500', border: 'border-amber-500/30', text: 'text-amber-700 dark:text-amber-300', rowTint: 'bg-amber-50 dark:bg-amber-950/30' },
+  yellow: { dot: 'bg-yellow-500', icon: 'text-yellow-500', fill: 'tag-fill-yellow-500', border: 'border-yellow-500/30', text: 'text-yellow-700 dark:text-yellow-300', rowTint: 'bg-yellow-50 dark:bg-yellow-950/30' },
+  lime: { dot: 'bg-lime-500', icon: 'text-lime-500', fill: 'tag-fill-lime-500', border: 'border-lime-500/30', text: 'text-lime-700 dark:text-lime-300', rowTint: 'bg-lime-50 dark:bg-lime-950/30' },
+  green: { dot: 'bg-green-500', icon: 'text-green-500', fill: 'tag-fill-green-500', border: 'border-green-500/30', text: 'text-green-700 dark:text-green-300', rowTint: 'bg-green-50 dark:bg-green-950/30' },
+  teal: { dot: 'bg-teal-500', icon: 'text-teal-500', fill: 'tag-fill-teal-500', border: 'border-teal-500/30', text: 'text-teal-700 dark:text-teal-300', rowTint: 'bg-teal-50 dark:bg-teal-950/30' },
+  cyan: { dot: 'bg-cyan-500', icon: 'text-cyan-500', fill: 'tag-fill-cyan-500', border: 'border-cyan-500/30', text: 'text-cyan-700 dark:text-cyan-300', rowTint: 'bg-cyan-50 dark:bg-cyan-950/30' },
+  blue: { dot: 'bg-blue-500', icon: 'text-blue-500', fill: 'tag-fill-blue-500', border: 'border-blue-500/30', text: 'text-blue-700 dark:text-blue-300', rowTint: 'bg-blue-50 dark:bg-blue-950/30' },
+  indigo: { dot: 'bg-indigo-500', icon: 'text-indigo-500', fill: 'tag-fill-indigo-500', border: 'border-indigo-500/30', text: 'text-indigo-700 dark:text-indigo-300', rowTint: 'bg-indigo-50 dark:bg-indigo-950/30' },
+  purple: { dot: 'bg-purple-500', icon: 'text-purple-500', fill: 'tag-fill-purple-500', border: 'border-purple-500/30', text: 'text-purple-700 dark:text-purple-300', rowTint: 'bg-purple-50 dark:bg-purple-950/30' },
+  pink: { dot: 'bg-pink-500', icon: 'text-pink-500', fill: 'tag-fill-pink-500', border: 'border-pink-500/30', text: 'text-pink-700 dark:text-pink-300', rowTint: 'bg-pink-50 dark:bg-pink-950/30' },
+  gray: { dot: 'bg-gray-500', icon: 'text-gray-500', fill: 'tag-fill-gray-500', border: 'border-gray-500/30', text: 'text-gray-700 dark:text-gray-300', rowTint: 'bg-gray-50 dark:bg-gray-950/30' },
   // dark
-  'red-dark': { dot: 'bg-red-700', icon: 'text-red-700', fill: 'bg-red-700/10', border: 'border-red-700/30', text: 'text-red-800 dark:text-red-400', rowTint: 'bg-red-100 dark:bg-red-950/50' },
-  'orange-dark': { dot: 'bg-orange-700', icon: 'text-orange-700', fill: 'bg-orange-700/10', border: 'border-orange-700/30', text: 'text-orange-800 dark:text-orange-400', rowTint: 'bg-orange-100 dark:bg-orange-950/50' },
-  'amber-dark': { dot: 'bg-amber-700', icon: 'text-amber-700', fill: 'bg-amber-700/10', border: 'border-amber-700/30', text: 'text-amber-800 dark:text-amber-400', rowTint: 'bg-amber-100 dark:bg-amber-950/50' },
-  'yellow-dark': { dot: 'bg-yellow-700', icon: 'text-yellow-700', fill: 'bg-yellow-700/10', border: 'border-yellow-700/30', text: 'text-yellow-800 dark:text-yellow-400', rowTint: 'bg-yellow-100 dark:bg-yellow-950/50' },
-  'lime-dark': { dot: 'bg-lime-700', icon: 'text-lime-700', fill: 'bg-lime-700/10', border: 'border-lime-700/30', text: 'text-lime-800 dark:text-lime-400', rowTint: 'bg-lime-100 dark:bg-lime-950/50' },
-  'green-dark': { dot: 'bg-green-700', icon: 'text-green-700', fill: 'bg-green-700/10', border: 'border-green-700/30', text: 'text-green-800 dark:text-green-400', rowTint: 'bg-green-100 dark:bg-green-950/50' },
-  'teal-dark': { dot: 'bg-teal-700', icon: 'text-teal-700', fill: 'bg-teal-700/10', border: 'border-teal-700/30', text: 'text-teal-800 dark:text-teal-400', rowTint: 'bg-teal-100 dark:bg-teal-950/50' },
-  'cyan-dark': { dot: 'bg-cyan-700', icon: 'text-cyan-700', fill: 'bg-cyan-700/10', border: 'border-cyan-700/30', text: 'text-cyan-800 dark:text-cyan-400', rowTint: 'bg-cyan-100 dark:bg-cyan-950/50' },
-  'blue-dark': { dot: 'bg-blue-700', icon: 'text-blue-700', fill: 'bg-blue-700/10', border: 'border-blue-700/30', text: 'text-blue-800 dark:text-blue-400', rowTint: 'bg-blue-100 dark:bg-blue-950/50' },
-  'indigo-dark': { dot: 'bg-indigo-700', icon: 'text-indigo-700', fill: 'bg-indigo-700/10', border: 'border-indigo-700/30', text: 'text-indigo-800 dark:text-indigo-400', rowTint: 'bg-indigo-100 dark:bg-indigo-950/50' },
-  'purple-dark': { dot: 'bg-purple-700', icon: 'text-purple-700', fill: 'bg-purple-700/10', border: 'border-purple-700/30', text: 'text-purple-800 dark:text-purple-400', rowTint: 'bg-purple-100 dark:bg-purple-950/50' },
-  'pink-dark': { dot: 'bg-pink-700', icon: 'text-pink-700', fill: 'bg-pink-700/10', border: 'border-pink-700/30', text: 'text-pink-800 dark:text-pink-400', rowTint: 'bg-pink-100 dark:bg-pink-950/50' },
-  'gray-dark': { dot: 'bg-gray-700', icon: 'text-gray-700', fill: 'bg-gray-700/10', border: 'border-gray-700/30', text: 'text-gray-800 dark:text-gray-400', rowTint: 'bg-gray-100 dark:bg-gray-950/50' },
+  'red-dark': { dot: 'bg-red-700', icon: 'text-red-700', fill: 'tag-fill-red-700', border: 'border-red-700/30', text: 'text-red-800 dark:text-red-400', rowTint: 'bg-red-100 dark:bg-red-950/50' },
+  'orange-dark': { dot: 'bg-orange-700', icon: 'text-orange-700', fill: 'tag-fill-orange-700', border: 'border-orange-700/30', text: 'text-orange-800 dark:text-orange-400', rowTint: 'bg-orange-100 dark:bg-orange-950/50' },
+  'amber-dark': { dot: 'bg-amber-700', icon: 'text-amber-700', fill: 'tag-fill-amber-700', border: 'border-amber-700/30', text: 'text-amber-800 dark:text-amber-400', rowTint: 'bg-amber-100 dark:bg-amber-950/50' },
+  'yellow-dark': { dot: 'bg-yellow-700', icon: 'text-yellow-700', fill: 'tag-fill-yellow-700', border: 'border-yellow-700/30', text: 'text-yellow-800 dark:text-yellow-400', rowTint: 'bg-yellow-100 dark:bg-yellow-950/50' },
+  'lime-dark': { dot: 'bg-lime-700', icon: 'text-lime-700', fill: 'tag-fill-lime-700', border: 'border-lime-700/30', text: 'text-lime-800 dark:text-lime-400', rowTint: 'bg-lime-100 dark:bg-lime-950/50' },
+  'green-dark': { dot: 'bg-green-700', icon: 'text-green-700', fill: 'tag-fill-green-700', border: 'border-green-700/30', text: 'text-green-800 dark:text-green-400', rowTint: 'bg-green-100 dark:bg-green-950/50' },
+  'teal-dark': { dot: 'bg-teal-700', icon: 'text-teal-700', fill: 'tag-fill-teal-700', border: 'border-teal-700/30', text: 'text-teal-800 dark:text-teal-400', rowTint: 'bg-teal-100 dark:bg-teal-950/50' },
+  'cyan-dark': { dot: 'bg-cyan-700', icon: 'text-cyan-700', fill: 'tag-fill-cyan-700', border: 'border-cyan-700/30', text: 'text-cyan-800 dark:text-cyan-400', rowTint: 'bg-cyan-100 dark:bg-cyan-950/50' },
+  'blue-dark': { dot: 'bg-blue-700', icon: 'text-blue-700', fill: 'tag-fill-blue-700', border: 'border-blue-700/30', text: 'text-blue-800 dark:text-blue-400', rowTint: 'bg-blue-100 dark:bg-blue-950/50' },
+  'indigo-dark': { dot: 'bg-indigo-700', icon: 'text-indigo-700', fill: 'tag-fill-indigo-700', border: 'border-indigo-700/30', text: 'text-indigo-800 dark:text-indigo-400', rowTint: 'bg-indigo-100 dark:bg-indigo-950/50' },
+  'purple-dark': { dot: 'bg-purple-700', icon: 'text-purple-700', fill: 'tag-fill-purple-700', border: 'border-purple-700/30', text: 'text-purple-800 dark:text-purple-400', rowTint: 'bg-purple-100 dark:bg-purple-950/50' },
+  'pink-dark': { dot: 'bg-pink-700', icon: 'text-pink-700', fill: 'tag-fill-pink-700', border: 'border-pink-700/30', text: 'text-pink-800 dark:text-pink-400', rowTint: 'bg-pink-100 dark:bg-pink-950/50' },
+  'gray-dark': { dot: 'bg-gray-700', icon: 'text-gray-700', fill: 'tag-fill-gray-700', border: 'border-gray-700/30', text: 'text-gray-800 dark:text-gray-400', rowTint: 'bg-gray-100 dark:bg-gray-950/50' },
 } as const;
 
 /** Palette laid out as the settings picker shows it: lighter, base, darker. */
@@ -361,11 +523,15 @@ export const DEV_KEYWORDS: KeywordDefinition[] = [
 
 const USING_MOCK_SERVER = process.env.NEXT_PUBLIC_DEV_MOCK_JMAP === 'true';
 
-interface SettingsState {
+interface SettingsState extends AccessibilitySettings {
   // Appearance
   fontSize: FontSize;
   density: Density;
-  animationsEnabled: boolean;
+  interfaceLayout: InterfaceLayout;
+  mvInboxType: MvInboxType;
+  // The folded sections of the "Unread first" inbox; per device.
+  mvUnreadSectionCollapsed: boolean;
+  mvEverythingElseCollapsed: boolean;
   // Message-list ordering (#718): prioritised sort levels mapped onto the JMAP
   // Email/query sort; empty = chronological. Scope: Inbox only or every folder.
   messageListOrder: SortLevel[];
@@ -382,11 +548,13 @@ interface SettingsState {
   markAsReadDelay: number; // milliseconds (0 = instant, -1 = never)
   deleteAction: DeleteAction;
   permanentlyDeleteJunk: boolean; // Permanently delete emails from junk/spam instead of moving to trash
-  returnToListAfterAction: boolean; // After delete / mark-unread in an open message, return to the list instead of opening the next message
+  confirmBulkDelete: boolean; // Ask before moving several selected emails to Trash (permanent deletes always ask)
+  returnToListAfterAction: boolean; // After delete / archive / move / spam / mark-unread in an open message, return to the list instead of opening the next message
   clearSearchOnFolderChange: boolean; // Reset the search query + advanced filters when switching folders, instead of re-running the search in the newly selected folder (#553 keeps it applied when this is off)
   showPreview: boolean;
   showVerificationCodes: boolean; // Offer the one-time code of a sign-in mail as a copy chip in the list and the reader
   mailLayout: MailLayout;
+  listColumns: boolean; // One-line list rows as a table: From, Subject, Date and Size columns under a header (#262)
   emailsPerPage: number;
   externalContentPolicy: ExternalContentPolicy;
   messageSpacing: MessageSpacing; // Gutter around the message body in the reader
@@ -404,6 +572,7 @@ interface SettingsState {
   // Composer
   autoSaveDraftInterval: number; // milliseconds
   sendConfirmation: boolean;
+  quickReplyEnabled: boolean;
   defaultReplyMode: ReplyMode;
   autoSelectReplyIdentity: boolean;
   replyIdentityMatch: ReplyIdentityMatch; // With autoSelectReplyIdentity on: 'exact' = configured identities only, 'domain' = also same-domain catch-all addresses (rewrites From) #1000
@@ -413,6 +582,7 @@ interface SettingsState {
   sendDelaySeconds: SendDelaySeconds;
   signaturePosition: SignaturePosition; // Position of the signature relative to quoted text in replies/forwards
   signatureSeparatorEnabled: boolean; // Prefix the signature with the RFC 3676 "-- " delimiter
+  signatureDetails: SignatureDetails; // Title, department, phone, mobile for the organisation signature (lib/org-signature.ts)
   requestReadReceiptDefault: boolean; // Pre-check "request read receipt" in the composer
   readReceiptResponse: ReadReceiptResponse; // How to respond to incoming read-receipt requests
 
@@ -430,6 +600,8 @@ interface SettingsState {
 
   // Calendar
   showTimeInMonthView: boolean;
+  /** Events as a light tint of their colour with a bar at the start (the Outlook look), not solid blocks. */
+  calendarTintedEvents: boolean;
   showWeekNumbers: boolean;
   /** Scroll continuously through months/weeks/days (#759) instead of one period at a time. */
   calendarFreeScroll: boolean;
@@ -462,12 +634,17 @@ interface SettingsState {
   // family members sit together (#963).
   sortContactsByLastName: boolean;
 
+  // Files: view, sort and icons (Settings > Files)
+  filesSettings: FilesSettings;
+
   // Email Notifications
   emailNotificationsEnabled: boolean;
   emailNotificationSound: boolean;
   notificationSoundChoice: NotificationSoundChoice;
   /** Web Push only fires for mail that lands in the Inbox; Sieve-filed mail stays silent. */
   pushNotifyInboxOnly: boolean;
+  /** Accounts and folders that never notify (#1169); see lib/notification-mutes. */
+  notificationMutes: NotificationMutes;
   /** Chosen Web Push relay URL. Empty = the admin-configured default. */
   pushRelayUrl: string;
 
@@ -485,6 +662,9 @@ interface SettingsState {
   hideAccountSwitcher: boolean;
   showRailAccountList: boolean;
   proInterface: boolean;
+  // Settings marked `advanced` (power-user and integrator rows) stay hidden
+  // until this is on. Synced like the rest: it is a preference, not a device.
+  showAdvancedSettings: boolean;
 
   // Unified Mailbox
   enableUnifiedMailbox: boolean;
@@ -527,10 +707,19 @@ interface SettingsState {
   colorfulSidebarIcons: boolean; // Tint folder icons by role (inbox blue, junk red, etc.)
   tintListRowsByTag: boolean; // Tint mail-list rows by the first tag color
   tintListRowsByAccount: boolean; // In the unified view, tint rows by account colour instead of showing the account dot
+  showAccountDot: boolean; // In the unified view, show the account colour dot next to the sender
   showFolderTotalCount: boolean; // Show total message count next to folders/tags (alongside unread)
+  // Mail folders of shared (group/delegated) JMAP accounts in the sidebar.
+  // Turning it off hides every shared account's folders; their calendars,
+  // contacts and files stay. (#1228)
+  showSharedMailAccounts: boolean;
+  // Shared accounts whose mail folders are hidden one by one, keyed by
+  // AccountEntry.id -> JMAP accountIds, since those ids are per server.
+  hiddenSharedMailAccounts: Record<string, string[]>;
 
   // Folders
   folderIcons: Record<string, string>; // mailboxId -> icon name
+  folderCountModes: Record<string, FolderCountMode>; // mailboxId -> counter override (#982)
 
   // Keywords (labels/tags)
   emailKeywords: KeywordDefinition[];
@@ -543,8 +732,14 @@ interface SettingsState {
   // Ask for confirmation when sending a message with an empty subject
   emptySubjectWarningEnabled: boolean;
 
+  // Ask for confirmation when sending a message with unfilled placeholders
+  placeholderWarningEnabled: boolean;
+
   // "@" in the message body offers the recipients and inserts a first name
   recipientMentionsEnabled: boolean;
+  // Where an "@" puts a picked contact who isn't a recipient yet; 'off'
+  // offers the recipients only
+  mentionAddsRecipientTo: MentionAddsRecipientTo;
 
   // Hide inline images (images referenced by cid in the HTML body) from the
   // attachment list shown above the message body.
@@ -577,15 +772,37 @@ interface SettingsState {
   debugMode: boolean;
   debugCategories: Record<DebugCategory, boolean>;
   settingsSyncDisabled: boolean;
+  /**
+   * Keys the user changed themselves (#1248). An admin policy default
+   * (`policy.defaults`) only fills in settings that are not listed here, so a
+   * choice the user made survives the operator setting or changing a default.
+   * Synced with the rest of the settings.
+   */
+  explicitSettings: string[];
 
   // Actions
+  /**
+   * Changes one preference. Plugins may stop the change (onBeforeSettingChange)
+   * and are told about it afterwards (onSettingChange). Pass `internal: true`
+   * for writes the app makes on its own; those skip the plugin hooks.
+   */
   updateSetting: <K extends keyof SettingsState>(
     key: K,
-    value: SettingsState[K]
+    value: SettingsState[K],
+    opts?: { internal?: boolean }
   ) => void;
   resetToDefaults: () => void;
-  exportSettings: () => string;
-  importSettings: (json: string, opts?: { serverAccountId?: string }) => boolean;
+  /**
+   * Applies the admin policy (#1248): `policy.defaults` to every setting the
+   * user has not chosen, and a locked restriction's value to its setting
+   * whatever the user chose. Runs when the policy loads and after every
+   * import, reset and server load. With the `previous` policy, values it
+   * imposed and the current one no longer does go back to the default.
+   */
+  applyAdminPolicy: (previous?: SettingsPolicy) => void;
+  /** `forSync` builds the snapshot pushed to the server; it is not a user export. */
+  exportSettings: (opts?: { forSync?: boolean; subscriptionOwner?: string }) => string;
+  importSettings: (json: string, opts?: { serverAccountId?: string; keepCrossAccountViews?: boolean; subscriptionOwner?: string }) => boolean;
 
   // Folder icons
   setFolderIcon: (mailboxId: string, icon: string) => void;
@@ -631,7 +848,12 @@ const DEFAULT_SETTINGS = {
   // Appearance
   fontSize: 'medium' as FontSize,
   density: 'regular' as Density,
-  animationsEnabled: true,
+  interfaceLayout: 'default' as InterfaceLayout,
+  mvInboxType: 'unread-first' as MvInboxType,
+  mvUnreadSectionCollapsed: false,
+  mvEverythingElseCollapsed: false,
+  // Settings > Accessibility (lib/accessibility-settings.ts)
+  ...ACCESSIBILITY_DEFAULTS,
   messageListOrder: [] as SortLevel[],
   messageListOrderScope: 'inbox' as MessageListOrderScope,
 
@@ -646,11 +868,13 @@ const DEFAULT_SETTINGS = {
   markAsReadDelay: 0, // Instant
   deleteAction: 'trash' as DeleteAction,
   permanentlyDeleteJunk: false,
+  confirmBulkDelete: true,
   returnToListAfterAction: true,
   clearSearchOnFolderChange: false,
   showPreview: true,
   showVerificationCodes: true,
   mailLayout: 'split' as MailLayout,
+  listColumns: false,
   emailsPerPage: 50,
   externalContentPolicy: 'ask' as ExternalContentPolicy,
   messageSpacing: 'auto' as MessageSpacing,
@@ -668,6 +892,7 @@ const DEFAULT_SETTINGS = {
   // Composer
   autoSaveDraftInterval: 60000, // 1 minute
   sendConfirmation: false,
+  quickReplyEnabled: true,
   defaultReplyMode: 'reply' as ReplyMode,
   autoSelectReplyIdentity: false,
   replyIdentityMatch: 'domain' as ReplyIdentityMatch,
@@ -677,6 +902,7 @@ const DEFAULT_SETTINGS = {
   sendDelaySeconds: 0 as SendDelaySeconds,
   signaturePosition: 'below_quote' as SignaturePosition,
   signatureSeparatorEnabled: true,
+  signatureDetails: EMPTY_SIGNATURE_DETAILS,
   requestReadReceiptDefault: false,
   readReceiptResponse: 'ask' as ReadReceiptResponse,
 
@@ -690,6 +916,7 @@ const DEFAULT_SETTINGS = {
 
   // Calendar
   showTimeInMonthView: false,
+  calendarTintedEvents: false,
   showWeekNumbers: false,
   calendarFreeScroll: true,
   calendarHoverPreview: 'delay-500ms' as CalendarHoverPreview,
@@ -713,11 +940,15 @@ const DEFAULT_SETTINGS = {
   groupContactsByLetter: true,
   sortContactsByLastName: false,
 
+  // Files
+  filesSettings: DEFAULT_FILES_SETTINGS,
+
   // Email Notifications
   emailNotificationsEnabled: true,
   emailNotificationSound: true,
-  notificationSoundChoice: 'default' as NotificationSoundChoice,
+  notificationSoundChoice: 'involved' as NotificationSoundChoice,
   pushNotifyInboxOnly: false,
+  notificationMutes: EMPTY_NOTIFICATION_MUTES,
   pushRelayUrl: '',
 
   // Protocol Handlers
@@ -734,6 +965,7 @@ const DEFAULT_SETTINGS = {
   hideAccountSwitcher: false,
   showRailAccountList: false,
   proInterface: false,
+  showAdvancedSettings: false,
 
   // Unified Mailbox
   enableUnifiedMailbox: false,
@@ -756,12 +988,16 @@ const DEFAULT_SETTINGS = {
 
   // Sidebar
   colorfulSidebarIcons: true,
-  tintListRowsByTag: true,
+  tintListRowsByTag: false,
   tintListRowsByAccount: false,
+  showAccountDot: true,
   showFolderTotalCount: true,
+  showSharedMailAccounts: true,
+  hiddenSharedMailAccounts: {} as Record<string, string[]>,
 
   // Folders
   folderIcons: {} as Record<string, string>,
+  folderCountModes: {} as Record<string, FolderCountMode>,
 
   // Keywords
   emailKeywords: USING_MOCK_SERVER ? DEV_KEYWORDS : DEFAULT_KEYWORDS,
@@ -799,7 +1035,9 @@ const DEFAULT_SETTINGS = {
   ] as string[],
 
   emptySubjectWarningEnabled: true,
+  placeholderWarningEnabled: true,
   recipientMentionsEnabled: true,
+  mentionAddsRecipientTo: 'to' as MentionAddsRecipientTo,
 
   hideInlineImageAttachments: true,
   attachmentImagePreviewsEnabled: true,
@@ -835,7 +1073,140 @@ const DEFAULT_SETTINGS = {
     push: true,
   } as Record<DebugCategory, boolean>,
   settingsSyncDisabled: false,
+  explicitSettings: [] as string[],
 };
+
+const hasOwn = (obj: object, key: string) => Object.prototype.hasOwnProperty.call(obj, key);
+const builtInDefault = (key: string) => (DEFAULT_SETTINGS as Record<string, unknown>)[key];
+
+/**
+ * Settings an admin policy may set (#1248): plain values (boolean, number,
+ * string). Lists and maps (tags, folder icons, per-account maps) stay the
+ * user's own.
+ */
+function isPolicySettingKey(key: string): boolean {
+  if (key === 'explicitSettings' || !hasOwn(DEFAULT_SETTINGS, key)) return false;
+  const type = typeof builtInDefault(key);
+  return type === 'boolean' || type === 'number' || type === 'string';
+}
+
+/**
+ * policy.json is written by hand, so a value only applies when it has the
+ * build default's type, passes the checks an import makes, and stays within
+ * the restriction's allowed values and bounds.
+ */
+function isAllowedPolicyValue(key: string, value: unknown, restriction?: SettingRestriction): boolean {
+  if (!isPolicySettingKey(key) || typeof value !== typeof builtInDefault(key)) return false;
+  if (typeof value === 'number' && !Number.isFinite(value)) return false;
+  if (key === 'sendDelaySeconds' && ![0, 10, 30, 60].includes(value as number)) return false;
+  if (key === 'subAddressDelimiter' && !isValidSubAddressDelimiter(value as string)) return false;
+  if (key === 'messageListOrderScope' && value !== 'inbox' && value !== 'all') return false;
+  if (!isAllowedAccessibilityValue(key, value)) return false;
+  if (restriction && typeof restriction === 'object') {
+    if (Array.isArray(restriction.allowedValues) && !restriction.allowedValues.includes(value)) return false;
+    // 0 keeps toasts until they're closed, which meets any minimum.
+    if (key === 'toastDuration' && typeof restriction.min === 'number') {
+      return toastDurationAtLeast(value as number, restriction.min);
+    }
+    if (typeof value === 'number') {
+      if (typeof restriction.min === 'number' && value < restriction.min) return false;
+      if (typeof restriction.max === 'number' && value > restriction.max) return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * A policy.json written for builds before Reduce motion (v9) presets or
+ * locks `animationsEnabled`; it now means the same `reduceMotion` value.
+ */
+function withLegacyPolicyKeys<T>(record: Record<string, T>): Record<string, T> {
+  if (!hasOwn(record, 'animationsEnabled') || hasOwn(record, 'reduceMotion')) return record;
+  const { animationsEnabled: legacy, ...rest } = record as Record<string, unknown>;
+  const toMotion = (v: unknown) => (v === false ? 'on' : v === true ? 'system' : v);
+  const mapped = isPlainRecord(legacy)
+    ? { ...legacy, ...(hasOwn(legacy, 'value') ? { value: toMotion(legacy.value) } : {}) }
+    : toMotion(legacy);
+  return { ...rest, reduceMotion: mapped } as Record<string, T>;
+}
+
+/**
+ * Local state and server blobs from before #1248 carry no explicitSettings.
+ * There, a value that differs from the build default can only have come from
+ * the user, so it counts as their choice. One that matches it is taken as
+ * never chosen and picks up the operator's default.
+ */
+export function legacyExplicitSettings(source: Record<string, unknown>): string[] {
+  return Object.keys(source).filter(
+    (key) => isPolicySettingKey(key) && source[key] !== builtInDefault(key),
+  );
+}
+
+/**
+ * What the admin policy changes in `state` (#1248): each `policy.defaults`
+ * value for a setting the user has not chosen, then each locked
+ * restriction's value (`value`, or the default when it has none) whatever
+ * the user chose. Exported for tests.
+ */
+export function adminPolicyPatch(
+  state: Record<string, unknown>,
+  policy: Partial<Pick<SettingsPolicy, 'defaults' | 'restrictions'>>,
+): Record<string, unknown> {
+  const explicit = new Set(Array.isArray(state.explicitSettings) ? (state.explicitSettings as string[]) : []);
+  const defaults = withLegacyPolicyKeys(isPlainRecord(policy.defaults) ? policy.defaults : {});
+  const restrictions = withLegacyPolicyKeys<SettingRestriction>(isPlainRecord(policy.restrictions) ? policy.restrictions : {});
+  const restrictionFor = (key: string) => (hasOwn(restrictions, key) ? restrictions[key] : undefined);
+  const patch: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(defaults)) {
+    if (explicit.has(key) || !isAllowedPolicyValue(key, value, restrictionFor(key))) continue;
+    if (state[key] !== value) patch[key] = value;
+  }
+  for (const [key, restriction] of Object.entries(restrictions)) {
+    if (!isPlainRecord(restriction) || restriction.locked !== true) continue;
+    const value = hasOwn(restriction, 'value') ? restriction.value : hasOwn(defaults, key) ? defaults[key] : undefined;
+    if (!isAllowedPolicyValue(key, value, restriction)) continue;
+    // Text size, contrast, motion and the other reading aids can't be
+    // locked: a lock on one of them works as a default the user may change.
+    if (UNLOCKABLE_SETTING_KEYS.has(key) && explicit.has(key)) continue;
+    if (state[key] !== value) patch[key] = value;
+    else delete patch[key];
+  }
+  return patch;
+}
+
+/**
+ * What goes back to the built-in default when a policy stops applying a
+ * value: a default or lock that the previous policy had and the next one
+ * doesn't (another account's scopes, or the admin removed it). Only for
+ * settings the user hasn't chosen and that still hold the imposed value.
+ * Exported for tests.
+ */
+export function adminPolicyReleasePatch(
+  state: Record<string, unknown>,
+  previous: Partial<Pick<SettingsPolicy, 'defaults' | 'restrictions'>>,
+  next: Partial<Pick<SettingsPolicy, 'defaults' | 'restrictions'>>,
+): Record<string, unknown> {
+  const explicit = new Set(Array.isArray(state.explicitSettings) ? (state.explicitSettings as string[]) : []);
+  const imposed = (policy: typeof previous) => {
+    const out = new Map<string, unknown>();
+    const defaults = isPlainRecord(policy.defaults) ? policy.defaults : {};
+    const restrictions = isPlainRecord(policy.restrictions) ? (policy.restrictions as Record<string, SettingRestriction>) : {};
+    for (const [key, value] of Object.entries(defaults)) out.set(key, value);
+    for (const [key, restriction] of Object.entries(restrictions)) {
+      if (!isPlainRecord(restriction) || restriction.locked !== true) continue;
+      out.set(key, hasOwn(restriction, 'value') ? restriction.value : hasOwn(defaults, key) ? defaults[key] : undefined);
+    }
+    return out;
+  };
+  const before = imposed(previous);
+  const after = imposed(next);
+  const patch: Record<string, unknown> = {};
+  for (const [key, value] of before) {
+    if (after.has(key) || explicit.has(key) || !isPolicySettingKey(key)) continue;
+    if (state[key] === value && value !== builtInDefault(key)) patch[key] = builtInDefault(key);
+  }
+  return patch;
+}
 
 export const useSettingsStore = create<SettingsState>()(
   persist(
@@ -845,58 +1216,76 @@ export const useSettingsStore = create<SettingsState>()(
        * settings (device-only ones kept) and templates. Never pushed, since
        * sync may still point at the account the state came from.
        */
-      const resetSyncedState = () => {
+      const resetSyncedState = (opts?: { keepCrossAccountViews?: boolean }) => {
         const defaults: Record<string, unknown> = { ...DEFAULT_SETTINGS };
         for (const key of DEVICE_LOCAL_SETTING_KEYS) delete defaults[key];
+        if (opts?.keepCrossAccountViews) for (const key of CROSS_ACCOUNT_VIEW_KEYS) delete defaults[key];
+        // Settings left as they are keep their "chosen by the user" mark.
+        defaults.explicitSettings = get().explicitSettings.filter((key) => !hasOwn(defaults, key));
         const wasLoading = isLoadingFromServer;
         isLoadingFromServer = true;
         try {
           set(defaults as Partial<SettingsState>);
           templateSyncBridge?.applySyncedState([], {}, { merge: false });
+          // A new account starts from this instance's defaults (#1248).
+          applyAdminPolicyPatch();
         } finally {
           isLoadingFromServer = wasLoading;
         }
-        applyFontSize(DEFAULT_SETTINGS.fontSize);
-        applyDensity(DEFAULT_SETTINGS.density);
-        applyAnimations(DEFAULT_SETTINGS.animationsEnabled);
+        applyVisualSettings();
       };
 
-      return {
-      ...DEFAULT_SETTINGS,
+      const applyVisualSettings = () => {
+        const state = get();
+        applyAccessibility(state);
+        applyDensity(state.density, state.interfaceLayout);
+        applyInterfaceLayout(state.interfaceLayout, state.density);
+      };
 
-      updateSetting: (key, value) => {
-        set({ [key]: value });
+      /** Sets what the admin policy changes; true when anything changed. */
+      const applyAdminPolicyPatch = (): boolean => {
+        const patch = adminPolicyPatch(
+          get() as unknown as Record<string, unknown>,
+          usePolicyStore.getState().policy,
+        );
+        if (Object.keys(patch).length === 0) return false;
+        set(patch as Partial<SettingsState>);
+        return true;
+      };
 
-        // Apply font size to document root
-        if (key === 'fontSize') {
-          applyFontSize(value as FontSize);
+      const applySetting = <K extends keyof SettingsState>(key: K, value: SettingsState[K]) => {
+        set({ [key]: value } as Partial<SettingsState>);
+
+        // Text size, contrast, motion and the other visual accessibility
+        // settings live on <html> (lib/accessibility-settings.ts).
+        if (key === 'fontSize' || ACCESSIBILITY_DOM_KEYS.has(key)) {
+          applyAccessibility(get());
         }
 
         // Apply density to document root
         if (key === 'density') {
-          applyDensity(value as Density);
+          applyDensity(value as Density, get().interfaceLayout);
         }
 
-        // Apply animations to document root
-        if (key === 'animationsEnabled') {
-          applyAnimations(value as boolean);
+        // Swap the shell geometry. Mountain View's list-then-conversation
+        // layout is not written into `mailLayout`: see effectiveMailLayout().
+        if (key === 'interfaceLayout') {
+          applyInterfaceLayout(value as InterfaceLayout, get().density);
         }
-      },
 
-      resetToDefaults: () => {
-        set(DEFAULT_SETTINGS);
-        applyFontSize(DEFAULT_SETTINGS.fontSize);
-        applyDensity(DEFAULT_SETTINGS.density);
-        applyAnimations(DEFAULT_SETTINGS.animationsEnabled);
-      },
+      };
 
-      exportSettings: () => {
+      const buildExport = (opts?: { forSync?: boolean; subscriptionOwner?: string }): string => {
         const state = get();
-        const templateSync = templateSyncBridge?.getSyncedState();
+        const templateSync = templateSyncBridge?.getSyncedState({
+          accountId: opts?.forSync && syncUsername && syncServerUrl ? generateAccountId(syncUsername, syncServerUrl) : undefined,
+        });
+        const subscriptionSync = calendarSubscriptionSyncBridge?.getSyncedState();
         const settings = {
           fontSize: state.fontSize,
           density: state.density,
-          animationsEnabled: state.animationsEnabled,
+          interfaceLayout: state.interfaceLayout,
+          mvInboxType: state.mvInboxType,
           messageListOrder: state.messageListOrder,
           messageListOrderScope: state.messageListOrderScope,
           dateFormat: state.dateFormat,
@@ -907,10 +1296,12 @@ export const useSettingsStore = create<SettingsState>()(
           markAsReadDelay: state.markAsReadDelay,
           deleteAction: state.deleteAction,
           returnToListAfterAction: state.returnToListAfterAction,
+          confirmBulkDelete: state.confirmBulkDelete,
           clearSearchOnFolderChange: state.clearSearchOnFolderChange,
           showPreview: state.showPreview,
           showVerificationCodes: state.showVerificationCodes,
           mailLayout: state.mailLayout,
+          listColumns: state.listColumns,
           emailsPerPage: state.emailsPerPage,
           externalContentPolicy: state.externalContentPolicy,
           messageSpacing: state.messageSpacing,
@@ -927,6 +1318,7 @@ export const useSettingsStore = create<SettingsState>()(
           trustedSenders: state.trustedSenders,
           autoSaveDraftInterval: state.autoSaveDraftInterval,
           sendConfirmation: state.sendConfirmation,
+          quickReplyEnabled: state.quickReplyEnabled,
           defaultReplyMode: state.defaultReplyMode,
           autoSelectReplyIdentity: state.autoSelectReplyIdentity,
           replyIdentityMatch: state.replyIdentityMatch,
@@ -936,6 +1328,7 @@ export const useSettingsStore = create<SettingsState>()(
           sendDelaySeconds: state.sendDelaySeconds,
           signaturePosition: state.signaturePosition,
           signatureSeparatorEnabled: state.signatureSeparatorEnabled,
+          signatureDetails: state.signatureDetails,
           requestReadReceiptDefault: state.requestReadReceiptDefault,
           readReceiptResponse: state.readReceiptResponse,
           sessionTimeout: state.sessionTimeout,
@@ -943,6 +1336,7 @@ export const useSettingsStore = create<SettingsState>()(
           emailNotificationSound: state.emailNotificationSound,
           notificationSoundChoice: state.notificationSoundChoice,
           pushNotifyInboxOnly: state.pushNotifyInboxOnly,
+          notificationMutes: state.notificationMutes,
           pushRelayUrl: state.pushRelayUrl,
           protocolOpenMode: state.protocolOpenMode,
           calendarNotificationsEnabled: state.calendarNotificationsEnabled,
@@ -955,8 +1349,10 @@ export const useSettingsStore = create<SettingsState>()(
           sharedCalendarColors: state.sharedCalendarColors,
           groupContactsByLetter: state.groupContactsByLetter,
           sortContactsByLastName: state.sortContactsByLastName,
+          filesSettings: state.filesSettings,
           expandedFilterView: state.expandedFilterView,
           showTimeInMonthView: state.showTimeInMonthView,
+          calendarTintedEvents: state.calendarTintedEvents,
           showWeekNumbers: state.showWeekNumbers,
           calendarFreeScroll: state.calendarFreeScroll,
           calendarHoverPreview: state.calendarHoverPreview,
@@ -968,6 +1364,7 @@ export const useSettingsStore = create<SettingsState>()(
           toolbarPosition: state.toolbarPosition,
           hideAccountSwitcher: state.hideAccountSwitcher,
           showRailAccountList: state.showRailAccountList,
+          showAdvancedSettings: state.showAdvancedSettings,
           // proInterface is intentionally omitted - it's a per-device choice
           // (see DEVICE_LOCAL_SETTING_KEYS) and must not be synced.
           enableUnifiedMailbox: state.enableUnifiedMailbox,
@@ -984,14 +1381,20 @@ export const useSettingsStore = create<SettingsState>()(
           colorfulSidebarIcons: state.colorfulSidebarIcons,
           tintListRowsByTag: state.tintListRowsByTag,
           tintListRowsByAccount: state.tintListRowsByAccount,
+          showAccountDot: state.showAccountDot,
           showFolderTotalCount: state.showFolderTotalCount,
+          showSharedMailAccounts: state.showSharedMailAccounts,
+          hiddenSharedMailAccounts: state.hiddenSharedMailAccounts,
           folderIcons: state.folderIcons,
+          folderCountModes: state.folderCountModes,
           emailKeywords: state.emailKeywords,
           nestedTags: state.nestedTags,
           attachmentReminderEnabled: state.attachmentReminderEnabled,
           attachmentReminderKeywords: state.attachmentReminderKeywords,
           emptySubjectWarningEnabled: state.emptySubjectWarningEnabled,
+          placeholderWarningEnabled: state.placeholderWarningEnabled,
           recipientMentionsEnabled: state.recipientMentionsEnabled,
+          mentionAddsRecipientTo: state.mentionAddsRecipientTo,
           hideInlineImageAttachments: state.hideInlineImageAttachments,
           attachmentImagePreviewsEnabled: state.attachmentImagePreviewsEnabled,
           sidebarApps: state.sidebarApps,
@@ -1002,22 +1405,88 @@ export const useSettingsStore = create<SettingsState>()(
           debugMode: state.debugMode,
           debugCategories: state.debugCategories,
           settingsSyncDisabled: state.settingsSyncDisabled,
+          explicitSettings: state.explicitSettings,
+          emailAlwaysLightMode: state.emailAlwaysLightMode,
+          showToolbarLabels: state.showToolbarLabels,
+          ...Object.fromEntries(ACCESSIBILITY_KEYS.map((key) => [key, state[key]])),
           // Cross-store settings
           theme: useThemeStore.getState().theme,
+          themeChosen: useThemeStore.getState().themeChosen,
           locale: useLocaleStore.getState().locale,
           // Omitted entirely (rather than emitted empty) if the bridge has
           // not registered, so an importing device leaves its templates alone.
-          ...(templateSync
+          // Templates the account keeps itself are left out of a sync push;
+          // the flag has the stored blob drop its old copy (mergeStoredTemplates).
+          ...(templateSync && opts?.forSync && templateSync.storedInAccount
+            ? { templatesInMetadata: true }
+            : templateSync
+              ? {
+                  templates: templateSync.templates,
+                  deletedTemplateIds: templateSync.deletedTemplateIds,
+                }
+              : {}),
+          // Omitted entirely if the bridge has not registered, so an importing
+          // device leaves its calendar subscriptions alone.
+          ...(subscriptionSync
             ? {
-                templates: templateSync.templates,
-                deletedTemplateIds: templateSync.deletedTemplateIds,
+                // A server blob carries only its own login's subscriptions:
+                // feed URLs are secrets, and another login's (or an unowned
+                // one's) would reappear there after that login signs out.
+                icalSubscriptions: opts?.subscriptionOwner
+                  ? subscriptionSync.icalSubscriptions.filter(
+                      (sub) => sub.owner === opts.subscriptionOwner,
+                    )
+                  : subscriptionSync.icalSubscriptions,
+                deletedSubscriptionIds: subscriptionSync.deletedSubscriptionIds,
               }
             : {}),
         };
         return JSON.stringify(settings, null, 2);
+      };
+
+      return {
+      ...DEFAULT_SETTINGS,
+
+      updateSetting: (key, value, opts) => {
+        if (opts?.internal || BOOKKEEPING_SETTING_KEYS.has(key)) {
+          applySetting(key, value);
+          return;
+        }
+        changePreference(key, value, get()[key], () => {
+          applySetting(key, value);
+          // The user chose this value, so an admin default no longer replaces it.
+          const { explicitSettings } = get();
+          if (hasOwn(DEFAULT_SETTINGS, key) && key !== 'explicitSettings' && !explicitSettings.includes(key)) {
+            set({ explicitSettings: [...explicitSettings, key] });
+          }
+        });
       },
 
-      importSettings: (json: string, opts?: { serverAccountId?: string }) => {
+      applyAdminPolicy: (previous) => {
+        const released = previous
+          ? adminPolicyReleasePatch(get() as unknown as Record<string, unknown>, previous, usePolicyStore.getState().policy)
+          : {};
+        if (Object.keys(released).length > 0) set(released as Partial<SettingsState>);
+        if (applyAdminPolicyPatch() || Object.keys(released).length > 0) applyVisualSettings();
+      },
+
+      resetToDefaults: () => {
+        set(DEFAULT_SETTINGS);
+        // The defaults of this instance are the operator's, then the build's.
+        applyAdminPolicyPatch();
+        applyVisualSettings();
+        void settingsHooks.onSettingsReset.emit({});
+      },
+
+      exportSettings: (opts) => {
+        const json = buildExport(opts);
+        if (!opts?.forSync) {
+          void settingsHooks.onSettingsExport.emit({ keys: Object.keys(JSON.parse(json)) });
+        }
+        return json;
+      },
+
+      importSettings: (json: string, opts?: { serverAccountId?: string; keepCrossAccountViews?: boolean; subscriptionOwner?: string }) => {
         try {
           const settings = JSON.parse(json);
 
@@ -1029,15 +1498,33 @@ export const useSettingsStore = create<SettingsState>()(
           if (typeof settings.protocolOpenMode !== 'string' && typeof settings.protocolMailtoOpenMode === 'string') {
             settings.protocolOpenMode = settings.protocolMailtoOpenMode;
           }
+          migrateAnimationsSetting(settings);
+          migrateNotificationSoundDefault(settings);
+          migrateTintListRowsDefault(settings);
 
-          // Apply settings
+          // Apply settings, noting which keys were taken over for the
+          // onSettingsImport hook.
+          const imported: string[] = [];
+          const put = (key: string, patch: Record<string, unknown>) => {
+            set(patch as Partial<SettingsState>);
+            imported.push(key);
+          };
           Object.keys(settings).forEach((key) => {
             if (key in DEFAULT_SETTINGS) {
+              // Merged below, once it is known which settings were taken over.
+              if (key === 'explicitSettings') {
+                return;
+              }
               if (key === 'subAddressDelimiter' && !isValidSubAddressDelimiter(settings[key])) {
                 return;
               }
               if (key === 'sendDelaySeconds' && ![0, 10, 30, 60].includes(settings[key])) {
-                set({ sendDelaySeconds: 0 });
+                put(key, { sendDelaySeconds: 0 });
+                return;
+              }
+              // An enum the page doesn't know (an older or newer export, a
+              // hand-edited file) keeps the current value.
+              if (!isAllowedAccessibilityValue(key, settings[key])) {
                 return;
               }
               // Validity of the zone id itself is checked at use time
@@ -1056,17 +1543,35 @@ export const useSettingsStore = create<SettingsState>()(
               if (key === 'preferredIdentityIds' && !isPlainRecord(settings[key])) {
                 return;
               }
+              if (key === 'hiddenSharedMailAccounts' && !isPlainRecord(settings[key])) {
+                return;
+              }
+              if (key === 'signatureDetails') {
+                put(key, { signatureDetails: sanitizeSignatureDetails(settings[key]) });
+                return;
+              }
+              if (key === 'notificationMutes') {
+                put(key, { notificationMutes: normalizeNotificationMutes(settings[key]) });
+                return;
+              }
+              if (key === 'filesSettings') {
+                put(key, { filesSettings: normalizeFilesSettings(settings[key]) });
+                return;
+              }
               // The list order is sent to the server as a sort array, so an
               // unknown criterion from a newer/older client must never get
               // through (an unsupportedSort refusal empties the folder).
               if (key === 'messageListOrder') {
-                set({ messageListOrder: sanitizeSortLevels(settings[key]) });
+                put(key, { messageListOrder: sanitizeSortLevels(settings[key]) });
                 return;
               }
               if (key === 'messageListOrderScope' && settings[key] !== 'inbox' && settings[key] !== 'all') {
                 return;
               }
               if (DEVICE_LOCAL_SETTING_KEYS.has(key)) {
+                return;
+              }
+              if (opts?.keepCrossAccountViews && CROSS_ACCOUNT_VIEW_KEYS.has(key)) {
                 return;
               }
               // Per-account maps (accountId -> value) live in every account's
@@ -1077,28 +1582,49 @@ export const useSettingsStore = create<SettingsState>()(
               // the map and the composer picks another account's default sender
               // (login-order dependent). File imports (no serverAccountId)
               // still replace wholesale.
-              if (opts?.serverAccountId && (key === 'preferredIdentityIds' || key === 'allMailFolderIds')) {
+              if (opts?.serverAccountId && (key === 'preferredIdentityIds' || key === 'allMailFolderIds' || key === 'hiddenSharedMailAccounts')) {
                 const existing = (get() as unknown as Record<string, unknown>)[key];
                 const merged: Record<string, unknown> = isPlainRecord(existing) ? { ...existing } : {};
                 const incoming = settings[key] as Record<string, unknown>;
                 if (Object.prototype.hasOwnProperty.call(incoming, opts.serverAccountId)) {
                   merged[opts.serverAccountId] = incoming[opts.serverAccountId];
                 }
-                set({ [key]: merged });
+                put(key, { [key]: merged });
                 return;
               }
-              set({ [key]: settings[key] });
+              put(key, { [key]: settings[key] });
             }
           });
 
-          // Apply visual settings
-          applyFontSize(get().fontSize);
-          applyDensity(get().density);
-          applyAnimations(get().animationsEnabled);
+          // Which settings the user chose (#1248): for every setting taken
+          // over from the blob, what the blob says; for the rest, what this
+          // device knew. A blob from before explicitSettings existed counts a
+          // value that differs from the build default as chosen.
+          const takenOver = new Set(imported);
+          const blobExplicit: string[] = Array.isArray(settings.explicitSettings)
+            ? settings.explicitSettings.filter((key: unknown): key is string => typeof key === 'string')
+            : legacyExplicitSettings(settings);
+          set({
+            explicitSettings: [
+              ...new Set([
+                ...get().explicitSettings.filter((key) => !takenOver.has(key)),
+                ...blobExplicit.filter((key) => takenOver.has(key)),
+              ]),
+            ],
+          });
+          // A blob carries whatever defaults applied when it was written, so
+          // the operator's current ones go over the settings nobody chose.
+          applyAdminPolicyPatch();
+
+          applyVisualSettings();
 
           // Apply cross-store settings
           if (settings.theme) {
-            useThemeStore.getState().setTheme(settings.theme);
+            // A mode the user never chose leaves room for the operator's
+            // default (#1280). Blobs from before themeChosen count any mode
+            // but the built-in default as chosen.
+            const themeChosen = typeof settings.themeChosen === 'boolean' ? settings.themeChosen : settings.theme !== 'system';
+            useThemeStore.getState().setTheme(settings.theme, { chosen: themeChosen });
           }
           if (settings.locale) {
             useLocaleStore.getState().setLocale(settings.locale);
@@ -1112,8 +1638,22 @@ export const useSettingsStore = create<SettingsState>()(
           templateSyncBridge?.applySyncedState(
             settings.templates,
             settings.deletedTemplateIds,
-            { merge: Boolean(opts?.serverAccountId) }
+            { merge: Boolean(opts?.serverAccountId), accountId: opts?.serverAccountId }
           );
+          calendarSubscriptionSyncBridge?.applySyncedState(
+            settings.icalSubscriptions,
+            settings.deletedSubscriptionIds,
+            { merge: Boolean(opts?.serverAccountId), owner: opts?.subscriptionOwner }
+          );
+
+          // A load from the server reports itself as a sync (loadFromServer);
+          // only a file import the user picked is an import.
+          if (!opts?.serverAccountId) {
+            if (settings.theme) imported.push('theme');
+            if (settings.locale) imported.push('locale');
+            if (settings.templates !== undefined) imported.push('templates');
+            void settingsHooks.onSettingsImport.emit({ keys: imported });
+          }
 
           return true;
         } catch (error) {
@@ -1123,23 +1663,25 @@ export const useSettingsStore = create<SettingsState>()(
       },
 
       // Folder icon methods
+      // These map-valued preferences go through updateSetting so plugins see
+      // them like any other preference change.
       setFolderIcon: (mailboxId: string, icon: string) => {
-        set({ folderIcons: { ...get().folderIcons, [mailboxId]: icon } });
+        get().updateSetting('folderIcons', { ...get().folderIcons, [mailboxId]: icon });
       },
 
       removeFolderIcon: (mailboxId: string) => {
         const { [mailboxId]: _, ...rest } = get().folderIcons;
-        set({ folderIcons: rest });
+        get().updateSetting('folderIcons', rest);
       },
 
       // Shared-calendar color override methods
       setSharedCalendarColor: (key: string, color: string) => {
-        set({ sharedCalendarColors: { ...get().sharedCalendarColors, [key]: color } });
+        get().updateSetting('sharedCalendarColors', { ...get().sharedCalendarColors, [key]: color });
       },
 
       removeSharedCalendarColor: (key: string) => {
         const { [key]: _, ...rest } = get().sharedCalendarColors;
-        set({ sharedCalendarColors: rest });
+        get().updateSetting('sharedCalendarColors', rest);
       },
 
       // Trusted senders methods
@@ -1151,6 +1693,7 @@ export const useSettingsStore = create<SettingsState>()(
         const current = get().trustedSenders;
         if (!current.includes(emailAddress)) {
           set({ trustedSenders: [...current, emailAddress] });
+          void settingsHooks.onTrustedSenderChange.emit({ email: emailAddress, trusted: true });
         }
       },
 
@@ -1159,9 +1702,10 @@ export const useSettingsStore = create<SettingsState>()(
         const trimmed = email.trim();
         const angleMatch = trimmed.match(/^(.+?)\s*<([^>]+)>$/);
         const emailAddress = (angleMatch ? angleMatch[2] : trimmed).toLowerCase().trim();
-        set({
-          trustedSenders: get().trustedSenders.filter(e => e !== emailAddress)
-        });
+        const current = get().trustedSenders;
+        if (!current.includes(emailAddress)) return;
+        set({ trustedSenders: current.filter(e => e !== emailAddress) });
+        void settingsHooks.onTrustedSenderChange.emit({ email: emailAddress, trusted: false });
       },
 
       isSenderTrusted: (email: string) => {
@@ -1211,23 +1755,21 @@ export const useSettingsStore = create<SettingsState>()(
       addSidebarApp: (app: SidebarApp) => {
         const current = get().sidebarApps;
         if (current.some(a => a.id === app.id)) return;
-        set({ sidebarApps: [...current, app] });
+        get().updateSetting('sidebarApps', [...current, app]);
       },
 
       updateSidebarApp: (id: string, updates: Partial<Omit<SidebarApp, 'id'>>) => {
-        set({
-          sidebarApps: get().sidebarApps.map(a =>
-            a.id === id ? { ...a, ...updates } : a
-          ),
-        });
+        get().updateSetting('sidebarApps', get().sidebarApps.map(a =>
+          a.id === id ? { ...a, ...updates } : a
+        ));
       },
 
       removeSidebarApp: (id: string) => {
-        set({ sidebarApps: get().sidebarApps.filter(a => a.id !== id) });
+        get().updateSetting('sidebarApps', get().sidebarApps.filter(a => a.id !== id));
       },
 
       reorderSidebarApps: (apps: SidebarApp[]) => {
-        set({ sidebarApps: apps });
+        get().updateSetting('sidebarApps', apps);
       },
 
       // Settings sync methods
@@ -1301,30 +1843,37 @@ export const useSettingsStore = create<SettingsState>()(
             return failWithoutForeignState();
           }
           const { settings } = await res.json();
+          // With several logins on this device, the views spanning them stay
+          // as the device has them (see CROSS_ACCOUNT_VIEW_KEYS).
+          const { useAccountStore } = await import('./account-store');
+          const keepCrossAccountViews = useAccountStore.getState().accounts.length > 1;
           if (!settings) {
             syncLog('No server settings found yet');
             // A new account starts from defaults, not from whatever the
             // previous account left in this browser (#1185).
-            if (heldByOther) resetSyncedState();
+            if (heldByOther) resetSyncedState({ keepCrossAccountViews });
             writeSettingsOwner(accountId);
-            pushTemplatesAfterLoad = localTemplatesAhead(null);
+            pushTemplatesAfterLoad = localTemplatesAhead(null, accountId);
             return false;
           }
           if (settings && typeof settings === 'object') {
             // Importing merges templates and leaves keys the blob lacks as
             // they are, so another account's state would carry over into
             // this one and be pushed back to its server copy.
-            if (heldByOther) resetSyncedState();
+            if (heldByOther) resetSyncedState({ keepCrossAccountViews });
             isLoadingFromServer = true;
             // Merge (not replace) per-account maps for the account being loaded,
             // so multi-account logins don't clobber each other by login order.
             get().importSettings(JSON.stringify(settings), {
               serverAccountId: accountId,
+              keepCrossAccountViews,
+              subscriptionOwner: subscriptionOwnerFor(serverUrl, username),
             });
             isLoadingFromServer = false;
             writeSettingsOwner(accountId);
-            pushTemplatesAfterLoad = localTemplatesAhead(settings);
+            pushTemplatesAfterLoad = localTemplatesAhead(settings, accountId);
             syncLog('Settings loaded from server successfully');
+            void settingsHooks.onSettingsSync.emit({ direction: 'pulled' });
             // The per-account preferred sender identity (#507) is re-applied by
             // applyPreferredIdentity() in auth-store, invoked from the
             // loadFromServer().finally() of every login / switch / restore path,
@@ -1336,6 +1885,9 @@ export const useSettingsStore = create<SettingsState>()(
           syncError('Failed to load settings from server:', error);
           isLoadingFromServer = false;
           return failWithoutForeignState();
+        } finally {
+          settledLoads.add(accountId);
+          for (const listener of settledListeners) listener(accountId);
         }
       },
 
@@ -1350,7 +1902,7 @@ export const useSettingsStore = create<SettingsState>()(
     },
     {
       name: 'settings-storage',
-      version: 7,
+      version: 11,
       migrate: migrateSettings,
       onRehydrateStorage: () => {
         return (state) => {
@@ -1364,13 +1916,20 @@ export const useSettingsStore = create<SettingsState>()(
             if (!isPlainRecord(state.preferredIdentityIds)) {
               state.preferredIdentityIds = {};
             }
+            if (!isPlainRecord(state.hiddenSharedMailAccounts)) {
+              state.hiddenSharedMailAccounts = {};
+            }
+            if (!Array.isArray(state.explicitSettings)) {
+              state.explicitSettings = [];
+            }
+            state.notificationMutes = normalizeNotificationMutes(state.notificationMutes);
             state.messageListOrder = sanitizeSortLevels(state.messageListOrder);
             if (state.messageListOrderScope !== 'inbox' && state.messageListOrderScope !== 'all') {
               state.messageListOrderScope = 'inbox';
             }
-            applyFontSize(state.fontSize);
-            applyDensity(state.density);
-            applyAnimations(state.animationsEnabled);
+            applyAccessibility(state);
+            applyDensity(state.density, state.interfaceLayout);
+            applyInterfaceLayout(state.interfaceLayout, state.density);
           }
         };
       },
@@ -1441,92 +2000,202 @@ export function migrateSettings(persisted: unknown, version: number): SettingsSt
         if (version < 6 || !isPlainRecord(state.preferredIdentityIds)) {
           state.preferredIdentityIds = {};
         }
+        // Before the v8 step: a beep or a tinted list from before
+        // explicitSettings existed was the default then, and must not be
+        // taken as chosen below.
+        migrateNotificationSoundDefault(state);
+        migrateTintListRowsDefault(state);
+        // v8: admin policy defaults (#1248) skip settings the user chose.
+        // Earlier builds did not record that, so a setting that differs from
+        // the build default is taken as chosen.
+        if (version < 8 || !Array.isArray(state.explicitSettings)) {
+          state.explicitSettings = legacyExplicitSettings(state);
+        }
+        migrateAnimationsSetting(state);
         return state as unknown as SettingsState;
 }
 
-// Helper functions to apply settings to DOM
-function applyFontSize(size: FontSize) {
-  if (typeof document === 'undefined') return;
-
-  const root = document.documentElement;
-  const sizeMap = {
-    small: '14px',
-    medium: '16px',
-    large: '18px',
-  };
-  root.style.setProperty('--font-size-base', sizeMap[size]);
+/**
+ * v9: the Animations on/off switch became Reduce motion (System / On /
+ * Off). Off meant "no animations"; On let the OS setting decide, which is
+ * what System does now. Imports and server copies from older builds still
+ * carry the old key and go through this too.
+ */
+export function migrateAnimationsSetting(state: Record<string, unknown>): void {
+  if (typeof state.animationsEnabled === 'boolean') {
+    if (state.reduceMotion === undefined) state.reduceMotion = state.animationsEnabled ? 'system' : 'on';
+    delete state.animationsEnabled;
+  }
+  if (Array.isArray(state.explicitSettings)) {
+    state.explicitSettings = (state.explicitSettings as unknown[]).map((key) => (key === 'animationsEnabled' ? 'reduceMotion' : key));
+  }
 }
 
-function applyDensity(density: Density) {
+/**
+ * v10: the new mail sound defaults to Involved instead of the beep. A beep
+ * the user never picked was only the old default and moves to Involved; one
+ * they picked stays. Imports and server copies from older builds still
+ * carry the beep and go through this too.
+ */
+export function migrateNotificationSoundDefault(state: Record<string, unknown>): void {
+  if (state.notificationSoundChoice !== 'default') return;
+  const chosen = Array.isArray(state.explicitSettings) && state.explicitSettings.includes('notificationSoundChoice');
+  if (!chosen) state.notificationSoundChoice = 'involved';
+}
+
+/**
+ * v11: list rows no longer take their first tag's color by default. A tint
+ * the user never switched on was only the old default and goes; one they
+ * switched on stays. Imports and server copies from older builds still
+ * carry the tint and go through this too.
+ */
+export function migrateTintListRowsDefault(state: Record<string, unknown>): void {
+  if (state.tintListRowsByTag !== true) return;
+  const chosen = Array.isArray(state.explicitSettings) && state.explicitSettings.includes('tintListRowsByTag');
+  if (!chosen) state.tintListRowsByTag = false;
+}
+
+// Helper functions to apply settings to DOM
+
+/** The settings applyAccessibilityTo() writes onto <html>. */
+const ACCESSIBILITY_DOM_KEYS: ReadonlySet<string> = new Set([
+  'contrast', 'reduceTransparency', 'underlineLinks', 'appFont', 'lineSpacing', 'letterSpacing', 'wordSpacing',
+  'paragraphSpacing', 'readingWidth', 'reduceMotion', 'focusRing', 'focusAlwaysVisible', 'largeTargets',
+  'largeCursor', 'nativeScrollbars', 'simpleMode', 'unreadCountStyle', 'colorBlindPalette', 'showColorNames',
+]);
+
+function applyAccessibility(state: { fontSize: FontSize } & AccessibilitySettings) {
+  if (typeof document === 'undefined') return;
+  applyAccessibilityTo(document.documentElement, state);
+}
+
+type DensityVars = Record<string, string>;
+
+const DEFAULT_DENSITY: Record<Density, DensityVars> = {
+  'extra-compact': {
+    '--list-item-height': 'auto',
+    '--density-item-py': '2px',
+    '--density-item-gap': '6px',
+    '--density-header-py': '4px',
+    '--density-card-p': '8px',
+    '--density-sidebar-py': '0px',
+  },
+  compact: {
+    '--list-item-height': 'auto',
+    '--density-item-py': '4px',
+    '--density-item-gap': '8px',
+    '--density-header-py': '6px',
+    '--density-card-p': '10px',
+    '--density-sidebar-py': '1px',
+  },
+  regular: {
+    '--list-item-height': '48px',
+    '--density-item-py': '12px',
+    '--density-item-gap': '12px',
+    '--density-header-py': '12px',
+    '--density-card-p': '16px',
+    '--density-sidebar-py': '4px',
+  },
+  comfortable: {
+    '--list-item-height': '64px',
+    '--density-item-py': '16px',
+    '--density-item-gap': '16px',
+    '--density-header-py': '16px',
+    '--density-card-p': '20px',
+    '--density-sidebar-py': '6px',
+  },
+};
+
+/**
+ * Mountain View's rows come in three rhythms - 32, 40 and 48 pixels - and the
+ * app offers four densities. The four are laid over that scale: `compact`,
+ * `regular` and `comfortable` land on the three exactly, and `extra-compact`
+ * continues the series a step below, so every density still does something.
+ *
+ * Only the vertical rhythm is restated. Everything else a density touches -
+ * gaps, card padding, the sidebar's own row padding - keeps its default value;
+ * a navigation row is already pinned to 32px by the layout's own token.
+ */
+const MOUNTAIN_VIEW_DENSITY: Record<Density, DensityVars> = {
+  'extra-compact': { ...DEFAULT_DENSITY['extra-compact'], '--list-item-height': '28px', '--density-item-py': '4px' },
+  compact: { ...DEFAULT_DENSITY.compact, '--list-item-height': '32px', '--density-item-py': '6px' },
+  regular: { ...DEFAULT_DENSITY.regular, '--list-item-height': '40px', '--density-item-py': '10px' },
+  comfortable: { ...DEFAULT_DENSITY.comfortable, '--list-item-height': '48px', '--density-item-py': '14px' },
+};
+
+export function densityVarsFor(density: Density, layout: InterfaceLayout): DensityVars {
+  return (layout === 'mountain-view' ? MOUNTAIN_VIEW_DENSITY : DEFAULT_DENSITY)[density];
+}
+
+function applyDensity(density: Density, layout: InterfaceLayout) {
   if (typeof document === 'undefined') return;
 
   const root = document.documentElement;
-
-  const densityValues = {
-    'extra-compact': {
-      '--list-item-height': 'auto',
-      '--density-item-py': '2px',
-      '--density-item-gap': '6px',
-      '--density-header-py': '4px',
-      '--density-card-p': '8px',
-      '--density-sidebar-py': '0px',
-    },
-    compact: {
-      '--list-item-height': 'auto',
-      '--density-item-py': '4px',
-      '--density-item-gap': '8px',
-      '--density-header-py': '6px',
-      '--density-card-p': '10px',
-      '--density-sidebar-py': '1px',
-    },
-    regular: {
-      '--list-item-height': '48px',
-      '--density-item-py': '12px',
-      '--density-item-gap': '12px',
-      '--density-header-py': '12px',
-      '--density-card-p': '16px',
-      '--density-sidebar-py': '4px',
-    },
-    comfortable: {
-      '--list-item-height': '64px',
-      '--density-item-py': '16px',
-      '--density-item-gap': '16px',
-      '--density-header-py': '16px',
-      '--density-card-p': '20px',
-      '--density-sidebar-py': '6px',
-    },
-  };
-
-  const values = densityValues[density];
-  for (const [prop, val] of Object.entries(values)) {
+  for (const [prop, val] of Object.entries(densityVarsFor(density, layout))) {
     root.style.setProperty(prop, val);
   }
 }
 
-function applyAnimations(enabled: boolean) {
+/**
+ * The interface layout is a single attribute on <html>; every geometry
+ * override lives in the `[data-interface-layout="mountain-view"]` block in
+ * globals.css, so nothing has to re-render for the shell to change shape.
+ */
+function applyInterfaceLayout(layout: InterfaceLayout, density: Density) {
   if (typeof document === 'undefined') return;
-
-  const root = document.documentElement;
-  if (enabled) {
-    root.style.removeProperty('--transition-duration');
-  } else {
-    root.style.setProperty('--transition-duration', '0s');
-  }
+  document.documentElement.dataset.interfaceLayout = layout;
+  // The row rhythm depends on the layout as much as on the density, and it is
+  // written as an inline custom property, which no stylesheet rule could
+  // override. Re-applying it here is what keeps the two in step.
+  applyDensity(density, layout);
 }
+
+// Tag definitions change from the settings editor, from plugins (host-api
+// writes the store directly) and from imports and server loads. Watching the
+// list catches every path once instead of hooking each writer.
+useSettingsStore.subscribe((state, prev) => {
+  if (state.emailKeywords === prev.emailKeywords) return;
+  if (JSON.stringify(state.emailKeywords) === JSON.stringify(prev.emailKeywords)) return;
+  void settingsHooks.onKeywordChange.emit({ keywords: toKeywordViews(state.emailKeywords) });
+});
 
 // Initialize settings on load
 if (typeof window !== 'undefined') {
   const store = useSettingsStore.getState();
-  applyFontSize(store.fontSize);
-  applyDensity(store.density);
-  applyAnimations(store.animationsEnabled);
+  applyAccessibility(store);
+  applyDensity(store.density, store.interfaceLayout);
+  applyInterfaceLayout(store.interfaceLayout, store.density);
+
+  // The service worker shows push notifications without this store, so it
+  // reads the sound preference from its own Cache store (#1289).
+  // Do not disturb can't keep a push from showing (browsers require one per
+  // push), but it keeps it silent.
+  const pushSound = (s: SettingsState) => s.emailNotificationsEnabled && s.emailNotificationSound && !s.doNotDisturb;
+  let lastPushSound = pushSound(store);
+  void writePushPreferences({ sound: lastPushSound });
+  useSettingsStore.subscribe((state) => {
+    const sound = pushSound(state);
+    if (sound === lastPushSound) return;
+    lastPushSound = sound;
+    void writePushPreferences({ sound });
+  });
+
+  // The policy arrives after this store has rehydrated (and again with the
+  // full scope once signed in), so its defaults apply whenever it changes.
+  usePolicyStore.subscribe((policyState, prev) => {
+    if (policyState.policy === prev.policy) return;
+    useSettingsStore.getState().applyAdminPolicy(prev.policy);
+  });
 
   const triggerSync = () => {
     if (!syncEnabled || !syncUsername || !syncServerUrl || isLoadingFromServer) return;
     pendingSync = {
       username: syncUsername,
       serverUrl: syncServerUrl,
-      settings: JSON.parse(useSettingsStore.getState().exportSettings()),
+      settings: JSON.parse(useSettingsStore.getState().exportSettings({
+        forSync: true,
+        subscriptionOwner: subscriptionOwnerFor(syncServerUrl, syncUsername),
+      })),
     };
     if (syncTimeout) clearTimeout(syncTimeout);
     syncTimeout = setTimeout(async () => {
@@ -1567,12 +2236,17 @@ if (typeof window !== 'undefined') {
     if (useSettingsStore.getState().settingsSyncDisabled) return;
     triggerSync();
   };
-  // Ensure template-store is loaded (and the bridge registered) even before
-  // any UI component imports it, so the first sync push already carries the
-  // templates. Best effort: the UI imports the store itself when it needs it,
-  // and under vitest a short test file can finish (and tear its environment
-  // down) before this chain has loaded, which rejects the import.
+
+  // And when iCal subscriptions change (they ride along in the synced blob).
+  onCalendarSubscriptionStoreChange = () => {
+    if (useSettingsStore.getState().settingsSyncDisabled) return;
+    triggerSync();
+  };
+
+  // Ensure template-store and calendar-store are loaded (and bridges registered) even before
+  // any UI component imports them, so the first sync push already carries them.
   import('./template-store').catch(() => {});
+  import('./calendar-store').catch(() => {});
 }
 
 /**
