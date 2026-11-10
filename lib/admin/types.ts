@@ -1,5 +1,8 @@
 // Admin dashboard types
 
+import type { OrganisationPolicy } from './organisation-policy';
+import type { PolicyScope } from './policy-scopes';
+
 /**
  * Operator-authored admin record. Lives in admin.json under the config dir
  * and can be mounted read-only after setup. Only the password hash itself
@@ -18,18 +21,20 @@ export interface AdminStateData {
   createdAt: string;
   lastLogin: string | null;
   passwordChangedAt: string;
+  /** Moves on with every new admin password; tokens of an older one are refused. */
+  sessionGeneration?: number;
+  /** Tokens signed out by a logout, by id, with the exp they would have run until. */
+  revokedSessions?: Record<string, number>;
 }
-
-/**
- * Combined view used by getAdminMeta() and tests. Constructed by merging
- * admin.json + admin-state.json at read time.
- */
-export interface AdminData extends AdminConfigData, AdminStateData {}
 
 export interface AdminSessionPayload {
   role: 'admin';
   iat: number;
   exp: number;
+  /** Token id, for signing this one token out. */
+  sid: string;
+  /** AdminStateData.sessionGeneration it was issued in. */
+  gen: number;
 }
 
 export interface SettingRestriction {
@@ -67,6 +72,18 @@ export interface FeatureGates {
   crossStarredViewEnabled: boolean;
   crossAllViewEnabled: boolean;
   unifiedCrossAccountEnabled: boolean;
+  /** Encrypted account list kept on the server, restorable on another device. */
+  accountArchiveEnabled: boolean;
+  /** Lets that list carry mailbox passwords, so a restore signs in by itself. */
+  accountArchivePasswordsEnabled: boolean;
+  /** Composer "Custom" From: free-text sender address instead of an identity. */
+  customFromEnabled: boolean;
+  /** The Archive action on messages (button, menus, hover, swipe, shortcut). */
+  archiveActionEnabled: boolean;
+  /** The sidebar lists the Tags above the shared mailboxes instead of below them. */
+  tagsAboveSharedEnabled: boolean;
+  /** Booking, parcel and order cards read from schema.org markup in mail. */
+  structuredMailEnabled: boolean;
 }
 
 export const DEFAULT_FEATURE_GATES: FeatureGates = {
@@ -94,7 +111,15 @@ export const DEFAULT_FEATURE_GATES: FeatureGates = {
   crossStarredViewEnabled: false,
   crossAllViewEnabled: false,
   unifiedCrossAccountEnabled: false,
+  accountArchiveEnabled: false,
+  accountArchivePasswordsEnabled: false,
+  customFromEnabled: true,
+  archiveActionEnabled: true,
+  tagsAboveSharedEnabled: false,
+  structuredMailEnabled: true,
 };
+
+export type ColorMode = 'light' | 'dark' | 'system';
 
 export interface ThemePolicy {
   /** Built-in theme IDs that are disabled (hidden from users) */
@@ -103,14 +128,18 @@ export interface ThemePolicy {
   disabledThemes: string[];
   /** Default theme ID for new users (null = system default) */
   defaultThemeId: string | null;
+  /** Color mode for users who have not picked one (null = system) */
+  defaultColorMode: ColorMode | null;
+  /** Every user gets defaultColorMode (system when unset) and cannot switch it */
+  lockColorMode: boolean;
 }
 
 export const DEFAULT_THEME_POLICY: ThemePolicy = {
   disabledBuiltinThemes: [],
   disabledThemes: [],
-  // comail is the house brand theme; default new users to it. Admins can
-  // override via policy.json (themePolicy.defaultThemeId) or the policy API.
   defaultThemeId: 'builtin-comail',
+  defaultColorMode: null,
+  lockColorMode: false,
 };
 
 /** One entry of the Web Push relay list users can pick from. */
@@ -146,6 +175,10 @@ export interface SettingsPolicy {
   /** Plugin IDs that are force-enabled (users cannot disable) */
   forceEnabledPlugins: string[];
   /** Plugin IDs that have been approved by admin (users can enable) */
+  /**
+   * @deprecated Never had a writer, and approving an id approved any code
+   * under it. Approvals are per package now (lib/admin/plugin-approvals.ts).
+   */
   approvedPlugins: string[];
   /** Theme IDs that are force-enabled (users cannot deactivate) */
   forceEnabledThemes: string[];
@@ -165,10 +198,24 @@ export interface SettingsPolicy {
    * operator can ship a fixed set while forbidding custom ones.
    */
   defaultSidebarApps?: AdminSidebarApp[];
+  /** Organisation settings (signatures, external mail, sessions...); lib/admin/organisation-policy.ts. */
+  organisation?: OrganisationPolicy;
+  /**
+   * Overrides per domain or group, applied on top of the rest for the
+   * accounts they match (lib/admin/policy-scopes.ts). The effective policy
+   * a client works with has none.
+   */
+  scopes?: PolicyScope[];
 }
 
 /** Set to `public` on a policy answered with the pre-login subset. */
 export const POLICY_SCOPE_HEADER = 'X-Bulwark-Policy-Scope';
+
+/**
+ * The domains a policy's scopes were picked for (comma-separated); absent
+ * when it holds every scope (admin, or a server that can't tell users apart).
+ */
+export const POLICY_DOMAINS_HEADER = 'X-Bulwark-Policy-Domains';
 
 export const DEFAULT_POLICY: SettingsPolicy = {
   restrictions: {},
@@ -244,10 +291,23 @@ export const CONFIG_ENV_MAP: Record<string, { envVar: string; fileEnvVar?: strin
   loginImprintUrl: { envVar: 'LOGIN_IMPRINT_URL', type: 'url', defaultValue: '' },
   loginPrivacyPolicyUrl: { envVar: 'LOGIN_PRIVACY_POLICY_URL', type: 'url', defaultValue: '' },
   loginWebsiteUrl: { envVar: 'LOGIN_WEBSITE_URL', type: 'url', defaultValue: '' },
+  // Placeholder of the email field on the login page, e.g. the company's own
+  // address format. Empty uses the translation (login.username_placeholder).
+  loginUsernamePlaceholder: { envVar: 'LOGIN_USERNAME_PLACEHOLDER', type: 'string', defaultValue: '' },
+  hostedInboxLogoutDestination: { envVar: 'HOSTED_INBOX_LOGOUT_DESTINATION', type: 'url', defaultValue: '' },
   // Where users get the source of the build they are running (AGPL-3.0 §13).
   // Operators of a modified build point it at their fork; the About card then
   // links there instead of the upstream repository (#1161). Empty = upstream.
   sourceCodeUrl: { envVar: 'SOURCE_CODE_URL', type: 'url', defaultValue: '' },
+  // Accessibility and help links (OP-01; WCAG 3.2.6, BITV 2.0 §4 and §7):
+  // shown in the same place on every page, on the login page, in the
+  // settings sidebar and in the account menu. Empty hides a link. Only
+  // http(s) URLs are used; the feedback link may also be an email address.
+  accessibilityStatementUrl: { envVar: 'ACCESSIBILITY_STATEMENT_URL', type: 'url', defaultValue: '' },
+  accessibilityFeedbackUrl: { envVar: 'ACCESSIBILITY_FEEDBACK_URL', type: 'string', defaultValue: '' },
+  helpUrl: { envVar: 'HELP_URL', type: 'url', defaultValue: '' },
+  easyReadUrl: { envVar: 'EASY_READ_URL', type: 'url', defaultValue: '' },
+  signLanguageUrl: { envVar: 'SIGN_LANGUAGE_URL', type: 'url', defaultValue: '' },
   // Login header customization. The logo box is otherwise a fixed 64×64
   // (w-16/h-16), which fits a wide wordmark to ~13px tall; set a max height
   // and/or width (any CSS length, e.g. "230px" or "3rem") to size it. The
@@ -266,6 +326,9 @@ export const CONFIG_ENV_MAP: Record<string, { envVar: string; fileEnvVar?: strin
   // password. For JMAP servers that hand out API tokens, such as Fastmail,
   // whose API accepts no passwords at all.
   loginShowTokenLogin: { envVar: 'LOGIN_SHOW_TOKEN_LOGIN', type: 'boolean', defaultValue: false },
+  // Show the "Remember me" box on the login form. Off (the default) remembers
+  // every sign-in, as long as a SESSION_SECRET makes that possible.
+  loginShowRememberMe: { envVar: 'LOGIN_SHOW_REMEMBER_ME', type: 'boolean', defaultValue: false },
   // Show the build version in the login footer. Off keeps the exact version
   // from being disclosed to unauthenticated visitors.
   loginShowVersion: { envVar: 'LOGIN_SHOW_VERSION', type: 'boolean', defaultValue: true },
@@ -286,6 +349,16 @@ export const CONFIG_ENV_MAP: Record<string, { envVar: string; fileEnvVar?: strin
   // through its end_session_endpoint (#905). Off keeps the provider signed in,
   // for providers shared with other apps that should stay signed in.
   oauthEndSession: { envVar: 'OAUTH_END_SESSION', type: 'boolean', defaultValue: true },
+  // Signing out revokes the refresh token at the provider's revocation
+  // endpoint. Off only drops it from the browser, so the provider keeps the
+  // grant: Stalwart 1.0 then skips the consent screen on the next sign-in
+  // (#1388), and the token stays valid at the provider until it expires.
+  oauthRevokeOnSignOut: { envVar: 'OAUTH_REVOKE_ON_SIGN_OUT', type: 'boolean', defaultValue: true },
+  // The provider's logout URL, for providers whose discovery document has no
+  // end_session_endpoint (#1279). Used instead of the discovered one when set.
+  // Applies to the global provider only; JMAP_SERVERS entries set their own
+  // oauth.endSessionUrl.
+  oauthEndSessionUrl: { envVar: 'OAUTH_END_SESSION_URL', type: 'url', defaultValue: '' },
   // Where the provider sends the browser after ending its session. Must be
   // registered with the provider as a post-logout redirect URI. Empty = none
   // is sent and the provider shows its own signed-out page.
@@ -320,6 +393,13 @@ export const CONFIG_ENV_MAP: Record<string, { envVar: string; fileEnvVar?: strin
   logLevel: { envVar: 'LOG_LEVEL', type: 'enum', defaultValue: 'info', enumValues: ['error', 'warn', 'info', 'debug'] },
   sessionSecret: { envVar: 'SESSION_SECRET', fileEnvVar: 'SESSION_SECRET_FILE', fileKey: "sessionSecretFile", type: 'string', defaultValue: '' },
   extensionDirectoryUrl: { envVar: 'EXTENSION_DIRECTORY_URL', type: 'url', defaultValue: 'https://extensions.bulwarkmail.org' },
+  // Root keys (base64 raw Ed25519, comma-separated) a self-hosted extension
+  // directory signs its keyring with. The official directory's are built in
+  // (lib/admin/directory-keys.ts); with none known, marketplace bundles are
+  // installed without a signature check.
+  extensionDirectoryRootKeys: { envVar: 'EXTENSION_DIRECTORY_ROOT_KEYS', type: 'string', defaultValue: '' },
+  // 'beta' also offers pre-release versions from the marketplace.
+  extensionDirectoryChannel: { envVar: 'EXTENSION_DIRECTORY_CHANNEL', type: 'enum', defaultValue: 'stable', enumValues: ['stable', 'beta'] },
   // BYOMC — "bring your own mail client" (atmosphere-mail #1791). When the
   // operator turns this on, a Settings → Mail → "Connect a mail client" tab
   // appears showing the IMAP/SMTP endpoints a user should plug into
@@ -343,6 +423,17 @@ export const CONFIG_ENV_MAP: Record<string, { envVar: string; fileEnvVar?: strin
   // white-label or self-hosted deployment at its own connector.
   connectorEnabled: { envVar: 'CONNECTOR_ENABLED', type: 'boolean', defaultValue: true },
   connectorUrl: { envVar: 'CONNECTOR_URL', type: 'url', defaultValue: 'https://connector.bulwarkmail.org' },
+  // Fail-closed "no third-party traffic" mode (#903): every built-in outside
+  // host in lib/outgoing-hosts.ts is off (telemetry, version check, the
+  // built-in push relay, the official extension directory, the connector,
+  // sender favicons, MyMemory, maps links, WKD) and plugins that declare
+  // network access don't run. Instance-wide on purpose. An env "on" can't be
+  // switched off in the admin panel (lib/admin/third-party-mode.ts).
+  noThirdPartyTraffic: { envVar: 'NO_THIRD_PARTY_TRAFFIC', type: 'boolean', defaultValue: false },
+  // BIMI sender logos (/api/bimi). Off shows a logo whose only backing is the
+  // sender's DNS record and an enforcing DMARC policy; on also requires a
+  // valid Verified Mark or Common Mark Certificate, as Gmail and Apple Mail do.
+  bimiRequireCertificate: { envVar: 'BIMI_REQUIRE_CERTIFICATE', type: 'boolean', defaultValue: false },
   // WOPI document editing (#425). `wopiClientUrl` is the editor's base URL
   // (Collabora Online / OnlyOffice / EuroOffice, ...); discovery is fetched
   // from `<url>/hosting/discovery` unless the URL already carries a path.
@@ -353,6 +444,12 @@ export const CONFIG_ENV_MAP: Record<string, { envVar: string; fileEnvVar?: strin
   // than the browser (docker networks, split DNS). The base path of a
   // sub-path install is added to a bare origin (#1130).
   wopiHostUrl: { envVar: 'WOPI_HOST_URL', type: 'url', defaultValue: '' },
+  // "New file" formats (#1393). Empty = every format the editor can edit and
+  // a blank template exists for; otherwise a comma-separated list of
+  // extensions. `wopiTemplateDir` is a server directory whose `new.<ext>`
+  // files replace the shipped blank templates or add formats.
+  wopiNewFileFormats: { envVar: 'WOPI_NEW_FILE_FORMATS', type: 'string', defaultValue: '' },
+  wopiTemplateDir: { envVar: 'WOPI_TEMPLATE_DIR', type: 'string', defaultValue: '' },
 };
 
 /** Keys that should never be exposed to the client config endpoint */

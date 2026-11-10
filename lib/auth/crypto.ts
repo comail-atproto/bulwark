@@ -9,10 +9,14 @@ const TAG_LENGTH = 16;
 const MIN_SECRET_LENGTH = 32;
 
 interface SessionIdentity {
+  /** Original sign-in time for the organisation session limit. */
+  signedInAt?: number;
   /** Verified atproto identity for public profile display. */
   did?: string;
   groupwareEnabled?: boolean;
   buildersEnabled?: boolean;
+  /** Inbox-issued credential owned by this session, for sign-out cleanup. */
+  credentialId?: string;
 }
 
 export type SessionCredentials = (
@@ -41,8 +45,9 @@ export function encryptSession(
   serverUrl: string,
   username: string,
   secret: string | { token: string },
-  identity: SessionIdentity = {},
+  identity: SessionIdentity | number = {},
 ): string {
+  if (typeof identity === 'number') identity = { signedInAt: identity };
   const key = getKey();
   const iv = randomBytes(IV_LENGTH);
   const cipher = createCipheriv(ALGORITHM, key, iv);
@@ -50,12 +55,14 @@ export function encryptSession(
   const credential = typeof secret === 'string' ? { password: secret } : { token: secret.token };
   const payload = JSON.stringify({
     v: 1,
+    signedInAt: identity.signedInAt ?? Date.now(),
     serverUrl,
     username,
     ...credential,
     ...(identity.did ? { did: identity.did } : {}),
     ...(typeof identity.groupwareEnabled === 'boolean' ? { groupwareEnabled: identity.groupwareEnabled } : {}),
     ...(typeof identity.buildersEnabled === 'boolean' ? { buildersEnabled: identity.buildersEnabled } : {}),
+    ...(identity.credentialId ? { credentialId: identity.credentialId } : {}),
   });
   const encrypted = Buffer.concat([cipher.update(payload, 'utf8'), cipher.final()]);
   const tag = cipher.getAuthTag();
@@ -86,9 +93,11 @@ export function decryptSession(token: string): SessionCredentials | null {
         ? parsed.did
         : undefined;
     const identity: SessionIdentity = {
+      ...(typeof parsed.signedInAt === 'number' && Number.isFinite(parsed.signedInAt) && parsed.signedInAt > 0 ? { signedInAt: parsed.signedInAt as number } : {}),
       ...(did ? { did } : {}),
       ...(typeof parsed.groupwareEnabled === 'boolean' ? { groupwareEnabled: parsed.groupwareEnabled } : {}),
       ...(typeof parsed.buildersEnabled === 'boolean' ? { buildersEnabled: parsed.buildersEnabled } : {}),
+      ...(typeof parsed.credentialId === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(parsed.credentialId) ? { credentialId: parsed.credentialId } : {}),
     };
     if (typeof parsed.password === 'string' && parsed.password) {
       return { serverUrl: parsed.serverUrl, username: parsed.username, password: parsed.password, ...identity };
@@ -128,7 +137,11 @@ export type PayloadPurpose =
   /** WOPI access token, scoped to one file node and a six-hour expiry. */
   | 'wopi-token'
   /** The app password an impersonation handoff minted, kept for revocation. */
-  | 'impersonation-grant';
+  | 'impersonation-grant'
+  /** A user's plugin credentials (lib/plugin-secrets/vault.ts). */
+  | 'plugin-secrets'
+  /** When a token sign-in happened, for the maximum session length (lib/auth/session-age.ts). */
+  | 'session-age';
 
 /**
  * Whether a blob minted before purposes were bound may be re-admitted for
@@ -148,6 +161,8 @@ const LEGACY_PAYLOAD_MARKERS: Record<PayloadPurpose, (payload: Record<string, un
   'pair-refresh': () => false,
   'wopi-token': (p) => p.t === 'wopi',
   'impersonation-grant': () => false,
+  'plugin-secrets': () => false,
+  'session-age': () => false,
 };
 
 export function encryptPayload(payload: Record<string, unknown>, purpose: PayloadPurpose): string {

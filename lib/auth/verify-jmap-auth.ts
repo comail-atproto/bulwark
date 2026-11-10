@@ -4,6 +4,7 @@ import {
   isPublicHttpUrl,
   type PublicFetchResponse,
 } from '@/lib/security/url-guard';
+import { forwardedClientHeaders } from '@/lib/auth/client-address';
 
 const VERIFY_TIMEOUT_MS = 10000;
 const MAX_REDIRECTS = 3;
@@ -157,6 +158,12 @@ export interface VerifiedJmapSession {
 
 export interface VerifyJmapAuthOptions {
   trusted?: boolean;
+  /**
+   * Address of the client whose credential is checked, forwarded upstream as
+   * `X-Forwarded-For` so a mail server that trusts this host counts a wrong
+   * password against that client rather than against the webmail.
+   */
+  clientIp?: string;
 }
 
 /**
@@ -182,18 +189,17 @@ function usernamesEqual(a: string, b: string): boolean {
  * Does the claimed login name denote the server-reported one? Stalwart
  * canonicalizes the login it echoes in `Session.username` (`UserA@x` and the
  * bare local part `usera` both come back as `usera@x`), so besides a
- * case-insensitive match we accept a bare local part on either side.
+ * case-insensitive match we accept a bare local part as the claim. Not the
+ * other way round: a bare `Session.username` names no domain, so `info`
+ * would vouch for `info@` any domain, another account's login among them.
+ * Such a claim has to be one of the account's identities instead.
  */
 export function usernameMatchesSession(claimed: string, sessionUsername: string | undefined): boolean {
   if (!sessionUsername) return false;
   if (usernamesEqual(claimed, sessionUsername)) return true;
-  const claimedAt = claimed.indexOf('@');
   const sessionAt = sessionUsername.indexOf('@');
-  if (claimedAt < 0 && sessionAt > 0) {
+  if (!claimed.includes('@') && sessionAt > 0) {
     return usernamesEqual(claimed, sessionUsername.slice(0, sessionAt));
-  }
-  if (sessionAt < 0 && claimedAt > 0) {
-    return usernamesEqual(claimed.slice(0, claimedAt), sessionUsername);
   }
   return false;
 }
@@ -307,7 +313,11 @@ async function fetchIdentityEmails(
     }
     const requestInit = {
       method: 'POST',
-      headers: { Authorization: authHeader, 'Content-Type': 'application/json' },
+      headers: {
+        Authorization: authHeader,
+        'Content-Type': 'application/json',
+        ...forwardedClientHeaders(options.clientIp),
+      },
       body: JSON.stringify({
         using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
         methodCalls: [['Identity/get', { accountId, ids: null }, '0']],
@@ -384,7 +394,7 @@ async function fetchVerifiedSession(
 
       const requestInit = {
         method: 'GET',
-        headers: { Authorization: authHeader },
+        headers: { Authorization: authHeader, ...forwardedClientHeaders(options.clientIp) },
         signal: controller.signal,
       };
       // Untrusted (user-supplied) endpoints connect through the rebinding-safe

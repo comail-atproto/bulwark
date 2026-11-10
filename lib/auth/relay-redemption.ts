@@ -16,6 +16,7 @@ export interface RelaySsoCredential {
   did: string;
   mailbox: string;
   appPassword: string;
+  credentialId?: string;
   groupwareEnabled: boolean;
   buildersEnabled: boolean;
 }
@@ -109,6 +110,7 @@ function parseCredential(value: unknown): RelaySsoCredential {
     appPassword.length === 0 ||
     appPassword.length > 1024 ||
     hasAsciiControl(appPassword) ||
+    (raw.credential_id !== undefined && (typeof raw.credential_id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(raw.credential_id))) ||
     typeof raw.groupware_enabled !== 'boolean' ||
     typeof raw.builders_enabled !== 'boolean'
   ) {
@@ -118,9 +120,16 @@ function parseCredential(value: unknown): RelaySsoCredential {
     did,
     mailbox,
     appPassword,
+    ...(typeof raw.credential_id === 'string' ? { credentialId: raw.credential_id } : {}),
     groupwareEnabled: raw.groupware_enabled,
     buildersEnabled: raw.builders_enabled,
   };
+}
+
+export class RelayRedemptionStatusError extends Error {
+  constructor(readonly status: number, readonly credentialCapacity = false) {
+    super('Relay SSO code redemption failed');
+  }
 }
 
 export async function redeemRelaySsoCode(
@@ -141,7 +150,17 @@ export async function redeemRelaySsoCode(
     body: JSON.stringify({ code }),
     signal: AbortSignal.timeout(5000),
   });
-  if (!response.ok) throw new Error('Relay SSO code redemption failed');
+  if (!response.ok) {
+    let credentialCapacity = false;
+    if (response.status === 429) {
+      try {
+        credentialCapacity = (await readBoundedUtf8Body(response.body, 128)).trim() === 'credential capacity reached';
+      } catch {
+        // Oversized or unreadable errors retain the generic failure response.
+      }
+    }
+    throw new RelayRedemptionStatusError(response.status, credentialCapacity);
+  }
   const contentType = response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase();
   const declaredLength = Number(response.headers.get('content-length'));
   if (contentType !== 'application/json' || (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES)) {
