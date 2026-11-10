@@ -32,6 +32,8 @@ function makeClient() {
     searchEmails: vi.fn().mockResolvedValue({ emails: [], hasMore: false, total: 0 }),
     advancedSearchEmails: vi.fn().mockResolvedValue({ emails: [], hasMore: false, total: 0 }),
     getSomeEmails: vi.fn().mockResolvedValue([]),
+    getEmails: vi.fn().mockResolvedValue({ emails: [], hasMore: false, total: 0, state: 'email-state' }),
+    getThreads: vi.fn().mockResolvedValue([]),
     getAccountId: () => 'me',
   } as unknown as IJMAPClient;
 }
@@ -80,8 +82,8 @@ describe('search folder scope (#788)', () => {
     // No mailbox id -> the JMAP client omits the inMailbox constraint; the
     // shared folder's owner is asked as well (#1082).
     expect(client.searchEmails).toHaveBeenCalledTimes(2);
-    expect(client.searchEmails).toHaveBeenCalledWith('invoice', undefined, undefined, 50, 0);
-    expect(client.searchEmails).toHaveBeenCalledWith('invoice', undefined, 'owner-x', 50, 0);
+    expect(client.searchEmails).toHaveBeenCalledWith('invoice', undefined, undefined, 50, 0, { deferSnippets: true });
+    expect(client.searchEmails).toHaveBeenCalledWith('invoice', undefined, 'owner-x', 50, 0, { deferSnippets: true });
   });
 
   it('advanced search from within a folder does not add an inMailbox condition', async () => {
@@ -121,6 +123,29 @@ describe('search folder scope (#788)', () => {
     expect(accountId).toBe('owner-x');
   });
 
+  it('puts the folder next to the phrase conditions, not into an operator object', async () => {
+    useEmailStore.getState().setSearchMailboxId('owner-x:x-inbox');
+    useEmailStore.setState({
+      searchQuery: '"annual report" 2024',
+      searchFilters: { ...DEFAULT_SEARCH_FILTERS, from: 'bob@example.com' },
+    });
+
+    await useEmailStore.getState().advancedSearch(client);
+
+    // Stalwart rejects an operator object that also carries inMailbox.
+    const [filter, accountId] = (client.advancedSearchEmails as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(filter).toEqual({
+      operator: 'AND',
+      conditions: [
+        { text: '"annual report"' },
+        { text: '2024' },
+        { from: 'bob@example.com' },
+        { inMailbox: 'x-inbox' },
+      ],
+    });
+    expect(accountId).toBe('owner-x');
+  });
+
   it('keeps the chosen scope when the user navigates the mail list', () => {
     useEmailStore.getState().setSearchMailboxId('inbox');
     useEmailStore.getState().selectMailbox('sent');
@@ -150,6 +175,21 @@ describe('search folder scope (#788)', () => {
     useEmailStore.getState().clearSearchFilters();
 
     expect(useEmailStore.getState().searchMailboxId).toBe('');
+  });
+
+  // #1430: "Clear" in the filter panel re-runs the search with nothing left
+  // to search for, which listed every message of the account in the folder.
+  it('shows the open folder again when the filters are cleared', async () => {
+    useEmailStore.setState({ searchFilters: { ...DEFAULT_SEARCH_FILTERS, from: 'bob@example.com' } });
+    await useEmailStore.getState().advancedSearch(client);
+    (client.advancedSearchEmails as ReturnType<typeof vi.fn>).mockClear();
+
+    useEmailStore.getState().clearSearchFilters();
+    await useEmailStore.getState().advancedSearch(client);
+
+    expect(client.advancedSearchEmails).not.toHaveBeenCalled();
+    expect(client.getEmails).toHaveBeenCalledTimes(1);
+    expect((client.getEmails as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe('sent');
   });
 });
 
