@@ -5,7 +5,15 @@ import { Node, mergeAttributes } from "@tiptap/core";
 import { NodeViewWrapper, ReactNodeViewRenderer } from "@tiptap/react";
 import type { NodeViewProps } from "@tiptap/react";
 
-function ResizableImageView({ node, updateAttributes, selected }: NodeViewProps) {
+export interface ResizableImageOptions {
+  /** Open the alt text dialog for the image at this position. */
+  onEditAlt?: (pos: number) => void;
+  /** The name of the button that does it ("Image description"). */
+  editAltLabel?: string;
+}
+
+function ResizableImageView({ node, updateAttributes, selected, extension, getPos }: NodeViewProps) {
+  const { onEditAlt, editAltLabel } = extension.options as ResizableImageOptions;
   const imgRef = useRef<HTMLImageElement>(null);
   const [resizing, setResizing] = useState(false);
   const startState = useRef<{ x: number; y: number; width: number; height: number; handle: string }>({
@@ -76,6 +84,25 @@ function ResizableImageView({ node, updateAttributes, selected }: NodeViewProps)
           style={{ width: "100%", height: "auto", display: "block" }}
           draggable={false}
         />
+        {selected && onEditAlt && (
+          // Edit what the image says to screen readers. Reachable with Tab
+          // while the image is selected, and from the toolbar.
+          <button
+            type="button"
+            contentEditable={false}
+            data-testid="image-alt-edit"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={(e) => {
+              e.stopPropagation();
+              const pos = typeof getPos === "function" ? getPos() : undefined;
+              if (typeof pos === "number") onEditAlt(pos);
+            }}
+            className="absolute top-1 start-1 rounded bg-background/90 px-1.5 py-0.5 text-xs font-medium text-foreground shadow border border-border"
+          >
+            {node.attrs.alt === "" ? "ALT ∅" : "ALT"}
+            <span className="sr-only">{editAltLabel}</span>
+          </button>
+        )}
         {selected && (
           <>
             {/* Resize handle: right */}
@@ -100,8 +127,12 @@ function ResizableImageView({ node, updateAttributes, selected }: NodeViewProps)
   );
 }
 
-export const ResizableImage = Node.create({
+export const ResizableImage = Node.create<ResizableImageOptions>({
   name: "image",
+
+  addOptions() {
+    return { onEditAlt: undefined, editAltLabel: undefined };
+  },
   group: "inline",
   inline: true,
   draggable: true,
@@ -110,7 +141,12 @@ export const ResizableImage = Node.create({
   addAttributes() {
     return {
       src: { default: null },
-      alt: { default: null },
+      // null: nobody said what the image shows; "": decorative (kept as alt="").
+      alt: {
+        default: null,
+        parseHTML: (el) => el.getAttribute("alt"),
+        renderHTML: (attrs) => (attrs.alt == null ? {} : { alt: attrs.alt }),
+      },
       title: { default: null },
       width: { default: null },
       cid: {

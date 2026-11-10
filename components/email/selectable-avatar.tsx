@@ -42,7 +42,7 @@ export function SelectableAvatar({
       }}
       className={cn(
         "group/select relative shrink-0 rounded-full outline-none",
-        "focus-visible:ring-2 focus-visible:ring-primary/60",
+        "",
         className,
       )}
     >
