@@ -3,6 +3,9 @@ import {
   buildEmbeddedSignatureHtml,
   htmlComposeBodyToPlainText,
   plainComposeBodyToHtml,
+  replaceEmbeddedSignature,
+  replacePlainTextSignature,
+  replacePlainTextSignatureAboveQuote,
   stripEmbeddedSignature,
 } from '../compose-format';
 import { SIGNATURE_BLOCK_MARKER, SIGNATURE_RANGE_MARKER, containsEmbeddedSignature } from '../signature-block';
@@ -82,5 +85,108 @@ describe('compose-format (#1022): HTML <-> plain text switch', () => {
     const text = htmlComposeBodyToPlainText(start, identity, { separator: true });
     const back = plainComposeBodyToHtml(text, identity, { separator: true });
     expect(back).toBe(start);
+  });
+
+  it('adds no separator paragraph in front of a signature that has its own delimiter', () => {
+    const html = buildEmbeddedSignatureHtml({ textSignature: '-- \nUser A' }, { embed: true, separator: true });
+    expect(html).not.toContain(`${SIGNATURE_RANGE_MARKER}="separator"`);
+    expect(count(html, '-- ')).toBe(1);
+  });
+});
+
+describe('switching identity swaps the signature', () => {
+  const other = { htmlSignature: '<i>Team</i>', textSignature: 'Team' };
+  const none = { htmlSignature: '', textSignature: '' };
+  const embed = (sig: typeof identity) => buildEmbeddedSignatureHtml(sig, { embed: true, separator: true });
+  // The DOM writes valueless attributes as =""; compare in its spelling.
+  const dom = (html: string) => new DOMParser().parseFromString(html, 'text/html').body.innerHTML;
+
+  describe('replaceEmbeddedSignature', () => {
+    it('puts the new signature where the old one was', () => {
+      const html = `<p>Hi</p>${embed(identity)}<blockquote>original</blockquote>`;
+      expect(replaceEmbeddedSignature(html, embed(other)))
+        .toBe(dom(`<p>Hi</p>${embed(other)}<blockquote>original</blockquote>`));
+    });
+
+    it('removes the signature for an identity without one', () => {
+      const html = `<p>Hi</p>${embed(identity)}<blockquote>original</blockquote>`;
+      expect(replaceEmbeddedSignature(html, embed(none))).toBe('<p>Hi</p><blockquote>original</blockquote>');
+    });
+
+    it('adds a signature above the quote when the body had none', () => {
+      expect(replaceEmbeddedSignature('<p>Hi</p><blockquote>original</blockquote>', embed(other)))
+        .toBe(dom(`<p>Hi</p>${embed(other)}<blockquote>original</blockquote>`));
+    });
+
+    it('keeps text typed on the line under the signature', () => {
+      const typedBelow = embed(identity).replace(
+        `<p ${SIGNATURE_RANGE_MARKER}="end"></p>`,
+        `<p ${SIGNATURE_RANGE_MARKER}="end">P.S. see you</p>`,
+      );
+      expect(replaceEmbeddedSignature(`<p>Hi</p>${typedBelow}`, embed(none)))
+        .toBe('<p>Hi</p><p>P.S. see you</p>');
+      expect(replaceEmbeddedSignature(`<p>Hi</p>${typedBelow}`, embed(other)))
+        .toBe(dom(`<p>Hi</p>${embed(other)}<p>P.S. see you</p>`));
+    });
+
+    it('adds a signature at the end when there is no quote', () => {
+      expect(replaceEmbeddedSignature('<p>Hi</p>', embed(other))).toBe(dom(`<p>Hi</p>${embed(other)}`));
+    });
+
+    it('adds a signature above the quote header when the body had none (#842)', () => {
+      const html = '<p>Hi</p><p>On Mon, Bob wrote:</p><blockquote>original</blockquote>';
+      expect(replaceEmbeddedSignature(html, embed(other), { quoteHeader: 'On Mon, Bob wrote:' }))
+        .toBe(dom(`<p>Hi</p>${embed(other)}<p>On Mon, Bob wrote:</p><blockquote>original</blockquote>`));
+    });
+
+    it('adds a signature above a forward header that has no quote element', () => {
+      const html = '<p>Hi</p><p>---------- Forwarded message ----------<br>From: Bob</p><p>original</p>';
+      expect(replaceEmbeddedSignature(html, embed(other), { quoteHeader: '---------- Forwarded message ----------' }))
+        .toBe(dom(`<p>Hi</p>${embed(other)}<p>---------- Forwarded message ----------<br>From: Bob</p><p>original</p>`));
+    });
+  });
+
+  describe('replacePlainTextSignatureAboveQuote (#842)', () => {
+    const header = 'On Mon, Bob wrote:';
+    const quote = `${header}\n> original`;
+
+    it('adds the signature between the reply and the quote header', () => {
+      expect(replacePlainTextSignatureAboveQuote(`\n\n${quote}`, header, none, identity, { separator: true }))
+        .toBe(`\n\n-- \nAlice\nAcme\n\n${quote}`);
+      expect(replacePlainTextSignatureAboveQuote(`Hi\n\n${quote}`, header, none, identity, { separator: true }))
+        .toBe(`Hi\n\n-- \nAlice\nAcme\n\n${quote}`);
+    });
+
+    it('swaps or removes the signature above the quote', () => {
+      const signed = `Hi\n\n-- \nAlice\nAcme\n\n${quote}`;
+      expect(replacePlainTextSignatureAboveQuote(signed, header, identity, other, { separator: true }))
+        .toBe(`Hi\n\n-- \nTeam\n\n${quote}`);
+      expect(replacePlainTextSignatureAboveQuote(signed, header, identity, none, { separator: true }))
+        .toBe(`Hi\n\n${quote}`);
+    });
+
+    it('leaves a body alone whose quote header is gone', () => {
+      expect(replacePlainTextSignatureAboveQuote('Hi\n\n> original', header, none, identity, { separator: true }))
+        .toBe('Hi\n\n> original');
+    });
+  });
+
+  describe('replacePlainTextSignature', () => {
+    const signed = 'Hi\n\n-- \nAlice\nAcme';
+
+    it('swaps a trailing signature', () => {
+      expect(replacePlainTextSignature(signed, identity, other, { separator: true })).toBe('Hi\n\n-- \nTeam');
+    });
+
+    it('removes it for an identity without one and adds it back', () => {
+      const bare = replacePlainTextSignature(signed, identity, none, { separator: true });
+      expect(bare).toBe('Hi');
+      expect(replacePlainTextSignature(bare, none, identity, { separator: true })).toBe(signed);
+    });
+
+    it('leaves a body alone whose signature the user edited', () => {
+      const edited = 'Hi\n\n-- \nAlice (edited)';
+      expect(replacePlainTextSignature(edited, identity, other, { separator: true })).toBe(edited);
+    });
   });
 });

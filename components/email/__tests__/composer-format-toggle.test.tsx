@@ -137,6 +137,14 @@ vi.mock('@/stores/toast-store', () => ({
 }));
 
 vi.mock('@/lib/plugin-hooks', () => ({
+  identityHooks: {
+    onSignatureRender: { size: 0, transform: async (value: unknown) => value },
+    onIdentitySelect: { size: 0, emit: async () => {} },
+  },
+  templateHooks: {
+    onTemplateRender: { size: 0, transform: async (value: unknown) => value },
+    onTemplateApply: { size: 0, emit: async () => {} },
+  },
   emailHooks: {
     onComposerOpen: { call: async () => [] },
     onRecipientChange: { call: async () => [] },
@@ -144,8 +152,8 @@ vi.mock('@/lib/plugin-hooks', () => ({
     onRecipientChipsChange: { transform: async (chips: unknown) => chips },
     onDraftChange: { emit: () => {} },
     onBeforeDraftAutoSave: { transform: async (draft: unknown) => draft },
-    onBeforeEmailSend: { intercept: async () => true },
-    onComposeSend: { intercept: async () => true },
+    onBeforeEmailSend: { intercept: async () => true, interceptOutcome: async () => 'allowed' },
+    onComposeSend: { takeOver: async () => 'default' },
     onTransformOutgoingEmail: { transform: async (email: unknown) => email },
   },
   contactHooks: {
@@ -197,7 +205,11 @@ const DRAFT = {
   draftId: null,
 };
 
-const toggle = () => screen.getByTestId('composer-format-toggle') as HTMLButtonElement;
+// The plain-text switch lives in the toolbar's Options menu; open it on demand.
+const toggle = () => {
+  if (!screen.queryByTestId('composer-format-toggle')) fireEvent.click(screen.getByTestId('composer-options-menu'));
+  return screen.getByTestId('composer-format-toggle') as HTMLButtonElement;
+};
 const sendButton = () => screen.getAllByTestId('composer-send')[0] as HTMLButtonElement;
 const textarea = () => document.querySelector('textarea') as HTMLTextAreaElement | null;
 const countOf = (haystack: string, needle: string) => haystack.split(needle).length - 1;
@@ -218,14 +230,12 @@ describe('composer HTML / plain-text toggle (#1022)', () => {
     render(<EmailComposer initialData={DRAFT} />);
     expect(screen.getByTestId('rich-text-editor')).toBeInTheDocument();
     expect(textarea()).toBeNull();
-    expect(toggle()).toHaveAttribute('aria-pressed', 'false');
-    expect(toggle()).toHaveAttribute('title', 'format_plain_text');
+    expect(toggle()).toHaveAttribute('aria-checked', 'false');
 
     fireEvent.click(toggle());
 
     expect(screen.queryByTestId('rich-text-editor')).not.toBeInTheDocument();
-    expect(toggle()).toHaveAttribute('aria-pressed', 'true');
-    expect(toggle()).toHaveAttribute('title', 'format_rich_text');
+    expect(toggle()).toHaveAttribute('aria-checked', 'true');
     // Formatting flattened, signature carried over as plain text - once.
     expect(textarea()!.value).toBe('Draft text\n\n-- \nAlice');
   });
@@ -262,7 +272,7 @@ describe('composer HTML / plain-text toggle (#1022)', () => {
     useSettingsStore.setState({ plainTextMode: true });
     render(<EmailComposer initialData={{ ...DRAFT, body: 'Plain draft' }} />);
     expect(textarea()).not.toBeNull();
-    expect(toggle()).toHaveAttribute('aria-pressed', 'true');
+    expect(toggle()).toHaveAttribute('aria-checked', 'true');
 
     fireEvent.click(toggle());
     expect(screen.getByTestId('rich-text-editor')).toBeInTheDocument();
