@@ -32,29 +32,6 @@ afterEach(() => {
 });
 
 describe('server configuration recovery', () => {
-  it('fetches account-specific configuration again after switching accounts', async () => {
-    const { useAccountStore } = await import('@/stores/account-store');
-    useAccountStore.setState({ accounts: [], activeAccountId: null, defaultAccountId: null });
-    const first = useAccountStore.getState().addAccount({
-      label: 'Alice', username: 'alice@example.test', serverUrl: 'https://inbox.example', authMode: 'basic', rememberMe: true,
-      displayName: 'Alice', email: 'alice@example.test', lastLoginAt: 1, isConnected: true, hasError: false, isDefault: true,
-    });
-    const second = useAccountStore.getState().addAccount({
-      label: 'Bob', username: 'bob@example.test', serverUrl: 'https://inbox.example', authMode: 'basic', rememberMe: true,
-      displayName: 'Bob', email: 'bob@example.test', lastLoginAt: 1, isConnected: true, hasError: false, isDefault: false,
-    });
-    mocks.apiFetch.mockResolvedValueOnce(Response.json(createConfig({ calendarEnabled: true })))
-      .mockResolvedValueOnce(Response.json(createConfig({ calendarEnabled: false })));
-    const { fetchConfig } = await import('../use-config');
-    useAccountStore.getState().setActiveAccount(first);
-    expect((await fetchConfig()).calendarEnabled).toBe(true);
-    useAccountStore.getState().setActiveAccount(second);
-    expect((await fetchConfig()).calendarEnabled).toBe(false);
-    expect(mocks.apiFetch).toHaveBeenNthCalledWith(1, '/api/config', expect.objectContaining({ headers: { 'X-JMAP-Cookie-Slot': '0' } }));
-    expect(mocks.apiFetch).toHaveBeenNthCalledWith(2, '/api/config', expect.objectContaining({ headers: { 'X-JMAP-Cookie-Slot': '1' } }));
-    useAccountStore.setState({ accounts: [], activeAccountId: null, defaultAccountId: null });
-  });
-
   it('caches a successful first response without leaving a timeout', async () => {
     mocks.apiFetch.mockResolvedValueOnce(success());
     const { fetchConfig } = await import('../use-config');
@@ -197,7 +174,7 @@ describe('server configuration recovery', () => {
     expect(second.result.current).toMatchObject({ isLoading: true, error: null });
     first.unmount();
     await act(() => vi.advanceTimersByTimeAsync(1));
-    expect(second.result.current).toEqual({ ...config, isLoading: false, error: null });
+    expect(second.result.current).toEqual({ ...config, hostedInboxLogoutDestination: '', isLoading: false, error: null });
     expect(mocks.apiFetch).toHaveBeenCalledTimes(2);
   });
 

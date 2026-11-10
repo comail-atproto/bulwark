@@ -1,5 +1,6 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { noThirdPartyTraffic, setNoThirdPartyTraffic } from '@/lib/third-party-mode';
 
 const configState = { demoMode: false };
 vi.mock('@/hooks/use-config', () => ({
@@ -40,6 +41,20 @@ describe('AtprotoHandle', () => {
     const { container } = render(<AtprotoHandle did={DID} />);
 
     await waitFor(() => expect(resolveAtprotoProfile).toHaveBeenCalledWith(DID));
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('waits for privacy settings and updates when public lookups are allowed', async () => {
+    setNoThirdPartyTraffic('unknown');
+    resolveAtprotoProfile.mockImplementation(async () => noThirdPartyTraffic() ? null : { did: DID, handle: 'alice.example.com', avatar: null });
+    const { container } = render(<AtprotoHandle did={DID} />);
+
+    expect(container).toBeEmptyDOMElement();
+
+    act(() => setNoThirdPartyTraffic(false));
+    expect(await screen.findByText('@alice.example.com')).toBeInTheDocument();
+
+    act(() => setNoThirdPartyTraffic(true));
     expect(container).toBeEmptyDOMElement();
   });
 
