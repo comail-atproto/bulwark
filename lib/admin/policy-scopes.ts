@@ -24,6 +24,7 @@ import {
   type OrganisationPolicy,
 } from './organisation-policy';
 import { sanitizePolicyDefaults } from './policy-defaults';
+import { trimTrailingDots } from '@/lib/url-normalization';
 
 export interface PolicyScopeOverrides {
   features?: Partial<FeatureGates>;
@@ -101,7 +102,7 @@ function cleanList(value: unknown, re: RegExp): string[] {
   const out = new Set<string>();
   for (const item of value) {
     if (typeof item !== 'string') continue;
-    const v = item.trim().toLowerCase().replace(/\.+$/, '');
+    const v = trimTrailingDots(item.trim().toLowerCase());
     if (re.test(v)) out.add(v);
   }
   return [...out];
@@ -171,7 +172,7 @@ export function sanitizeScopes(raw: unknown): PolicyScope[] {
 
 function domainOf(email: string): string {
   const at = email.lastIndexOf('@');
-  return at >= 0 ? email.slice(at + 1).trim().toLowerCase().replace(/\.+$/, '') : '';
+  return at >= 0 ? trimTrailingDots(email.slice(at + 1).trim().toLowerCase()) : '';
 }
 
 /** Whether a domain pattern ("example.com" or "*.example.com") covers `domain`. */

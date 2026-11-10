@@ -84,6 +84,18 @@ function drawer() {
 }
 
 describe('ContactsApp', () => {
+  it('hides Directory even when the server advertises principals', () => {
+    const supportsPrincipals = vi.spyOn(FAKE_CLIENT, 'supportsPrincipals').mockReturnValue(true);
+    try {
+      renderContacts();
+      fireEvent.click(screen.getAllByRole('button', { name: 'open_categories' })[0]);
+      expect(screen.queryByTestId('contacts-directory-entry')).toBeNull();
+      expect(screen.getByText('Alice Smith')).toBeInTheDocument();
+    } finally {
+      supportsPrincipals.mockRestore();
+    }
+  });
+
   beforeEach(() => localStorage.clear());
   afterEach(() => {
     act(() => {

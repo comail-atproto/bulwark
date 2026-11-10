@@ -1,15 +1,24 @@
 "use client";
 
+import { useRef } from "react";
 import { useTranslations } from "next-intl";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 
 interface MobileHandoffConsentProps {
   /** The app link the browser will open, with the credential material in its fragment. */
   url: string | null;
+  /**
+   * For the code hand-off (bulwarkmail.org/docs/development/mobile-handoff): makes the code live on
+   * confirmation and returns the link to open, or null when that failed.
+   * Shows the dialog on its own, without `url`.
+   */
+  resolveUrl?: (() => Promise<string | null>) | null;
   /** The account being handed over, for the explanation. */
   username: string;
-  /** The user stays in the webmail instead. */
+  /** The user stays in the webmail instead (also runs after the link opened). */
   onCancel: () => void;
+  /** `resolveUrl` returned null: nothing was handed over. */
+  onError?: () => void;
 }
 
 /**
@@ -20,13 +29,32 @@ interface MobileHandoffConsentProps {
  * `bulwarkmobile` scheme on the device receives whatever is handed over
  * (lib/auth/mobile-handoff.ts). Nothing leaves without this confirmation.
  */
-export function MobileHandoffConsent({ url, username, onCancel }: MobileHandoffConsentProps) {
+export function MobileHandoffConsent({ url, resolveUrl, username, onCancel, onError }: MobileHandoffConsentProps) {
   const t = useTranslations("login");
+  // The dialog closes itself right after confirming; while the code is being
+  // made live, that close must not count as declining.
+  const resolving = useRef(false);
   return (
     <ConfirmDialog
-      isOpen={!!url}
-      onClose={onCancel}
+      isOpen={!!url || !!resolveUrl}
+      onClose={() => {
+        if (!resolving.current) onCancel();
+      }}
       onConfirm={() => {
+        if (resolveUrl) {
+          if (resolving.current) return;
+          resolving.current = true;
+          void resolveUrl().catch(() => null).then((resolved) => {
+            resolving.current = false;
+            if (!resolved) {
+              onError?.();
+              return;
+            }
+            window.location.replace(resolved);
+            onCancel();
+          });
+          return;
+        }
         if (url) window.location.replace(url);
       }}
       title={t("mobile_handoff.title")}

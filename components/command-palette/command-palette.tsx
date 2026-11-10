@@ -347,7 +347,7 @@ function CommandPalette({ onClose, onShowShortcuts }: { onClose: () => void; onS
             placeholder={t("placeholder")}
             autoComplete="off"
             spellCheck={false}
-            className="h-12 flex-1 min-w-0 bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none"
+            className="h-12 flex-1 min-w-0 bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus-inset"
           />
           <kbd className="hidden sm:inline-flex items-center rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-[0.625rem] text-muted-foreground">Esc</kbd>
           {/* Full screen on a phone: no backdrop to tap and no Escape key (R4). */}

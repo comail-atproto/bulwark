@@ -1,11 +1,11 @@
 import type { IJMAPClient } from '@/lib/jmap/client-interface';
 import type { Email, Identity } from '@/lib/jmap/types';
 import { computeReplyThreadingHeaders } from '@/lib/email-threading';
-import { findDraftIdentityId, findReplyIdentityId } from '@/lib/reply-identity';
+import { deliveryAddresses, findDraftIdentityId, findReplyIdentityId } from '@/lib/reply-identity';
 import { buildReplyRecipients, isSelfSent } from '@/lib/reply-recipients';
 import { buildReplySubject } from '@/lib/subject-prefix';
 
-type ReplySource = Pick<Email, 'from' | 'replyTo' | 'to' | 'cc' | 'bcc'>;
+type ReplySource = Pick<Email, 'from' | 'replyTo' | 'to' | 'cc' | 'bcc' | 'headers'>;
 
 export interface QuickReplyEnvelope {
   recipients: string[];
@@ -36,7 +36,12 @@ export function quickReplyEnvelope(email: ReplySource, identities: Identity[]): 
   const selfSentIdentityId = isSelfSent(replySource, ownIdentityEmails)
     ? findDraftIdentityId(identities, email.from?.[0])
     : null;
-  const sendingIdentityId = selfSentIdentityId ?? findReplyIdentityId(identities, { to: email.to, cc: email.cc, bcc: email.bcc });
+  const sendingIdentityId = selfSentIdentityId ?? findReplyIdentityId(identities, {
+    to: email.to,
+    cc: email.cc,
+    bcc: email.bcc,
+    deliveredTo: deliveryAddresses(email.headers),
+  });
   const sendingIdentity = (sendingIdentityId ? identities.find((i) => i.id === sendingIdentityId) : undefined) || primaryIdentity;
   return { recipients, sendingIdentity, primaryIdentity };
 }

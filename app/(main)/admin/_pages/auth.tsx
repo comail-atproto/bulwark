@@ -10,6 +10,7 @@ import { SettingsSection, SettingItem, SectionNav } from '@/components/settings/
 import { Button } from '@/components/ui/button';
 import { Dialog } from '@/components/ui/dialog';
 import { AdminPageHeader } from '@/components/admin/page-header';
+import { AdminBodySkeleton } from '@/components/boot-skeleton/admin-skeleton';
 import { AdminSaveBar } from '@/components/admin/save-bar';
 import { withEdit } from '@/lib/admin/edits';
 import { useAdminFeedback } from '@/components/admin/feedback';
@@ -172,9 +173,7 @@ export function AuthPage() {
     return (
       <div>
         <AdminPageHeader title={PAGE.label} description={PAGE.description} />
-        <div className="flex items-center justify-center py-12 text-sm text-muted-foreground">
-          <Loader2 className="me-2 h-4 w-4 animate-spin" /> Loading
-        </div>
+        <AdminBodySkeleton status="Loading" />
       </div>
     );
   }
@@ -305,6 +304,7 @@ export function AuthPage() {
           <ConfigToggleItem label="Allow private endpoints" description="Permit discovered endpoints on other hosts to resolve to RFC-1918 / loopback addresses. Endpoints on the issuer's own host are always allowed, so split-DNS setups rarely need this." configKey="oauthAllowPrivateEndpoints" value={currentValue('oauthAllowPrivateEndpoints') as boolean} source={config.oauthAllowPrivateEndpoints?.source} onChange={handleChange} onRevert={handleRevert} />
           <ConfigTextItem label="Scopes" description={`Space-separated scopes that replace the defaults (${DEFAULT_OAUTH_SCOPES}). Leave blank to use them. offline_access is not requested by default; add it here or under Extra Scopes if your provider only issues refresh tokens for it, or sessions end when the access token expires.`} configKey="oauthScopes" value={currentValue('oauthScopes') as string} source={config.oauthScopes?.source} onChange={handleChange} onRevert={handleRevert} placeholder={DEFAULT_OAUTH_SCOPES} wide />
           <ConfigTextItem label="Extra scopes" description={`Additional space-separated scopes appended to the defaults (${DEFAULT_OAUTH_SCOPES}). Ignored when OAuth Scopes is set.`} configKey="oauthExtraScopes" value={currentValue('oauthExtraScopes') as string} source={config.oauthExtraScopes?.source} onChange={handleChange} onRevert={handleRevert} placeholder="urn:ietf:params:oauth:..." wide />
+          <ConfigTextItem label="Resource" description="RFC 8707 resource indicator sent with the authorization request, for providers that issue access tokens per API (Pocket ID, for example). The token's audience is then this resource, usually the mail server's URL. Must be an absolute URI without a fragment. Not sent when signing in to a server entry with its own provider." configKey="oauthResource" value={currentValue('oauthResource') as string} source={config.oauthResource?.source} onChange={handleChange} onRevert={handleRevert} placeholder="https://mail.example.com" wide />
         </SettingsSection>
 
         <SettingsSection id="sso" title="Single sign-on">

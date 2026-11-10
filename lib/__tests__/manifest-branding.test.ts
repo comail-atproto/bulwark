@@ -4,7 +4,10 @@ import { join } from 'node:path';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('next/headers', () => ({ headers: vi.fn() }));
-vi.mock('@/lib/logger', () => ({ logger: { debug: vi.fn(), warn: vi.fn() } }));
+vi.mock('@/lib/logger', () => ({
+  configureLogger: vi.fn(),
+  logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+}));
 
 import { headers } from 'next/headers';
 import { configManager } from '@/lib/admin/config-manager';

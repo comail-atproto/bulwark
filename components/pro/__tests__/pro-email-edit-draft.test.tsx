@@ -143,6 +143,12 @@ describe('Pro email view - editing a draft', () => {
     expect(initialData.draftAccountId).toBeUndefined();
   });
 
+  // The ticks in the main list are another view's: the tab's side panel doesn't get them.
+  it('gives the side panel of an email tab no list selection', async () => {
+    await openAndEdit(undefined);
+    expect(viewerProps.current?.withListSelection).toBe(false);
+  });
+
   // Pro shell with the 0.16.23 login active and the 1.0 login's Drafts
   // browsed: the store reads a row of that list through the 1.0 login. A
   // view that names no login can't tell, so it names none - the active one
@@ -167,6 +173,28 @@ describe('Pro email view - editing a draft', () => {
     expect(initialData.draftLocalAccountId).toBeUndefined();
     // The draft's From decides, as for a draft of unknown origin.
     expect(initialData.selectedIdentityId).toBe('userb@v10::d');
+  });
+
+  // A text-only draft went to the rich editor (newlines collapsed, "<you>"
+  // gone) and an HTML draft to the textarea with its tags, whichever the
+  // plain-text setting said.
+  it('re-opens a plain-text draft as plain text', async () => {
+    const initialData = await openAndEdit(undefined, undefined, {
+      ...DRAFT,
+      bodyValues: { '1': { value: 'Hi <you>,\n\nsee below' } },
+    });
+
+    expect(initialData).toMatchObject({ body: 'Hi <you>,\n\nsee below', plainTextMode: true });
+  });
+
+  it('re-opens an HTML draft in the rich editor', async () => {
+    const initialData = await openAndEdit(undefined, undefined, {
+      ...DRAFT,
+      bodyValues: { '1': { value: 'Hi' }, '2': { value: '<p>Hi <b>there</b></p>' } },
+      htmlBody: [{ partId: '2', type: 'text/html' }],
+    });
+
+    expect(initialData).toMatchObject({ body: '<p>Hi <b>there</b></p>', plainTextMode: false });
   });
 
   it('reads a message of the login it names through that login\'s client, not through the main list', async () => {

@@ -23,6 +23,7 @@ vi.mock('@/stores/auth-store', () => {
 
 const ACCOUNT_TEAL = { id: 'acct-teal', avatarColor: '#0d9488', label: 'Teal account' };
 const accountState = {
+  accounts: [ACCOUNT_TEAL],
   getAccountById: (id: string) => (id === ACCOUNT_TEAL.id ? ACCOUNT_TEAL : undefined),
 };
 vi.mock('@/stores/account-store', () => ({

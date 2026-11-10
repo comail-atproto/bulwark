@@ -24,7 +24,7 @@ vi.mock('@/stores/auth-store', () => {
 });
 
 vi.mock('@/stores/account-store', () => {
-  const state = { getAccountById: () => undefined };
+  const state = { accounts: [], getAccountById: () => undefined };
   return {
     useAccountStore: Object.assign(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

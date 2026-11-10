@@ -17,6 +17,8 @@ vi.mock('@/stores/update-store', () => ({
 }));
 vi.mock('@/lib/clear-cached-data', () => ({ clearCachedData: vi.fn() }));
 vi.mock('../spam-siege-game', () => ({ SpamSiegeGame: () => null }));
+vi.mock('@/components/mail-transfer/mail-backup-settings', () => ({ MailBackupSettings: () => null }));
+vi.mock('@/components/offline/offline-settings', () => ({ OfflineSettings: () => null }));
 
 beforeEach(() => {
   config.sourceCodeUrl = '';

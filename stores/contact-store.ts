@@ -4,22 +4,31 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type { ContactCard, AddressBook, AddressBookRights, ContactName, ContactMedia } from '@/lib/jmap/types';
 import type { IJMAPClient } from '@/lib/jmap/client-interface';
-import { loadPrincipalDirectory } from '@/lib/jmap/principal-directory';
 import { generateUUID } from '@/lib/utils';
 import { debug } from '@/lib/debug';
-import { settingsHooks } from '@/lib/plugin-hooks';
+import { calendarHooks, contactHooks, settingsHooks } from '@/lib/plugin-hooks';
+import { BIRTHDAY_CALENDAR_ID } from '@/lib/birthday-calendar';
+import { useSettingsStore } from './settings-store';
 import { getClientByLocalAccountId } from './client-registry';
 import { sanitizeDisplayName, splitMailbox } from '@/lib/rfc5322-mailbox';
 import { inlineContactMedia, writeContactWithNewPhoto, type ContactSaveOptions } from '@/lib/contact-media';
-import { contactHooks } from '@/lib/plugin-hooks';
 import { contactToView } from '@/lib/plugin-projection';
-import { PrincipalsRequestError } from '@/lib/jmap/principals-error';
 import type { Principal } from '@/lib/jmap/types';
 import { currentStoreEpoch } from '@/lib/store-epoch';
 
 /** A contact that is about to be created, projected for plugins (no id yet). */
 function draftContactView(contact: Partial<ContactCard>) {
   return contactToView({ addressBookIds: {}, ...contact, id: contact.id ?? '' } as ContactCard);
+}
+
+function notifyBirthdayCalendarIfEnabled() {
+  try {
+    if (useSettingsStore.getState().showBirthdayCalendar) {
+      void calendarHooks.onCalendarChange.emit({ calendarId: BIRTHDAY_CALENDAR_ID, change: 'updated' });
+    }
+  } catch {
+    // Ignore when stores not initialized in unit tests
+  }
 }
 
 function sameIdSet(a: Set<string>, b: Set<string>): boolean {
@@ -620,33 +629,9 @@ export const useContactStore = create<ContactStore>()(
         }
       },
 
-      fetchDirectory: async (client) => {
-        if (!client.supportsPrincipals()) {
-          set({ directoryStatus: 'unavailable' });
-          return;
-        }
-        const epoch = currentStoreEpoch();
-        set({ directoryStatus: 'loading' });
-        try {
-          // Shared with the share dialog and free/busy (loadPrincipalDirectory).
-          const { principals, status } = await loadPrincipalDirectory(client);
-          if (currentStoreEpoch() !== epoch) return;
-          if (status === 'error') throw new PrincipalsRequestError(null);
-          if (status !== 'ok') debug.log('contacts', `Directory listing is ${status}; autocomplete offers ${principals.length} principals`);
-          // A restricted listing (Stalwart 1.0 without directory queries) still
-          // holds the principals the user knows, for autocomplete and browsing.
-          set({
-            directoryPrincipals: principalsToDirectory(principals),
-            directoryLoaded: true,
-            directoryStatus: status === 'restricted' ? 'forbidden' : 'ready',
-          });
-        } catch (error) {
-          if (currentStoreEpoch() !== epoch) return;
-          debug.error('Failed to fetch directory principals:', error);
-          // Keep what an earlier fetch returned: autocomplete still works off it.
-          const forbidden = error instanceof PrincipalsRequestError && error.type === 'forbidden';
-          set({ directoryStatus: forbidden ? 'forbidden' : 'error' });
-        }
+      fetchDirectory: async () => {
+        // Keep discovery disabled until the domain's builder explicitly permits it.
+        set({ directoryPrincipals: [], directoryLoaded: true, directoryStatus: 'unavailable' });
       },
 
       fetchAddressBooks: async (client) => {
@@ -768,6 +753,7 @@ export const useContactStore = create<ContactStore>()(
             isLoading: false,
           }));
           void contactHooks.onAfterContactCreate.emit(contactToView(stored));
+          notifyBirthdayCalendarIfEnabled();
           return true;
         } catch (error) {
           const msg = error instanceof Error ? error.message : 'Failed to create contact';
@@ -807,6 +793,7 @@ export const useContactStore = create<ContactStore>()(
           }));
           const updated = get().contacts.find(c => c.id === id);
           if (updated) void contactHooks.onAfterContactUpdate.emit(contactToView(updated));
+          notifyBirthdayCalendarIfEnabled();
           return true;
         } catch (error) {
           const msg = error instanceof Error ? error.message : 'Failed to update contact';
@@ -840,6 +827,7 @@ export const useContactStore = create<ContactStore>()(
             };
           });
           void contactHooks.onAfterContactDelete.emit({ contactIds: [id] });
+          notifyBirthdayCalendarIfEnabled();
           return true;
         } catch (error) {
           const msg = error instanceof Error ? error.message : 'Failed to delete contact';
@@ -852,6 +840,7 @@ export const useContactStore = create<ContactStore>()(
         if (!(await contactHooks.onBeforeContactCreate.intercept(draftContactView(contact)))) return false;
         set((state) => ({ contacts: [...state.contacts, contact] }));
         void contactHooks.onAfterContactCreate.emit(contactToView(contact));
+        notifyBirthdayCalendarIfEnabled();
         return true;
       },
 
@@ -864,6 +853,7 @@ export const useContactStore = create<ContactStore>()(
         }));
         const updated = get().contacts.find(c => c.id === id);
         if (updated) void contactHooks.onAfterContactUpdate.emit(contactToView(updated));
+        notifyBirthdayCalendarIfEnabled();
         return true;
       },
 
@@ -878,6 +868,7 @@ export const useContactStore = create<ContactStore>()(
           };
         });
         void contactHooks.onAfterContactDelete.emit({ contactIds: [id] });
+        notifyBirthdayCalendarIfEnabled();
         return true;
       },
 
@@ -939,36 +930,9 @@ export const useContactStore = create<ContactStore>()(
           if (results.length >= 10) break;
         }
 
-        // Augment with directory principals (other users on the server, RFC 9670).
-        // Contacts take precedence, so skip any address already suggested.
-        const { directoryPrincipals } = get();
-        if (directoryPrincipals.length > 0) {
-          const seen = new Set(results.map(r => r.email.toLowerCase()));
-          for (const p of directoryPrincipals) {
-            if (results.length >= 10) break;
-            const addr = p.email.toLowerCase();
-            if (seen.has(addr)) {
-              const betterName = p.description || p.name;
-              if (betterName && betterName !== p.email) {
-                const existing = results.find(r => r.email.toLowerCase() === addr);
-                if (existing && (!existing.name || existing.name === existing.email)) {
-                  existing.name = betterName;
-                }
-              }
-              continue;
-            }
-            if (p.name.toLowerCase().includes(lower) || addr.includes(lower) || (p.description && p.description.toLowerCase().includes(lower))) {
-              const displayName = p.description || p.name;
-              const name = displayName !== p.email ? displayName : '';
-              results.push({ name, email: p.email });
-              seen.add(addr);
-            }
-          }
-        }
-
         // Finally fold in recent recipients from the Sent folder (people you've
-        // written to - the OWA-style autocomplete cache). Contacts and directory
-        // principals take precedence, so skip any address already suggested (no
+        // written to - the OWA-style autocomplete cache). Contacts
+        // take precedence, so skip any address already suggested (no
         // duplicates). These carry the display name from the message, so match
         // on name or address.
         const { recentRecipients } = get();
@@ -1222,6 +1186,7 @@ export const useContactStore = create<ContactStore>()(
         });
         if (deletedIds.size > 0) {
           void contactHooks.onAfterContactDelete.emit({ contactIds: ids.filter(id => deletedIds.has(id)) });
+          notifyBirthdayCalendarIfEnabled();
         }
         return true;
       },
@@ -1636,7 +1601,10 @@ export const useContactStore = create<ContactStore>()(
           }
         }
 
-        if (imported > 0) void contactHooks.onContactsImport.emit({ addressBookId, imported });
+        if (imported > 0) {
+          void contactHooks.onContactsImport.emit({ addressBookId, imported });
+          notifyBirthdayCalendarIfEnabled();
+        }
         return imported;
       },
     });

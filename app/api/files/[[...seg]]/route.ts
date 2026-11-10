@@ -12,7 +12,7 @@ import { MAX_PRIVATE_FILE_BYTES, isSpaceFile, isSpaceFileInventory, readPrivateF
 
 export const dynamic = 'force-dynamic';
 type Params = { params: Promise<{ seg?: string[] }> };
-const errors = new Set(['unauthorized', 'forbidden', 'not_found', 'invalid_request', 'conflict', 'files_unavailable', 'authorization_required', 'too_large']);
+const ERROR_CODES = new Set(['unauthorized', 'forbidden', 'not_found', 'invalid_request', 'conflict', 'files_unavailable', 'authorization_required', 'too_large']);
 const json = (status: number, error: string) => NextResponse.json({ error }, { status, headers: { 'Cache-Control': 'no-store' } });
 const isJson = (type: string | null) => type?.split(';', 1)[0].trim().toLowerCase() === 'application/json';
 
@@ -77,7 +77,7 @@ async function proxy(req: NextRequest, params: Params['params'], method: 'GET' |
       return NextResponse.json(value, { headers: { 'Cache-Control': 'no-store' } });
     }
     const code = value && typeof value === 'object' && 'error' in value ? value.error : undefined;
-    if (typeof code === 'string' && errors.has(code) && [400, 401, 403, 404, 409, 413, 422, 501, 503].includes(response.status)) return json(response.status, code);
+    if (typeof code === 'string' && ERROR_CODES.has(code) && [400, 401, 403, 404, 409, 413, 422, 501, 503].includes(response.status)) return json(response.status, code);
   } catch { /* Provider and credential details stay outside browser responses. */ }
   return json(502, 'files_unavailable');
 }

@@ -3,34 +3,22 @@
 import { Plug } from '@/components/icons/comail';
 
 import { AppMain, SkipLink } from "@/components/layout/app-landmarks";
+import { LEGACY_TAB_MAP } from "@/lib/settings-tabs";
 import { useState, useEffect, useCallback, useRef, useMemo, useSyncExternalStore } from 'react';
 import { useRouter } from '@/i18n/navigation';
 import { useTranslations, useMessages } from 'next-intl';
 import {
-  Accessibility,
   ArrowLeft,
   ChevronRight,
   LogOut,
   Settings as SettingsIcon,
-  Palette,
-  User,
-  Shield,
-  PalmtreeIcon,
-  Calendar,
-  Filter,
-  FolderOpen,
-  HardDrive,
-  BookUser,
-  Bell,
   Puzzle,
-  BookOpen,
-  PenLine,
-  LayoutList,
-  Database,
-  Users,
-  RotateCcw,
   type AppIcon,
 } from '@/components/icons';
+import { SETTINGS_TAB_ICONS, type SettingsTabGroup } from '@/components/settings/settings-tab-icons';
+import { SettingsSkeleton, SettingsSkeletonBody } from '@/components/boot-skeleton/settings-skeleton';
+import { useSkeletonLabels } from '@/components/boot-skeleton/use-skeleton-labels';
+import { writeSettingsHints } from '@/lib/boot-skeleton/hints';
 import { useRegisterCommands } from '@/lib/command-registry';
 import { Button } from '@/components/ui/button';
 import { IconButton } from '@/components/ui/icon-button';
@@ -78,6 +66,7 @@ import { useManagedAccountStore } from '@/stores/managed-account-store';
 import { useIsDesktop } from '@/hooks/use-media-query';
 import { NavigationRail } from '@/components/layout/navigation-rail';
 import { PhoneHeaderActions } from '@/components/layout/phone-header-actions';
+import { useAppSidePanel } from '@/components/plugins/app-side-panel';
 import { SidebarAppsModal } from '@/components/layout/sidebar-apps-modal';
 import { InlineAppView } from '@/components/layout/inline-app-view';
 import { useSidebarApps } from '@/hooks/use-sidebar-apps';
@@ -98,8 +87,8 @@ import {
   settingsSubResults,
   tabKeywords,
   tabSearchEntries,
-  archiveActionSearchPaths,
-} from '@/lib/settings-search';
+  ARCHIVE_ACTION_SEARCH_PATHS,
+} from '@/lib/comail-settings-search';
 import { useAccountStore } from '@/stores/account-store';
 import { useMediaQuery, atLeast } from '@/hooks/use-media-query';
 import { useLiteLinkSegments } from '@/hooks/use-lite-link-segments';
@@ -112,7 +101,7 @@ type Tab = SettingsSearchTab;
 
 // `top` and `bottom` have no heading: the first five pages, and Backup & reset
 // after a rule at the end.
-type TabGroup = 'top' | 'mail' | 'apps' | 'bottom';
+type TabGroup = SettingsTabGroup;
 
 // A plugin that exposes a `settings-section` slot gets its own first-class
 // Settings entry, keyed `plugin:<id>`, so its UI (e.g. S/MIME key import) is
@@ -133,52 +122,14 @@ interface TabDef {
   sub?: boolean;
 }
 
-const tabIcons: Record<Tab, AppIcon> = {
-  account: User,
-  general: SettingsIcon,
-  notifications: Bell,
-  appearance: Palette,
-  accessibility: Accessibility,
-  message_list: LayoutList,
-  reading: BookOpen,
-  composing: PenLine,
-  vacation: PalmtreeIcon,
-  filters: Filter,
-  organize: FolderOpen,
-  byomc: Plug,
-  security: Shield,
-  sharing: Users,
-  recovery: RotateCcw,
-  calendar: Calendar,
-  contacts: BookUser,
-  files: HardDrive,
-  addons: Puzzle,
-  backup: Database,
-};
+// Shared with the boot skeleton, which draws the same nav before any script runs.
+const tabIcons = { ...SETTINGS_TAB_ICONS, byomc: Plug };
 
 const tabGroupOrder: TabGroup[] = ['top', 'mail', 'apps', 'bottom'];
 
-// Map legacy tab IDs to current ones; runs once on read of localStorage and
-// for every deep link, so old bookmarks, connector links and sidebar gears
-// land on the page that now holds the setting.
-export const LEGACY_TAB_MAP: Record<string, Tab> = {
-  email: 'reading',
-  advanced: 'backup',
-  layout: 'appearance',
-  themes: 'appearance',
-  content_senders: 'reading',
-  identities: 'account',
-  language: 'general',
-  protocol_handlers: 'general',
-  templates: 'composing',
-  folders: 'organize',
-  keywords: 'organize',
-  downloads: 'reading',
-  sidebar_apps: 'addons',
-  plugins: 'addons',
-  about_data: 'backup',
-  debug: 'backup',
-};
+// Legacy tab ids and their current pages live in lib/settings-tabs.ts, which
+// the pre-paint boot script reads too.
+export { LEGACY_TAB_MAP };
 
 // Where on the new page a legacy tab's settings now sit, so an old link
 // lands on that section rather than at the top of the page.
@@ -286,6 +237,7 @@ export function SettingsApp({ linkSegments: routeSegments }: SettingsAppProps = 
   const tShell = useTranslations('shell');
   const tDelegates = useTranslations('delegates');
   const tPalette = useTranslations('command_palette');
+  const skeletonLabels = useSkeletonLabels();
   const { client, isAuthenticated, logout, checkAuth, isLoading: authLoading } = useAuthStore();
   const { showAppsModal, inlineApp, loadedApps, handleManageApps, handleInlineApp, closeInlineApp, closeAppsModal } = useSidebarApps();
   const isEmbedded = useIsEmbedded();
@@ -416,7 +368,7 @@ export function SettingsApp({ linkSegments: routeSegments }: SettingsAppProps = 
     const subs: Partial<Record<Tab, SubResult[]>> = {};
     // Only rows the page draws right now, so every result lands on one.
     const shown = (entry: SettingsSearchEntry) => {
-      if (!archiveActionEnabled && archiveActionSearchPaths.has(entry.label)) return false;
+      if (!archiveActionEnabled && ARCHIVE_ACTION_SEARCH_PATHS.has(entry.label)) return false;
       if (entry.when === 'touch') return touchScreen;
       if (entry.when === 'mountainView') return mountainViewLayout;
       if (entry.when === 'multiAccount') return multiAccount;
@@ -526,8 +478,12 @@ export function SettingsApp({ linkSegments: routeSegments }: SettingsAppProps = 
   // an advanced section stays hidden until the switch is on, so after a
   // short wait turn it on rather than give up.
   const updateSetting = useSettingsStore((s) => s.updateSetting);
+  // The page itself rather than its skeleton (see the gate below).
+  const pageShown = isAuthenticated && !!client;
   useEffect(() => {
     if (!pendingSection || pendingSection.tab !== activeTab) return;
+    // The skeleton has no sections: wait until the page is drawn.
+    if (!pageShown) return;
     if (typeof window === 'undefined') return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -548,7 +504,7 @@ export function SettingsApp({ linkSegments: routeSegments }: SettingsAppProps = 
       window.cancelAnimationFrame(raf);
       if (timer) clearTimeout(timer);
     };
-  }, [pendingSection, activeTab, updateSetting]);
+  }, [pendingSection, activeTab, updateSetting, pageShown]);
 
   // Leaving the settings panel drops any shared-account scope so it never
   // leaks into the next visit or another session.
@@ -836,6 +792,15 @@ export function SettingsApp({ linkSegments: routeSegments }: SettingsAppProps = 
   // "<Page> - Settings - <account> - <app>" (WCAG 2.4.2). On a phone the
   // page list alone, with no page open, is just Settings.
   const activeTabLabel = visibleTabs.find((tab) => tab.id === effectiveActiveTab)?.label ?? '';
+
+  // The plugin side panel (app-side-panel), with the open page. Docked on
+  // desktop under a row with the page's name and its button; below 1024 px
+  // Settings is phone-shaped and the panel opens as a dialog.
+  const sidePanelContext = useMemo(
+    () => ({ page: { id: String(effectiveActiveTab), label: activeTabLabel } }),
+    [effectiveActiveTab, activeTabLabel],
+  );
+  const sidePanel = useAppSidePanel({ view: 'settings', context: sidePanelContext, dock: isDesktop });
   useDocumentTitle(
     activeTabLabel && (isDesktop || mobileShowContent)
       ? `${activeTabLabel} - ${tSidebar('settings')}`
@@ -875,8 +840,24 @@ export function SettingsApp({ linkSegments: routeSegments }: SettingsAppProps = 
     isAuthenticated,
   );
 
-  if (!isAuthenticated) {
-    return null;
+  // Which pages this account has, for the next load's skeleton nav
+  // (lib/boot-skeleton/hints.ts). Only the account's own list, once its
+  // capabilities are known; plugin entries are left out.
+  const hintedTabs = client && !managedAccountId
+    ? visibleTabs.filter((tab) => !tab.id.includes(':')).map((tab) => tab.id).join(' ')
+    : null;
+  useEffect(() => {
+    if (hintedTabs) writeSettingsHints(hintedTabs.split(' '));
+  }, [hintedTabs]);
+
+  // Until the session is up, the page's skeleton (the same one the server
+  // drew). Waiting for the client, not only the persisted sign-in, means the
+  // nav renders once with the account's pages instead of growing as the
+  // capabilities arrive.
+  if (!isAuthenticated || !client) {
+    return isEmbedded
+      ? <SettingsSkeletonBody embedded />
+      : <SettingsSkeleton label={skeletonLabels.label} labels={skeletonLabels.labels} />;
   }
 
   const renderTabContent = () => (
@@ -1098,6 +1079,16 @@ export function SettingsApp({ linkSegments: routeSegments }: SettingsAppProps = 
   }
 
   // Desktop layout
+  const settingsMain = (
+      <AppMain ref={attachContentScroll as (el: HTMLElement | null) => void} embedded={isEmbedded} label={activeTabLabel} className="flex-1 overflow-y-auto">
+        <div className={effectiveActiveTab.startsWith(PLUGIN_PAGE_PREFIX) ? "px-6 py-6" : "max-w-3xl mx-auto px-6 py-6"}>
+          {/* The page's heading for screen readers; the sidebar shows which
+              page is open (the phone header has a visible one). */}
+          <h1 className="sr-only">{activeTabLabel}</h1>
+          {renderTabContent()}
+        </div>
+      </AppMain>
+  );
   return (
     <div className={cn("flex flex-col pt-[env(safe-area-inset-top)]", mvShell ? "bg-[var(--mv-canvas)]" : "bg-background", isEmbedded ? "h-full" : "h-dvh")}>
       {!isEmbedded && <SkipLink>{tShell("skip_to_content")}</SkipLink>}
@@ -1245,14 +1236,23 @@ export function SettingsApp({ linkSegments: routeSegments }: SettingsAppProps = 
         onDoubleClick={() => { setSettingsSidebarWidth(256); localStorage.setItem('settings-sidebar-width', '256'); }}
       />
 
-      <AppMain ref={attachContentScroll as (el: HTMLElement | null) => void} embedded={isEmbedded} label={activeTabLabel} className="flex-1 overflow-y-auto">
-        <div className={effectiveActiveTab.startsWith(PLUGIN_PAGE_PREFIX) ? "px-6 py-6" : "max-w-3xl mx-auto px-6 py-6"}>
-          {/* The page's heading for screen readers; the sidebar shows which
-              page is open (the phone header has a visible one). */}
-          <h1 className="sr-only">{activeTabLabel}</h1>
-          {renderTabContent()}
+      {/* The page under a row with its name and the plugin side panel's
+          button, like the reader's toolbar, lined up with the sidebar's h-14
+          row. The same element with or without the panel, so a page keeps
+          what was typed when the panel starts or stops docking. */}
+      <div className="flex-1 min-w-0 flex flex-col" data-settings-side-panel-column="">
+        {sidePanel.docks && (
+          <div className="flex items-center gap-2 h-14 box-content border-b border-border px-2 sm:px-4 lg:px-6 shrink-0" data-settings-panel-row="">
+            {/* The page's h1 below names it for screen readers. */}
+            <div className="flex-1 min-w-0 truncate text-sm font-semibold" aria-hidden="true">{activeTabLabel}</div>
+            {sidePanel.toggle}
+          </div>
+        )}
+        <div ref={sidePanel.rowRef} className="relative flex flex-1 min-h-0">
+          {settingsMain}
+          {sidePanel.panel}
         </div>
-      </AppMain>
+      </div>
       </>
       )}
       <SidebarAppsModal isOpen={showAppsModal} onClose={closeAppsModal} />

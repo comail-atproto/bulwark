@@ -33,6 +33,7 @@ export const KIT_STRINGS: Record<string, Record<KitKey, string>> = {
   th: { remove: 'นำออก', remove_named: 'นำ {name} ออก', clear: 'ล้าง', clear_search: 'ล้างการค้นหา', open: 'เปิดรายการ', close: 'ปิดรายการ' },
   tr: { remove: 'Kaldır', remove_named: '{name} öğesini kaldır', clear: 'Temizle', clear_search: 'Aramayı temizle', open: 'Listeyi aç', close: 'Listeyi kapat' },
   uk: { remove: 'Вилучити', remove_named: 'Вилучити {name}', clear: 'Очистити', clear_search: 'Очистити пошук', open: 'Відкрити список', close: 'Закрити список' },
+  vi: { remove: 'Xóa', remove_named: 'Xóa {name}', clear: 'Xóa hết', clear_search: 'Xóa tìm kiếm', open: 'Mở danh sách', close: 'Đóng danh sách' },
   zh: { remove: '移除', remove_named: '移除 {name}', clear: '清除', clear_search: '清除搜索', open: '打开列表', close: '关闭列表' },
   'zh-TW': { remove: '移除', remove_named: '移除 {name}', clear: '清除', clear_search: '清除搜尋', open: '開啟清單', close: '關閉清單' },
 };

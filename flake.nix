@@ -85,10 +85,11 @@
           pname = "comail-bulwark";
           version = (builtins.fromJSON (builtins.readFile ./.upstream.json)).version;
           inherit src;
-          npmDepsHash = "sha256-UdwjHdWDrLM1+4BcrgLQw6xyRFTVjJiOsUzw+qtlnH0=";
+          npmDepsHash = "sha256-YQBFmjzrZfGtbAFDYuHxiOhlUuRYc4rLJy9HIuRGHKs=";
           # Standalone packaging requires webpack's output tracing.
           buildPhase = ''
             runHook preBuild
+            node scripts/build-pst-worker.mjs
             node scripts/build-plugin-sandbox.mjs
             npm exec -- next build --webpack
             runHook postBuild
@@ -96,6 +97,8 @@
           env = {
             NEXT_TELEMETRY_DISABLED = "1";
             NEXT_FONT_GOOGLE_MOCKED_RESPONSES = "${bulwarkGoogleFontMocks}/mock-responses.js";
+            # The production compiler exceeds Node's default 2 GiB heap.
+            NODE_OPTIONS = "--max-old-space-size=4096";
           };
           # Next standalone: server.js + traced node_modules + .next (manifests)
           # land in .next/standalone; .next/static (client chunks) and public/

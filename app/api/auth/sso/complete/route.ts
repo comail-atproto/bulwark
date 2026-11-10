@@ -9,6 +9,8 @@ import {
   hasClientSecret,
 } from '@/lib/oauth/token-exchange';
 import { buildRedeemBundle } from '@/lib/auth/pair-bundle';
+import { isHandoffCodeChallenge, stashHandoff } from '@/lib/auth/handoff-store';
+import { isStoreUnavailable, storeUnavailableResponse } from '@/lib/auth/store-unavailable';
 import { refreshTokenCookieName, refreshTokenServerCookieName } from '@/lib/oauth/tokens';
 import { getCookieOptions, getSignInCookieOptions } from '@/lib/oauth/cookie-config';
 import { storeIdToken } from '@/lib/oauth/end-session';
@@ -98,6 +100,9 @@ export async function POST(request: NextRequest) {
       typeof pending.mobile_redirect_uri === 'string' ? pending.mobile_redirect_uri : null;
     const mobileState = typeof pending.mobile_state === 'string' ? pending.mobile_state : null;
     const isMobileFlow = Boolean(mobileRedirectUri);
+    const mobileCodeChallenge = isHandoffCodeChallenge(pending.mobile_code_challenge)
+      ? pending.mobile_code_challenge
+      : null;
     const remember = pending.remember !== false;
 
     if (!codeVerifier || !redirectUri) {
@@ -158,6 +163,24 @@ export async function POST(request: NextRequest) {
         trusted: true,
       }, webmailBaseFromCallback(redirectUri));
       if (bundle.flow !== 'oauth') throw new Error('unexpected bundle');
+      if (mobileCodeChallenge) {
+        // The app sent a PKCE challenge: park the tokens and give the browser
+        // only a one-time code for the link (lib/auth/handoff-store.ts). The
+        // tokens never reach the page. The code starts working when the user
+        // confirms the hand-off (/api/auth/handoff/confirm).
+        const handoffCode = await stashHandoff(bundle, {
+          challenge: mobileCodeChallenge,
+          state: mobileState ?? '',
+          awaitConfirm: true,
+        });
+        logger.info('Mobile hand-off parked', { flow: 'oauth' });
+        return NextResponse.json({
+          mobile_handoff_code: handoffCode,
+          server_url: bundle.server_url,
+          mobile_redirect_uri: mobileRedirectUri,
+          mobile_state: mobileState,
+        });
+      }
       return NextResponse.json({
         access_token: bundle.access_token,
         expires_in: bundle.expires_in,
@@ -179,6 +202,8 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     // Clean up pending cookie on any error
     cookieStore.delete(SSO_PENDING_COOKIE);
+    // The mobile hand-off can't be parked without the shared store.
+    if (isStoreUnavailable(error)) return storeUnavailableResponse();
     logger.error('SSO complete error', { error: error instanceof Error ? error.message : 'Unknown error' });
     return NextResponse.json({ error: 'Token exchange failed' }, { status: 401 });
   }

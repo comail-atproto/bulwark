@@ -5,6 +5,12 @@ import { encryptSession } from '@/lib/auth/crypto';
 import { groupwareActor, groupwareAllowed, groupwareMailboxAllowed } from '@/lib/groupware/access';
 import { jmapGroupwareFeatures } from '@/lib/groupware/jmap';
 
+it.each(['urn:calendars:x\n', 'urn:contacts:x\r', 'urn:filenode:x\u2028'])(
+  'rejects whitespace in a JMAP capability: %j', (capability) => {
+    expect(jmapGroupwareFeatures({ using: [capability], methodCalls: [] })).toBeNull();
+  },
+);
+
 vi.mock('@/lib/auth/session-secret', () => ({ getSessionSecret: () => 'x'.repeat(32) }));
 vi.mock('@/lib/admin/config-manager', () => ({ configManager: {
   ensureLoaded: vi.fn(), get: (key: string) => config[key],

@@ -20,6 +20,7 @@ import type { FilterRule } from "@/lib/jmap/sieve-types";
 import type { Mailbox } from "@/lib/jmap/types";
 import { forwardsAround, inRunOrder, worstCaseForwards } from "@/lib/filters/forward-limit";
 import { isPeriodBoundary, periodStatus, supportsPeriods } from "@/lib/sieve/period";
+import { supportsRegex } from "@/lib/sieve/regex";
 import { formatDateTime } from "@/lib/utils";
 import { useVacationStore } from "@/stores/vacation-store";
 import { useManagedAccountStore } from "@/stores/managed-account-store";
@@ -787,6 +788,7 @@ export function FilterSettings() {
           mailboxes={mailboxes}
           maxRedirects={sieveCapabilities?.maxNumberRedirects}
           periodsSupported={supportsPeriods(sieveCapabilities?.sieveExtensions)}
+          regexSupported={supportsRegex(sieveCapabilities?.sieveExtensions)}
           forwardsBefore={forwardsOfEdited.before}
           forwardsAfter={forwardsOfEdited.after}
           onSave={handleSaveRule}

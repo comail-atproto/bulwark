@@ -14,7 +14,6 @@ export type SettingsSearchTab =
   | 'vacation'
   | 'filters'
   | 'organize'
-  | 'byomc'
   | 'security'
   | 'sharing'
   | 'recovery'
@@ -207,6 +206,7 @@ export const tabSearchEntries: Record<Tab, SettingsSearchEntry[]> = {
     { label: 'settings.email_behavior.permanently_delete_junk.label', advanced: true },
     { label: 'settings.message_list.sections.loading', advanced: true },
     { label: 'settings.email_behavior.emails_per_page.label', advanced: true },
+    { label: 'settings.email_behavior.search_default_scope.label', advanced: true },
     { label: 'settings.email_behavior.clear_search_on_folder_change.label', advanced: true },
     { label: 'settings.email_behavior.swipe_right_action.label', when: 'touch' },
     { label: 'settings.email_behavior.swipe_left_action.label', when: 'touch' },
@@ -243,10 +243,15 @@ export const tabSearchEntries: Record<Tab, SettingsSearchEntry[]> = {
     { label: 'settings.email_behavior.recipient_mentions.label' },
     { label: 'settings.email_behavior.mention_adds_recipient.label' },
     { label: 'settings.email_behavior.rtl_editing.label', advanced: true },
+    { label: 'proofreading.settings.title' },
+    { label: 'proofreading.settings.enable' },
+    { label: 'proofreading.settings.writing_language' },
     { label: 'settings.composing_page.sections.replying' },
     { label: 'settings.email_behavior.quick_reply.label' },
     { label: 'settings.email_behavior.auto_select_reply_identity.label' },
     { label: 'settings.email_behavior.signature_position.label' },
+    { label: 'settings.email_behavior.signature_new_mail.label' },
+    { label: 'settings.email_behavior.signature_reply_forward.label' },
     { label: 'settings.email_behavior.signature_separator.label', advanced: true },
     { label: 'settings.composing_page.sections.sending' },
     { label: 'settings.email_behavior.send_delay.label' },
@@ -287,7 +292,6 @@ export const tabSearchEntries: Record<Tab, SettingsSearchEntry[]> = {
     { label: 'settings.keywords.title' },
     { label: 'settings.keywords.nesting.label' },
   ],
-  byomc: [{ label: 'settings.byomc.title' }],
   security: [
     { label: 'settings.security.title' },
     { label: 'settings.security.totp.label' },
@@ -313,6 +317,7 @@ export const tabSearchEntries: Record<Tab, SettingsSearchEntry[]> = {
     { label: 'calendar.settings.invitation_parsing' },
     { label: 'calendar.settings.show_time_in_month_view' },
     { label: 'calendar.settings.tinted_events' },
+    { label: 'calendar.settings.month_timed_events' },
     { label: 'calendar.settings.show_week_numbers' },
     { label: 'calendar.settings.limit_hours' },
     { label: 'calendar.settings.visible_hours' },
@@ -328,6 +333,7 @@ export const tabSearchEntries: Record<Tab, SettingsSearchEntry[]> = {
   contacts: [
     { label: 'settings.contacts.group_by_letter_label' },
     { label: 'settings.contacts.sort_by_last_name_label' },
+    { label: 'settings.contacts.show_directory_label' },
     { label: 'settings.contacts.import_label' },
     { label: 'settings.contacts.export_label' },
     { label: 'settings.contacts.manage_title' },
@@ -363,7 +369,7 @@ export const tabSearchEntries: Record<Tab, SettingsSearchEntry[]> = {
 // Extra English keywords per tab so common search terms hit even when the
 // translation doesn't contain the literal word.
 /** Settings shown only while the admin has the Archive action on (#1257). */
-export const archiveActionSearchPaths: ReadonlySet<string> = new Set(['settings.email_behavior.archive_mode.label']);
+export const ARCHIVE_ACTION_SEARCH_PATHS: ReadonlySet<string> = new Set(['settings.email_behavior.archive_mode.label']);
 
 export const tabKeywords: Record<Tab, string> = {
   account: 'profile email user signin signout reorder rearrange drag dropdown switcher multi-account identities from address signature plus addressing unified mailbox shared group',
@@ -381,7 +387,6 @@ export const tabKeywords: Record<Tab, string> = {
   sharing: 'delegate delegation share access assistant permissions revoke folders calendars contacts colleague',
   recovery: 'recover restore undelete deleted trash emptied lost messages',
   calendar: 'event schedule appointment meeting timezone invitation ics tasks birthday working hours',
-  byomc: 'imap smtp client thunderbird apple mail password',
   contacts: 'address book contact',
   files: 'attachments cloud drive storage upload',
   addons: 'apps webview iframe plugins extensions addons sidebar',

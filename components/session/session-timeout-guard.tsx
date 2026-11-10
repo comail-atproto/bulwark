@@ -9,6 +9,7 @@ import type { PolicySubject } from "@/lib/admin/policy-scopes";
 import type { IJMAPClient } from "@/lib/jmap/client-interface";
 import { flushComposers } from "@/lib/compose-flush-registry";
 import { openActivityChannel, readLastActivity, type ActivityChannel } from "@/lib/session-policy/activity-channel";
+import { onFrameActivity } from "@/lib/session-policy/frame-activity";
 import {
   NO_SESSION_LIMITS,
   sameLimits,
@@ -28,10 +29,12 @@ const ACTIVITY_THROTTLE_MS = 1000;
 /**
  * Bubbling input events, caught on the way down. Scrolling and focus moves
  * inside the page don't count: the page scrolls and refocuses on its own.
- * Input inside a frame (the office editor, plugin panels) never reaches this
- * window and doesn't count either: a focused frame left alone would keep the
- * session open forever. Users working there see the warning, which sits
- * above every overlay, and choose to stay.
+ * Input inside a frame never reaches this window. Plugin frames report the
+ * same events from inside (lib/session-policy/frame-activity.ts); other
+ * frames (the office editor) don't count, and neither does a frame merely
+ * having the focus: a focused frame left alone would keep the session open
+ * forever. Users working there see the warning, which sits above every
+ * overlay, and choose to stay.
  */
 const ACTIVITY_EVENTS = ["pointerdown", "pointermove", "keydown", "touchstart", "wheel"] as const;
 
@@ -189,7 +192,7 @@ export function SessionTimeoutGuard() {
     }
   }, [active]);
 
-  // Activity in this tab and the others.
+  // Activity in this tab (its plugin frames too) and the others.
   useEffect(() => {
     const channel = openActivityChannel((at) => timerRef.current?.remoteActivity(at));
     channelRef.current = channel;
@@ -214,11 +217,14 @@ export function SessionTimeoutGuard() {
       if (document.visibilityState === "visible") timerRef.current?.check();
     };
     for (const event of ACTIVITY_EVENTS) window.addEventListener(event, onActivity, { capture: true, passive: true });
+    // Input in plugin frames, which never reaches this window.
+    const offFrames = onFrameActivity(onActivity);
     // The window coming back into focus, not focus moving between elements.
     window.addEventListener("focus", onActivity);
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
       for (const event of ACTIVITY_EVENTS) window.removeEventListener(event, onActivity, { capture: true });
+      offFrames();
       window.removeEventListener("focus", onActivity);
       document.removeEventListener("visibilitychange", onVisibility);
       channel.close();

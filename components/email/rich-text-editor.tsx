@@ -27,6 +27,10 @@ import { QuotedHtml, serializeEditorContent } from "@/components/email/quoted-ht
 import { keepLoadedParagraphSpacing, paragraphStyleWithoutSpacing, trailingParagraphBreakRule } from "@/components/email/paragraph-breaks";
 import { SignatureBlock } from "@/components/email/signature-block";
 import { styledBlockAttributes } from "@/components/email/styled-block-attributes";
+import { remoteContentHeldBackAnywhere, useRemoteContentHeldBackAnywhere } from "@/hooks/use-third-party-mode";
+import { stripExternalCssUrls } from "@/lib/email-sanitization";
+import { DOMSerializer, type Node as ProseMirrorNode } from "@tiptap/pm/model";
+import type { NodeViewRenderer } from "@tiptap/core";
 import { RecipientMention, RecipientMentionList, type RecipientMentionListHandle } from "@/components/email/recipient-mention";
 import { MentionChipCard, setMentionRecipients } from "@/components/email/mention-chip";
 import { mentionSuggestions, type MentionCandidate, type MentionContact } from "@/lib/recipient-mentions";
@@ -41,6 +45,7 @@ export function withLinkScheme(value: string): string {
     : `https://${value}`;
 }
 import { useSettingsStore } from "@/stores/settings-store";
+import { createTextCheckExtension, type TextCheckOptions } from "@/components/email/proofreading/text-check-extension";
 import { useTranslations } from "next-intl";
 import {
   Bold,
@@ -98,6 +103,55 @@ const StyledHeading = Heading.extend({
   },
 });
 
+// Keep the original style in the document for sending; only filter its live DOM.
+function styledBlockView(refreshers: Set<() => void>): NodeViewRenderer {
+  return ({ node: initial }) => {
+    let node = initial;
+    const makeDOM = (current: ProseMirrorNode): HTMLElement => {
+      const spec = current.type.spec.toDOM?.(current);
+      if (!Array.isArray(spec)) throw new Error("Missing styled block DOM spec");
+      const attrs = { ...spec[1] };
+      if (remoteContentHeldBackAnywhere() && typeof attrs.style === "string") attrs.style = stripExternalCssUrls(attrs.style);
+      return DOMSerializer.renderSpec(document, [spec[0], attrs, ...spec.slice(2)]).dom as HTMLElement;
+    };
+    const dom = makeDOM(node);
+    let rendered = makeDOM(node);
+    const refresh = () => {
+      const next = makeDOM(node);
+      const names = new Set([...Array.from(rendered.attributes, (a) => a.name), ...Array.from(next.attributes, (a) => a.name)]);
+      for (const name of names) {
+        const oldValue = rendered.getAttribute(name);
+        const newValue = next.getAttribute(name);
+        if (oldValue === newValue) continue;
+        if (name === "class") {
+          const classes = new Set(dom.classList);
+          for (const name of (oldValue ?? "").split(/\s+/).filter(Boolean)) classes.delete(name);
+          for (const name of (newValue ?? "").split(/\s+/).filter(Boolean)) classes.add(name);
+          const value = [...classes].join(" ");
+          if (value) dom.setAttribute(name, value); else dom.removeAttribute(name);
+        } else {
+          if (newValue === null) dom.removeAttribute(name); else dom.setAttribute(name, newValue);
+        }
+      }
+      rendered = next;
+    };
+    refreshers.add(refresh);
+    return {
+      dom,
+      contentDOM: dom,
+      // Match TipTap's NodeView: ProseMirror still handles content mutations.
+      ignoreMutation(mutation) { return mutation.type === "attributes" && mutation.target === dom; },
+      update(next) {
+        if (next.type !== node.type || makeDOM(next).tagName !== dom.tagName) return false;
+        node = next;
+        refresh();
+        return true;
+      },
+      destroy() { refreshers.delete(refresh); },
+    };
+  };
+}
+
 interface RichTextEditorProps {
   content: string;
   onChange: (html: string) => void;
@@ -136,16 +190,27 @@ interface RichTextEditorProps {
   ariaDescribedBy?: string;
   /** The font and size the text starts in (the sent mail carries them too). */
   defaultTextStyle?: ComposeTextStyle;
+  /**
+   * The browser's own spell check. Off while a proofreading plugin checks
+   * spelling here, so there aren't two sets of underlines.
+   */
+  spellcheck?: boolean;
+  /** The language the text is written in (the writing-language setting). */
+  lang?: string;
+  /** Proofreading underlines: clicks on them, and keys in the text. */
+  textCheck?: TextCheckOptions;
 }
 
 /** What the editing area tells assistive technology, besides TipTap's role=textbox. */
-export function editorA11yAttributes({ ariaLabel, ariaInvalid, ariaDescribedBy, defaultTextStyle }: Pick<RichTextEditorProps, 'ariaLabel' | 'ariaInvalid' | 'ariaDescribedBy' | 'defaultTextStyle'>): Record<string, string> {
+export function editorA11yAttributes({ ariaLabel, ariaInvalid, ariaDescribedBy, defaultTextStyle, spellcheck = true, lang }: Pick<RichTextEditorProps, 'ariaLabel' | 'ariaInvalid' | 'ariaDescribedBy' | 'defaultTextStyle' | 'spellcheck' | 'lang'>): Record<string, string> {
   const style = defaultTextStyle ? composeTextStyleCss(defaultTextStyle) : "";
   return {
     class: "tiptap min-h-[100px] px-4 py-3 text-sm text-foreground",
     ...(style ? { style } : {}),
     role: "textbox",
     "aria-multiline": "true",
+    spellcheck: spellcheck ? "true" : "false",
+    ...(lang ? { lang } : {}),
     ...(ariaLabel ? { "aria-label": ariaLabel } : {}),
     ...(ariaInvalid ? { "aria-invalid": "true" } : {}),
     ...(ariaInvalid && ariaDescribedBy ? { "aria-describedby": ariaDescribedBy } : {}),
@@ -391,7 +456,15 @@ export function RichTextEditor({
   ariaInvalid,
   ariaDescribedBy,
   defaultTextStyle,
+  spellcheck = true,
+  lang,
+  textCheck: textCheckHandlers,
 }: RichTextEditorProps) {
+  const heldBack = useRemoteContentHeldBackAnywhere();
+  const [styledBlockRefreshers] = useState(() => new Set<() => void>());
+  useLayoutEffect(() => {
+    for (const refresh of styledBlockRefreshers) refresh();
+  }, [heldBack, styledBlockRefreshers]);
   const rtlEditingSupport = useSettingsStore((st) => st.rtlEditingSupport);
   const tComposer = useTranslations("email_composer");
   const tQuote = useTranslations("email_viewer");
@@ -399,6 +472,13 @@ export function RichTextEditor({
   onImageUploadRef.current = onImageUpload;
   const onEditorReadyRef = React.useRef(onEditorReady);
   onEditorReadyRef.current = onEditorReady;
+  const textCheckRef = React.useRef(textCheckHandlers);
+  textCheckRef.current = textCheckHandlers;
+  // Built once with the editor; reads the latest handlers.
+  const [textCheck] = useState(() => createTextCheckExtension(() => ({
+    onOpen: (key, anchor, via) => textCheckRef.current?.onOpen(key, anchor, via),
+    onKey: (event) => textCheckRef.current?.onKey?.(event) ?? false,
+  })));
   const mentionCandidatesRef = React.useRef<MentionCandidate[]>([]);
   mentionCandidatesRef.current = mentionCandidates ?? [];
   // Read on every keystroke after an "@"; the editor is built only once.
@@ -420,8 +500,8 @@ export function RichTextEditor({
         link: false,
         underline: false,
       }),
-      StyledParagraph,
-      StyledHeading.configure({ levels: [1, 2] }),
+      StyledParagraph.extend({ addNodeView: () => styledBlockView(styledBlockRefreshers) }),
+      StyledHeading.extend({ addNodeView: () => styledBlockView(styledBlockRefreshers) }).configure({ levels: [1, 2] }),
       Underline,
       Link.configure({
         openOnClick: false,
@@ -496,6 +576,7 @@ export function RichTextEditor({
           onExit: () => setMention(null),
         }),
       }),
+      textCheck,
     ],
     // One newline per paragraph when copying out as plain text, the inverse
     // of PlainTextPaste: a blank line is an empty paragraph, so the default
@@ -505,7 +586,7 @@ export function RichTextEditor({
     },
     content,
     editorProps: {
-      attributes: editorA11yAttributes({ ariaLabel, ariaInvalid, ariaDescribedBy, defaultTextStyle }),
+      attributes: editorA11yAttributes({ ariaLabel, ariaInvalid, ariaDescribedBy, defaultTextStyle, spellcheck, lang }),
       handleKeyDown: (_view, event) => {
         if (event.altKey && event.key === "F10" && focusToolbarRef.current?.()) {
           event.preventDefault();
@@ -588,10 +669,10 @@ export function RichTextEditor({
     editor.setOptions({
       editorProps: {
         ...editor.options.editorProps,
-        attributes: editorA11yAttributes({ ariaLabel, ariaInvalid, ariaDescribedBy, defaultTextStyle }),
+        attributes: editorA11yAttributes({ ariaLabel, ariaInvalid, ariaDescribedBy, defaultTextStyle, spellcheck, lang }),
       },
     });
-  }, [editor, ariaLabel, ariaInvalid, ariaDescribedBy, defaultTextStyle]);
+  }, [editor, ariaLabel, ariaInvalid, ariaDescribedBy, defaultTextStyle, spellcheck, lang]);
 
   // Re-render the toolbar when what it shows changes, also on a caret move
   // or an image selection that changes no text (the parent re-renders only

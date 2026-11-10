@@ -2,6 +2,7 @@ import { logger } from '@/lib/logger';
 import { DisallowedUrlError, fetchPublicUrl } from '@/lib/security/url-guard';
 import { generateCodeVerifier, generateCodeChallenge, generateState } from '@/lib/oauth/pkce';
 import { forwardedClientHeaders } from '@/lib/auth/client-address';
+import { trimTrailingSlashes } from '@/lib/url-normalization';
 import {
   STALWART_LOOPBACK_REDIRECT_URI,
   readStalwartLoginResponse,
@@ -92,10 +93,6 @@ export type StalwartPasswordLoginResult =
       detail?: string;
     };
 
-function trimUrl(url: string): string {
-  return url.replace(/\/+$/, '');
-}
-
 /**
  * The start of an upstream error body, for the login screen. Only from a
  * server the admin configured: a user-chosen server URL makes this a way to
@@ -112,7 +109,7 @@ export function isAllowedLoginRedirect(from: string, to: string): boolean {
   const a = new URL(from);
   const b = new URL(to);
   if (a.origin === b.origin) return true;
-  return a.hostname === b.hostname && a.protocol === 'http:' && b.protocol === 'https:';
+  return a.hostname === b.hostname && a.protocol === 'http:' && b.protocol === 'https:' && b.port === '';
 }
 
 /**
@@ -207,7 +204,7 @@ export async function stalwartDefaultClientId(
   defaultClientId: string,
   trusted: boolean,
 ): Promise<string> {
-  const base = trimUrl(serverUrl);
+  const base = trimTrailingSlashes(serverUrl);
   const cached = cachedDefaultClient(base);
   if (cached) return cached.clientId;
   const upstreamFetch = upstreamFetchFor(trusted);
@@ -311,7 +308,7 @@ async function requestLoginCode(
 export async function stalwartPasswordLogin(
   opts: StalwartPasswordLoginOptions,
 ): Promise<StalwartPasswordLoginResult> {
-  const base = trimUrl(opts.serverUrl);
+  const base = trimTrailingSlashes(opts.serverUrl);
   const upstreamFetch = upstreamFetchFor(opts.trusted);
 
   // PKCE proves the token exchange originates from the same client that

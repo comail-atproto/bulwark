@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { settingsSubResults } from '@/lib/settings-search';
+import { settingsSubResults } from '@/lib/comail-settings-search';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';

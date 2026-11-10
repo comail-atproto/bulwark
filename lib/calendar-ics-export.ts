@@ -1,4 +1,5 @@
 import type { CalendarEvent } from "@/lib/jmap/types";
+import { descriptionAsText } from "@/lib/calendar-description";
 import { isRuleOccurrence } from "@/lib/recurrence-expansion";
 
 const MAX_LINE_OCTETS = 75;
@@ -137,7 +138,7 @@ export function eventToICS(event: CalendarEvent): string {
   const isSpace = event.source === "atproto-space";
   const lines: string[] = [
     "BEGIN:VCALENDAR",
-    "PRODID:-//JMAP-Webmail//EN",
+    "PRODID:-//Bulwark Mail//Bulwark Webmail//EN",
     "VERSION:2.0",
     "CALSCALE:GREGORIAN",
     ...(!isSpace ? ["METHOD:PUBLISH"] : []),
@@ -177,7 +178,9 @@ function eventComponent(event: CalendarEvent, now: string, recurrence?: { date: 
   }
 
   if (event.title) lines.push(`SUMMARY:${escapeText(event.title)}`);
-  if (event.description) lines.push(`DESCRIPTION:${escapeText(event.description)}`);
+  // DESCRIPTION is plain text; an HTML description goes out as its text.
+  const description = descriptionAsText(event);
+  if (description) lines.push(`DESCRIPTION:${escapeText(description)}`);
   if (event.status) lines.push(`STATUS:${event.status.toUpperCase()}`);
   if (event.privacy) lines.push(`CLASS:${event.privacy.toUpperCase()}`);
   if (event.freeBusyStatus) {

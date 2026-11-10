@@ -4,8 +4,8 @@ type Messages = Record<string, unknown>;
 
 /**
  * Plain-language mode (CO-14): simpler wording for settings and error
- * messages. Only English and German have plain versions; every other locale
- * keeps its normal strings when the setting is on.
+ * messages. English, German and Vietnamese have plain versions; every
+ * other locale keeps its normal strings when the setting is on.
  *
  * The plain strings live in `locales/<code>/plain.json`, outside common.json,
  * so the translation parity test doesn't ask every locale for them. Each file
@@ -15,6 +15,7 @@ type Messages = Record<string, unknown>;
 export const PLAIN_LANGUAGE_LOADERS: Record<string, () => Promise<Messages>> = {
   en: () => import('@/locales/en/plain.json').then((m) => m.default as Messages),
   de: () => import('@/locales/de/plain.json').then((m) => m.default as Messages),
+  vi: () => import('@/locales/vi/plain.json').then((m) => m.default as Messages),
 };
 
 export function hasPlainLanguage(locale: string): boolean {

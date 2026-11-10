@@ -42,6 +42,22 @@ describe('prefersReducedMotion', () => {
 });
 
 describe('scripted scrolling', () => {
+  it.each(['fonts\\', 'fonts"', 'fonts\nnext', 'x"], [data-settings-section="other'])(
+    'finds only the exact settings section for %j', (id) => {
+      const host = document.createElement('div');
+      const section = document.createElement('div');
+      section.setAttribute('data-settings-section', id);
+      section.scrollIntoView = vi.fn();
+      const other = document.createElement('div');
+      other.setAttribute('data-settings-section', 'other');
+      other.scrollIntoView = vi.fn();
+      host.append(other, section);
+      expect(scrollToSettingsSection(id, host)).toBe(true);
+      expect(section.scrollIntoView).toHaveBeenCalledOnce();
+      expect(other.scrollIntoView).not.toHaveBeenCalled();
+    },
+  );
+
   it('jumps to a settings section instead of gliding when motion is reduced', () => {
     systemPrefers(true);
     document.body.innerHTML = '<div data-settings-section="fonts"></div>';

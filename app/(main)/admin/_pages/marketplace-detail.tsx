@@ -35,6 +35,7 @@ import { AdminPageHeader } from '@/components/admin/page-header';
 import { AdminLink } from '@/components/admin/admin-link';
 import { AdminButtonLink } from '@/components/admin/button-link';
 import { Badge } from '@/components/admin/badge';
+import { ScreenshotGallery } from '@/components/admin/screenshot-gallery';
 import { useAdminFeedback } from '@/components/admin/feedback';
 import { installVersion } from './marketplace';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
@@ -541,6 +542,12 @@ export function MarketplaceDetailPage({ slug }: { slug: string }) {
           </div>
         </SettingsSection>
 
+        {ext.screenshots.length > 0 && (
+          <SettingsSection id="screenshots" title="Screenshots">
+            <ScreenshotGallery images={ext.screenshots} name={ext.name} />
+          </SettingsSection>
+        )}
+
         {changeRows.some((r) => r.changelog) && (
           <SettingsSection id="changes" title={changesTitle}>
             <ChangelogEntries entries={changeRows.map((r) => ({ version: r.version, publishedAt: r.publishedAt, changelog: r.changelog, notes: r.notes ?? undefined }))} />
@@ -663,22 +670,6 @@ export function MarketplaceDetailPage({ slug }: { slug: string }) {
           </div>
         </SettingsSection>
 
-        {ext.screenshots.length > 0 && (
-          <SettingsSection id="screenshots" title="Screenshots">
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              {ext.screenshots.map((s, i) => (
-                <img
-                  key={i}
-                  src={s.url}
-                  alt={s.altText || `Screenshot ${i + 1}`}
-                  className="w-full rounded-md border border-border bg-muted"
-                  loading="lazy"
-                />
-              ))}
-            </div>
-          </SettingsSection>
-        )}
-
         {!isPlugin && ext.themePreviews.length > 0 && (
           <SettingsSection id="theme-preview" title="Theme preview">
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -702,7 +693,7 @@ export function MarketplaceDetailPage({ slug }: { slug: string }) {
             title="Permissions"
             description={manifestPerms.length === 0
               ? 'This plugin requests no permissions.'
-              : `What ${preview ? `v${preview.version}` : 'the plugin'} may do in each user's mailbox.`}
+              : `What ${ext.name}${preview ? ` ${preview.version}` : ''} may do in each user's mailbox.`}
           >
             {manifestPerms.length > 0 && (
               <ul className="space-y-1.5">

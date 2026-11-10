@@ -32,6 +32,22 @@ afterEach(() => {
 });
 
 describe('server configuration recovery', () => {
+  it.each([
+    [undefined, 'https://build.comail.at'],
+    ['', 'https://build.comail.at'],
+    ['https://builders.stage.test', 'https://builders.stage.test'],
+  ])('resolves the Builders website for fresh and cached configuration (%s)', async (configured, expected) => {
+    mocks.apiFetch.mockResolvedValueOnce(Response.json({ ...config, buildersWebsiteUrl: configured }));
+    const { useConfig } = await import('../use-config');
+    const first = renderHook(() => useConfig());
+    expect(first.result.current.buildersWebsiteUrl).toBe('https://build.comail.at');
+    await act(() => vi.runAllTimersAsync());
+    expect(first.result.current.buildersWebsiteUrl).toBe(expected);
+    const second = renderHook(() => useConfig());
+    expect(second.result.current.buildersWebsiteUrl).toBe(expected);
+    expect(mocks.apiFetch).toHaveBeenCalledTimes(1);
+  });
+
   it('caches a successful first response without leaving a timeout', async () => {
     mocks.apiFetch.mockResolvedValueOnce(success());
     const { fetchConfig } = await import('../use-config');
@@ -174,7 +190,7 @@ describe('server configuration recovery', () => {
     expect(second.result.current).toMatchObject({ isLoading: true, error: null });
     first.unmount();
     await act(() => vi.advanceTimersByTimeAsync(1));
-    expect(second.result.current).toEqual({ ...config, hostedInboxLogoutDestination: '', isLoading: false, error: null });
+    expect(second.result.current).toEqual({ ...config, buildersWebsiteUrl: 'https://build.comail.at', hostedInboxLogoutDestination: '', isLoading: false, error: null });
     expect(mocks.apiFetch).toHaveBeenCalledTimes(2);
   });
 

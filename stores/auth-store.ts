@@ -20,7 +20,7 @@ import { replaceWindowLocation, getPathPrefix, getLocaleFromPath, apiFetch } fro
 import { isEmbedded, notifyParent } from '@/lib/iframe-bridge';
 import { snapshotAccount, restoreAccount, clearAllStores, evictAccount, evictAll, forgetAccountRows } from '@/lib/account-state-manager';
 import { clearAllPluginStorage, clearPluginStorageForAccount } from '@/lib/plugin-sandbox/storage-scope';
-import { broadcastSignOut, onSignedOutElsewhere, purgeSignedOutData, runBeforeSignOut } from '@/lib/sign-out-cleanup';
+import { broadcastSignOut, onSignedOutElsewhere, passSignOutGates, purgeSignedOutData, runBeforeSignOut } from '@/lib/sign-out-cleanup';
 import { forgetPrincipals } from '@/lib/delegation/known-principals';
 import { useSearchHistoryStore } from './search-history-store';
 import { useCalendarNotificationStore } from './calendar-notification-store';
@@ -137,6 +137,12 @@ interface AuthState {
   refreshIdentities: () => Promise<void>;
   getClientForAccount: (accountId: string) => JMAPClient | undefined;
   getAllConnectedClients: () => Map<string, JMAPClient>;
+  /**
+   * After a start without the server (offline mode, #523): sign the
+   * accounts that run from this device in for real, now that the server
+   * answers. True when every one of them got a real client.
+   */
+  reconnectOfflineClients: () => Promise<boolean>;
 }
 
 export interface LogoutOptions {
@@ -532,9 +538,13 @@ async function exchangeOAuthCode(params: {
  * Credentials a remembered session signs back in with: the password (Basic
  * auth), or the access token of a token login (Bearer auth).
  */
-type RememberedSession =
+type RememberedSession = (
   | { serverUrl: string; username: string; password: string; token?: undefined }
-  | { serverUrl: string; username: string; token: string; password?: undefined };
+  | { serverUrl: string; username: string; token: string; password?: undefined }
+) & {
+  /** The session an impersonation handoff opened (set by the server). */
+  impersonated?: boolean;
+};
 
 /** A client for remembered credentials. */
 function clientForSession(session: RememberedSession): JMAPClient {
@@ -1401,6 +1411,28 @@ function forgetCalendarSubscriptions(client: IJMAPClient): void {
     useCalendarStore.getState().forgetICalSubscriptions(subscriptionOwner(client));
   } catch {
     // A client that cannot name its server and login owns no subscription.
+  }
+}
+
+/**
+ * A client for an account that couldn't be restored because the server
+ * can't be reached, from the session kept with its offline data (#523);
+ * null without offline mode for that account. Loaded on demand: offline
+ * mode imports this store.
+ */
+async function startOfflineClient(accountId: string, serverUrl: string, username: string): Promise<JMAPClient | null> {
+  if (IS_LITE) return null;
+  try {
+    const offline = await import('@/lib/offline/offline-mode');
+    // Only without a network or a server: a server that refused one request
+    // (an overload without CORS headers, a 5xx) gets the usual error.
+    if (!(await offline.serverUnreachable(serverUrl))) return null;
+    const session = await offline.offlineSessionFor(accountId);
+    if (!session) return null;
+    offline.markStartedOffline();
+    return JMAPClient.fromOfflineSession(serverUrl, username, session);
+  } catch {
+    return null;
   }
 }
 
@@ -2381,6 +2413,10 @@ export const useAuthStore = create<AuthState>()(
         }
         const endProviderSession = userInitiated && !wasDemoMode && shouldEndProviderSession(account);
 
+        // Signing out on purpose may be stopped by the user (unsent mail in
+        // the offline outbox would be lost); an automatic one may not.
+        if (userInitiated && !(await passSignOutGates(accountId ?? 'all'))) return;
+
         await beforeLogoutHooks(accountId ?? 'all');
 
         // From here on nothing may renew this slot's session; the cleanup
@@ -2550,6 +2586,7 @@ export const useAuthStore = create<AuthState>()(
       },
 
       logoutAll: async (options) => {
+        if (options?.endProviderSession !== false && !(await passSignOutGates('all'))) return;
         await beforeLogoutHooks('all');
 
         const accountStore = useAccountStore.getState();
@@ -2989,6 +3026,7 @@ export const useAuthStore = create<AuthState>()(
                   accountStore.updateAccount(account.id, {
                     isConnected: true,
                     hasError: false,
+                    impersonated: session.impersonated === true,
                     serverUrl: effectiveServerUrl,
                     ...(typeof did === 'string' ? { did } : {}),
                   });
@@ -3025,6 +3063,15 @@ export const useAuthStore = create<AuthState>()(
               // treatment as the rate-limit case above; only a definitive
               // rejection below evicts.
               if (isTransientAuthError(err)) {
+                // Offline mode (#523): with this account's mail kept on the
+                // device, start from it. The client answers from the device
+                // only; a reload once the server is back signs in as usual.
+                const offlineClient = await startOfflineClient(account.id, account.serverUrl, account.username);
+                if (offlineClient) {
+                  clients.set(account.id, offlineClient);
+                  accountStore.updateAccount(account.id, { isConnected: true, hasError: false });
+                  return;
+                }
                 accountStore.updateAccount(account.id, {
                   isConnected: false,
                   hasError: true,
@@ -3423,6 +3470,17 @@ export const useAuthStore = create<AuthState>()(
       getAllConnectedClients: () => {
         return new Map(clients);
       },
+
+      reconnectOfflineClients: async () => {
+        const offline = [...clients.entries()].filter(([, c]) => c.isOfflineOnly());
+        if (offline.length === 0) return true;
+        for (const [id] of offline) clients.delete(id);
+        await get().checkAuth();
+        return offline.every(([id]) => {
+          const client = clients.get(id);
+          return !!client && !client.isOfflineOnly();
+        });
+      },
     }),
     {
       name: 'auth-storage',
@@ -3469,6 +3527,7 @@ useAuthStore.subscribe((state, prev) => {
     usePolicyStore.getState().setPolicySubject(null);
     return;
   }
+  usePolicyStore.getState().setSubjectPending(true);
   void policySubjectForClient(state.client).then(async (subject) => {
     if (request !== policySubjectRequest) return;
     // The server sends only the scopes of the domains signed in when the

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { detectSetupState } from '@/lib/setup/state';
-import { authenticateWizardRequest } from '@/lib/setup/session';
+import { wizardSessionRefusal } from '@/lib/setup/session';
+import { trimTrailingSlashes } from '@/lib/url-normalization';
 
 export const dynamic = 'force-dynamic';
 
@@ -30,7 +31,7 @@ async function probe(url: string, method: 'GET' | 'HEAD'): Promise<Response> {
     if (!location) return res;
     const next = new URL(location, current);
     const sameHost = next.host === current.host && next.protocol === current.protocol;
-    const httpsUpgrade = next.protocol === 'https:' && next.hostname === current.hostname;
+    const httpsUpgrade = current.protocol === 'http:' && next.protocol === 'https:' && next.hostname === current.hostname && next.port === '';
     if (!sameHost && !httpsUpgrade) {
       throw new Error(`Redirected to a different host (${next.host})`);
     }
@@ -52,9 +53,8 @@ export async function POST(request: NextRequest) {
   if (detectSetupState() !== 'bootstrap') {
     return NextResponse.json({ error: 'Setup is not active' }, { status: 404 });
   }
-  if (!(await authenticateWizardRequest())) {
-    return NextResponse.json({ error: 'Wizard session required' }, { status: 401 });
-  }
+  const wizardRefused = await wizardSessionRefusal();
+  if (wizardRefused) return wizardRefused;
 
   let body: { url?: unknown };
   try {
@@ -78,7 +78,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ status: 'invalid_url', message: 'URL must use http or https' });
   }
 
-  const base = raw.replace(/\/+$/, '');
+  const base = trimTrailingSlashes(raw);
 
   for (const endpoint of JMAP_ENDPOINTS) {
     const target = base + endpoint;

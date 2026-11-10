@@ -24,12 +24,18 @@ export const HIGH_RISK_PERMISSIONS: ReadonlySet<string> = new Set([
   'http:post',
   'filters:write',
   'http:proxy',
+  // Reads everything the user writes, as they write it, and may send it on.
+  'compose:check',
   // A plugin can point the reply-to of a sender address elsewhere, so
   // answers to the user's mail go to someone else.
   'identity:write',
   // The out-of-office reply goes out to everyone who writes, in the user's
   // name, with whatever text the plugin set.
   'vacation:write',
+  // Answering an invitation sends a reply to the organiser in the user's name.
+  'calendar:respond',
+  // Changes how the app behaves for the user (lib/settings-schema.ts).
+  'settings:change',
 ]);
 
 /** Locale key segment for a permission: `email:read` → `email_read`. */

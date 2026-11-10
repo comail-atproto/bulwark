@@ -1,9 +1,9 @@
 import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
-import { describe, it, expect, vi } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import React from 'react';
 import { EmailComposer } from '../email-composer';
 import { useAuthStore } from '@/stores/auth-store';
-import { LIVE_REGION_IDS } from '@/lib/announce';
+import { LIVE_REGION_IDS, resetAnnouncerForTests } from '@/lib/announce';
 
 // ─── Heavy component mocks (mirrors reply-addressing.test.tsx) ────────────────
 
@@ -223,6 +223,8 @@ function renderWithCloseRef(props: Record<string, unknown> = {}) {
   return { requestCloseRef, afterClose, onClose, unmount: view.unmount };
 }
 
+beforeEach(resetAnnouncerForTests);
+
 describe('composer close guard with a follow-up', () => {
   it('asks before replacing an unsaved draft instead of dropping it', async () => {
     const { requestCloseRef, afterClose } = renderWithCloseRef();
@@ -314,13 +316,21 @@ describe('composer close guard with a follow-up', () => {
   });
 
   it('runs the follow-up after saving the draft', async () => {
-    const { requestCloseRef, afterClose } = renderWithCloseRef();
+    const createDraft = vi.fn().mockResolvedValue('draft-9');
+    useAuthStore.setState({
+      client: { createDraft, getEmail: vi.fn(), hasDelayedSend: () => false, getMaxDelayedSend: () => 0 } as never,
+    });
+    try {
+      const { requestCloseRef, afterClose } = renderWithCloseRef();
+      act(() => requestCloseRef.current!(afterClose));
+      const dialog = await screen.findByRole('alertdialog');
+      fireEvent.click(within(dialog).getByText('save'));
 
-    act(() => requestCloseRef.current!(afterClose));
-    const dialog = await screen.findByRole('alertdialog');
-    fireEvent.click(within(dialog).getByText('save'));
-
-    await waitFor(() => expect(afterClose).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(afterClose).toHaveBeenCalledTimes(1));
+      expect(createDraft).toHaveBeenCalledTimes(1);
+    } finally {
+      useAuthStore.setState({ client: null });
+    }
   });
 
   it('tells screen readers the draft was saved when the user saves, not on autosave', async () => {
@@ -345,11 +355,10 @@ describe('composer close guard with a follow-up', () => {
     }
   });
 
-  it('drops the follow-up when the save fails and the rescue takes over', async () => {
-    // When the server refuses the draft, the composer text survives only via
-    // the unmount stash into the continue-draft slot (#702). That rescue
-    // outranks the request that triggered the close, so the follow-up must
-    // never fire - otherwise the new session would bury the stashed text.
+  it('keeps the composer open and drops the follow-up when the save fails', async () => {
+    // A refused save keeps the live composer recoverable. Replacing it via a
+    // close follow-up would bury the unsaved text. Navigation can still stash
+    // that text through the existing unmount path.
     const createDraft = vi.fn().mockRejectedValue(new Error('server refused'));
     useAuthStore.setState({
       client: { createDraft, hasDelayedSend: () => false, getMaxDelayedSend: () => 0 } as never,
@@ -363,10 +372,10 @@ describe('composer close guard with a follow-up', () => {
       const dialog = await screen.findByRole('alertdialog');
       fireEvent.click(within(dialog).getByText('save'));
 
-      // The host still gets its close - the composer must not stay stuck -
-      // but the follow-up is dropped because the text was never persisted.
-      await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
-      expect(createDraft).toHaveBeenCalled();
+      await waitFor(() => expect(createDraft).toHaveBeenCalled());
+      await act(async () => {});
+      expect(onClose).not.toHaveBeenCalled();
+      expect(screen.getByDisplayValue('Half-written more')).toBeInTheDocument();
       expect(afterClose).not.toHaveBeenCalled();
 
       // The rescue itself: unmounting stashes the live text on the host.

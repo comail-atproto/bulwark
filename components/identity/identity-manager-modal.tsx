@@ -29,6 +29,7 @@ import { useConfirmDialog } from '@/hooks/use-confirm-dialog';
 import { useDiscardChanges } from '@/components/settings/use-discard-changes';
 import { useConfig } from '@/hooks/use-config';
 import { toUnicodeEmail } from '@/lib/idn';
+import { getPlainTextSignature } from '@/lib/signature-utils';
 import { sortIdentities } from '@/lib/identity-order';
 import { useRestriction } from '@/hooks/use-restriction';
 
@@ -280,8 +281,8 @@ export function IdentityManagerModal({ isOpen, onClose }: IdentityManagerModalPr
                     <div className="flex items-start justify-between gap-4">
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 mb-1">
-                          <h3 className="font-semibold text-foreground truncate" title={identity.name} dir="auto">
-                            {identity.name}
+                          <h3 className="font-semibold text-foreground truncate" title={identity.name || toUnicodeEmail(identity.email)} dir="auto">
+                            {identity.name || toUnicodeEmail(identity.email)}
                           </h3>
                           {identities[0]?.id === identity.id && (
                             <span className="text-xs px-2 py-0.5 rounded-full bg-primary/10 text-primary font-medium">
@@ -289,9 +290,11 @@ export function IdentityManagerModal({ isOpen, onClose }: IdentityManagerModalPr
                             </span>
                           )}
                         </div>
-                        <p className="text-sm text-muted-foreground truncate" title={toUnicodeEmail(identity.email)}>
-                          {toUnicodeEmail(identity.email)}
-                        </p>
+                        {identity.name && (
+                          <p className="text-sm text-muted-foreground truncate" title={toUnicodeEmail(identity.email)}>
+                            {toUnicodeEmail(identity.email)}
+                          </p>
+                        )}
 
                         {/* Additional Info */}
                         <div className="mt-2 space-y-1 text-xs text-muted-foreground">
@@ -305,9 +308,10 @@ export function IdentityManagerModal({ isOpen, onClose }: IdentityManagerModalPr
                               {t('display.bcc')} {identity.bcc.map((a) => toUnicodeEmail(a.email)).join(', ')}
                             </p>
                           )}
-                          {showOwnSignature && identity.textSignature && (
+                          {/* An HTML-only signature shows as its text, not as none. */}
+                          {showOwnSignature && getPlainTextSignature(identity) && (
                             <p className="line-clamp-2">
-                              {t('display.signature')} {identity.textSignature}
+                              {t('display.signature')} {getPlainTextSignature(identity)}
                             </p>
                           )}
                         </div>

@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import upstreamEn from '@/locales/en/common.json';
-import { withComailMessages } from '@/i18n/comail-messages';
+import en from '@/locales/en/common.json';
 import {
   type SettingsSearchTab,
   descriptionKeyFor,
@@ -12,7 +11,6 @@ import {
   withAppName,
 } from '../settings-search';
 
-const en = withComailMessages('en', upstreamEn as unknown as import('next-intl').AbstractIntlMessages);
 const labelsFor = (tab: SettingsSearchTab) => settingsSubResults(en, tab, 'Bulwark').map((r) => r.label);
 const resultsFor = (tab: SettingsSearchTab, query: string) =>
   settingsSubResults(en, tab, 'Bulwark').filter((r) => matchesAllWords(`${r.label} ${r.description ?? ''}`, query));
@@ -79,6 +77,12 @@ describe('settings search index (English messages)', () => {
     expect(resultsFor('composing', 'reply signature').map((r) => r.label)).toContain('Signature position');
   });
 
+  it('finds the newer signature settings on their tabs', () => {
+    expect(labelsFor('composing')).toContain('Signature on new mail');
+    expect(labelsFor('composing')).toContain('Signature on replies & forwards');
+    expect(labelsFor('composing')).toContain('Undo send / send delay');
+  });
+
   it('marks the rows the Advanced switch hides', () => {
     const advanced = settingsSubResults(en, 'message_list', 'Bulwark').filter((r) => r.advanced).map((r) => r.label);
     expect(advanced).toContain('Emails per page');
@@ -91,8 +95,7 @@ describe('{appName} in the index (#1314)', () => {
     const results = settingsSubResults(en, 'general', 'Rath Mail');
     const text = results.map((r) => `${r.label} ${r.description ?? ''}`).join(' ');
     expect(text).not.toContain('{appName}');
-    expect(text.toLowerCase()).toContain('comail');
-    expect(text).not.toContain('Rath Mail');
+    expect(text).toContain('Rath Mail');
   });
 
   it('leaves other values alone', () => {

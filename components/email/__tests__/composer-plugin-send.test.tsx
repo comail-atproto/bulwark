@@ -6,6 +6,7 @@ import { EmailComposer } from '../email-composer';
 const hoisted = vi.hoisted(() => ({
   takeOver: vi.fn(),
   toastError: vi.fn(),
+  transform: vi.fn(async (email: unknown) => email),
 }));
 
 // ─── Heavy component mocks (mirrors composer-from-override-envelope.test.tsx) ─
@@ -158,7 +159,7 @@ vi.mock('@/lib/plugin-hooks', () => ({
     onBeforeDraftAutoSave: { transform: async (draft: unknown) => draft },
     onBeforeEmailSend: { intercept: async () => true, interceptOutcome: async () => 'allowed' },
     onComposeSend: { takeOver: hoisted.takeOver },
-    onTransformOutgoingEmail: { transform: async (email: unknown) => email },
+    onTransformOutgoingEmail: { transform: hoisted.transform },
   },
   contactHooks: {
     search: { call: async () => [] },
@@ -253,5 +254,17 @@ describe('composer send taken over by a plugin (#1207)', () => {
     const { onSend } = renderComposer();
 
     await waitFor(() => expect(onSend).toHaveBeenCalledTimes(1));
+  });
+
+  it('sends the headers a plugin added to the outgoing message', async () => {
+    hoisted.takeOver.mockResolvedValue('default');
+    hoisted.transform.mockImplementationOnce(async (email: unknown) => ({
+      ...(email as Record<string, unknown>),
+      headers: { 'X-Classification': 'Internal' },
+    }));
+    const { onSend } = renderComposer();
+
+    await waitFor(() => expect(onSend).toHaveBeenCalledTimes(1));
+    expect(onSend.mock.calls[0][0].headers).toEqual({ 'X-Classification': 'Internal' });
   });
 });

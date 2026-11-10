@@ -33,6 +33,7 @@ import { WopiEditor } from "@/components/files/wopi-editor";
 import { useWopiStatus, canWopiOpen, fileExtension } from "@/hooks/use-wopi-status";
 import { apiFetch } from "@/lib/browser-navigation";
 import { AppTopBannerSlot } from "@/components/plugins/app-top-banner-slot";
+import { useStrictestDevices } from "@/hooks/use-device-policy";
 import { Loader2 } from "@/components/icons";
 import { isFilePreviewable } from "@/lib/file-preview";
 import { isImageFile } from "@/components/files/file-icons";
@@ -44,6 +45,8 @@ import { useLiteLinkSegments } from "@/hooks/use-lite-link-segments";
 import { useDocumentTitle } from "@/hooks/use-document-title";
 import { MvTopBar } from "@/components/layout/mv-top-bar";
 import { useMountainViewShell } from "@/hooks/use-mountain-view-shell";
+import { FilesSkeleton, FilesSkeletonBody } from "@/components/boot-skeleton/files-skeleton";
+import { useSkeletonLabels } from "@/components/boot-skeleton/use-skeleton-labels";
 
 export interface FilesAppProps {
   /** Path segments after `/files` - the folder path, one segment per level. */
@@ -55,6 +58,7 @@ export function FilesApp({ linkSegments: routeSegments }: FilesAppProps = {}) {
   // Static Lite build: the route params are empty, read the link from the URL.
   const linkSegments = useLiteLinkSegments('files', routeSegments);
   const t = useTranslations("files");
+  const skeleton = useSkeletonLabels();
   const tSidebar = useTranslations("sidebar");
   const tShell = useTranslations("shell");
   useDocumentTitle(tSidebar("files"));
@@ -704,6 +708,11 @@ export function FilesApp({ linkSegments: routeSegments }: FilesAppProps = {}) {
     }
   }, [deleteNode, trashNode, confirmDialog, handleUndo, t, failureReason]);
 
+  // Files may hold what an attachment-only block would keep in: the device
+  // policy covers them too, the strictest of the accounts signed in here
+  // (the drive may be another account's).
+  const filesDownloadsOff = useStrictestDevices().noDownloads;
+
   const handleDownloadNode = useCallback(async (id: string) => {
     try {
       await downloadNode(id);
@@ -815,7 +824,13 @@ export function FilesApp({ linkSegments: routeSegments }: FilesAppProps = {}) {
     useFileStore.setState({ supportsFiles: null });
   }, [getClientForAccount]);
 
-  if (!isAuthenticated || !filesEnabled) return null;
+  // Until the session is restored: the page skeleton the server drew.
+  if (!isAuthenticated) {
+    return isEmbedded
+      ? <FilesSkeletonBody embedded />
+      : <FilesSkeleton label={skeleton.label} labels={skeleton.labels} />;
+  }
+  if (!filesEnabled) return null;
 
   return (
     <div className={cn("flex flex-col overflow-hidden pt-[env(safe-area-inset-top)]", mvShell ? "bg-[var(--mv-canvas)]" : "bg-background", isEmbedded ? "h-full" : "h-dvh")}>
@@ -904,6 +919,7 @@ export function FilesApp({ linkSegments: routeSegments }: FilesAppProps = {}) {
                   onRenameNode={handleRenameNode}
                   onDeleteNode={handleDeleteNode}
                   onDownloadNode={handleDownloadNode}
+                  downloadsOff={filesDownloadsOff}
                   onRevealNode={handleRevealNode}
                   onRemoveRecent={removeRecentFile}
                   accountFolders={accountFolders}
@@ -936,7 +952,7 @@ export function FilesApp({ linkSegments: routeSegments }: FilesAppProps = {}) {
         <ImagePreviewModal
           name={previewImage}
           onClose={() => setPreviewImage(null)}
-          onDownload={handleDownload}
+          onDownload={filesDownloadsOff ? undefined : handleDownload}
           getImageUrl={getImageUrl}
           file={previewedView}
           neighbours={previewNeighbours}

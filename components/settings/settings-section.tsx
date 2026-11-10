@@ -105,7 +105,8 @@ const highlightTimers = new WeakMap<HTMLElement, ReturnType<typeof setTimeout>>(
  * flashes the same halo a settings search result gets.
  */
 export function scrollToSettingsSection(id: string, root: ParentNode = document): boolean {
-  const el = root.querySelector<HTMLElement>(`[data-settings-section="${id.replace(/"/g, '\\"')}"]`);
+  const el = Array.from(root.querySelectorAll<HTMLElement>('[data-settings-section]'))
+    .find((section) => section.getAttribute('data-settings-section') === id);
   if (!el) return false;
   el.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
   // Remove + reflow + add restarts the animation on a second click.

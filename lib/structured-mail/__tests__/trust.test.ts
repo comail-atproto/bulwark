@@ -147,6 +147,13 @@ describe('forwarded and personal mail', () => {
     expect(reason(mail({ ar: AR.pass, text: 'From: Frankfurt\nTo: New York\nDate: 1 Dec' }))).toBe('trusted');
   });
 
+  it('ignores forward separators inside script and style elements with spaced closing tags', () => {
+    for (const tag of ['script', 'style']) {
+      const html = `<body><${tag}>---------- Forwarded message ----------</${tag} ><p>Thanks</p></body>`;
+      expect(reason(mail({ ar: AR.pass, html }))).toBe('trusted');
+    }
+  });
+
   it('gives no card for mail from a personal mailbox, even when it passes', () => {
     const ar = 'mx.example.org; dkim=pass header.d=gmail.com; spf=pass smtp.mailfrom=friend@gmail.com; dmarc=pass header.from=gmail.com';
     expect(reason(mail({ from: 'friend@gmail.com', ar }))).toBe('personal_mailbox');

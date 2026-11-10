@@ -8,7 +8,7 @@ import { format } from "date-fns";
 import { ChevronDown, ChevronUp, Users } from "@/components/icons";
 import { getParticipantCount, isDeclinedByUser } from "@/lib/calendar-participants";
 import { getEventEndDate, getEventStartDate } from "@/lib/calendar-utils";
-import { useSettingsStore } from "@/stores/settings-store";
+import { useSettingsStore, type MonthTimedEventStyle } from "@/stores/settings-store";
 import { readableTextOn } from "@/lib/color-transform";
 import { useLongPress } from "@/hooks/use-long-press";
 import { useCvdColor } from "@/hooks/use-cvd-color";
@@ -37,6 +37,12 @@ interface EventCardProps {
   currentUserEmails?: string[];
   /** False for a day scrolled out of view: Tab skips it (arrows still reach it). */
   tabbable?: boolean;
+  /**
+   * Month view only (span variant): draw a timed event as coloured text or a
+   * dot and text instead of a bar (#1449). All-day events, events that run
+   * on past the drawn day, and declined or cancelled ones keep their look.
+   */
+  timedStyle?: MonthTimedEventStyle;
 }
 
 function sanitizeColor(color: string | null | undefined, fallback = "#3b82f6"): string {
@@ -62,6 +68,15 @@ function getEventColor(event: CalendarEvent, calendar?: Calendar): string {
 // (eventFillClass) and text in the text colour.
 // Everything is drawn with box-shadow, so the selection ring joins the list
 // here and the browser's focus outline stays free.
+/**
+ * The event colour as text on the page background: mixed with the text
+ * colour so a light calendar colour stays readable in the light theme and a
+ * dark one in the dark theme.
+ */
+export function eventTextColor(color: string): string {
+  return `color-mix(in srgb, ${color} 55%, var(--color-foreground))`;
+}
+
 export function eventFillStyle(
   color: string,
   { inactive, separated, selected, tinted }: { inactive: boolean; separated?: boolean; selected?: boolean; tinted?: boolean },
@@ -71,7 +86,7 @@ export function eventFillStyle(
   else if (separated) shadows.push("0 0 0 1px var(--color-background)");
   if (inactive) shadows.push(`inset 0 0 0 1px ${color}`);
   const fill: CSSProperties = inactive
-    ? { backgroundColor: "var(--color-background)", color: `color-mix(in srgb, ${color} 55%, var(--color-foreground))` }
+    ? { backgroundColor: "var(--color-background)", color: eventTextColor(color) }
     : tinted
       ? {
         backgroundColor: `color-mix(in srgb, ${color} 20%, var(--color-background))`,
@@ -116,7 +131,7 @@ function createEventDragPreview(title: string, timeRange: string, color: string)
   return el;
 }
 
-export function EventCard({ event, calendar, variant, onClick, onMouseEnter, onMouseLeave, onContextMenu, isSelected, draggable: isDraggable, continuesBefore = false, continuesAfter = false, className, style, currentUserEmails, tabbable = true }: EventCardProps) {
+export function EventCard({ event, calendar, variant, onClick, onMouseEnter, onMouseLeave, onContextMenu, isSelected, draggable: isDraggable, continuesBefore = false, continuesAfter = false, className, style, currentUserEmails, tabbable = true, timedStyle = "bar" }: EventCardProps) {
   const t = useTranslations("calendar");
   const [isBeingDragged, setIsBeingDragged] = useState(false);
   const paint = useCvdColor();
@@ -250,6 +265,50 @@ export function EventCard({ event, calendar, variant, onClick, onMouseEnter, onM
   }
 
   if (variant === "span") {
+    // Coloured text or dot and text for a timed event that starts and ends
+    // on the drawn day (#1449). Anything else stays a bar, so all-day and
+    // multi-day events read as blocked days.
+    const textStyle = (timedStyle === "text" || timedStyle === "dot")
+      && !event.showWithoutTime && !continuesBefore && !continuesAfter && !isInactive
+      ? timedStyle : null;
+    if (textStyle) {
+      return (
+        <button
+          onClick={(e) => { e.stopPropagation(); onClick?.(e.currentTarget.getBoundingClientRect()); }}
+          onMouseEnter={(e) => onMouseEnter?.(e.currentTarget.getBoundingClientRect())}
+          onMouseLeave={() => onMouseLeave?.()}
+          onContextMenu={handleContextMenu}
+          onKeyDown={handleKeyDown}
+          {...touchProps}
+          aria-label={ariaLabel}
+          tabIndex={tabbable ? undefined : -1}
+          {...dragProps}
+          data-timed-style={textStyle}
+          className={cn(
+            "w-full h-full text-start rounded-xs px-1.5 py-0.5 text-xs overflow-hidden",
+            "hover:bg-muted transition-colors cursor-pointer",
+            isBeingDragged && "opacity-50",
+            className
+          )}
+          style={{
+            color: textStyle === "text" ? eventTextColor(color) : "var(--color-foreground)",
+            ...(isSelected ? { boxShadow: "0 0 0 2px var(--color-primary)" } : {}),
+            ...style,
+          }}
+        >
+          <div className="flex items-center gap-1 min-w-0">
+            {textStyle === "dot" && (
+              <span data-event-dot aria-hidden="true" className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: color }} />
+            )}
+            <span className="flex-shrink-0 font-normal opacity-85">{safeFormat(startDate, timeFmt)}</span>
+            <span dir="auto" className="flex-1 min-w-0 truncate text-start font-medium">{event.title || t("events.no_title")}</span>
+            {visibleCalendarName && (
+              <span data-calendar-name dir="auto" className="min-w-0 max-w-[45%] shrink truncate font-normal opacity-85">{visibleCalendarName}</span>
+            )}
+          </div>
+        </button>
+      );
+    }
     return (
       <button
         onClick={(e) => { e.stopPropagation(); onClick?.(e.currentTarget.getBoundingClientRect()); }}

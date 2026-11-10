@@ -33,6 +33,28 @@ export function buildMobileHandoffUrl(target: string, fragment: Record<string, s
 }
 
 /**
+ * App builds that send `mobile_code_challenge` (PKCE S256: the base64url
+ * SHA-256 of a verifier only the app knows) get no credentials in the link.
+ * The sign-in is parked on the server (lib/auth/handoff-store.ts) and the
+ * link carries a one-time code the app redeems with its verifier at
+ * /api/auth/handoff/redeem. Older builds send no challenge and keep getting
+ * the fragment above. Contract: bulwarkmail.org/docs/development/mobile-handoff.
+ */
+export function isMobileCodeChallenge(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value);
+}
+
+/** The challenge when `raw` is a well-formed S256 challenge, else ''. */
+export function mobileCodeChallenge(raw: string | null | undefined): string {
+  return isMobileCodeChallenge(raw) ? raw : '';
+}
+
+/** The URL the browser hands to an app that sent a challenge: code and state only. */
+export function buildMobileHandoffCodeUrl(target: string, code: string, state: string): string {
+  return `${target}?${new URLSearchParams({ code, state }).toString()}`;
+}
+
+/**
  * What the login page does once the browser is signed in:
  *  - `handoff`: a mobile hand-off whose sign-in just happened here; show the
  *    consent for handing it to the app.

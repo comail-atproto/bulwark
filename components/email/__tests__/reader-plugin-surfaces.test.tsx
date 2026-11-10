@@ -113,7 +113,7 @@ describe('email-detail-sidebar', () => {
     rerender(<EmailViewer email={textMail('Hi')} mailboxes={mailboxes} selectedMailbox="inbox" currentMailboxRole="inbox" />);
 
     expect(screen.queryByTestId('slot-email-detail-sidebar')).toBeNull();
-    expect(screen.getByRole('button', { name: 'plugin_panel_show' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'plugin_panel', pressed: false })).toBeInTheDocument();
   });
 
   it('lays the panel over the message when opened anyway, instead of squeezing it', () => {
@@ -121,7 +121,7 @@ describe('email-detail-sidebar', () => {
     offerSlots('p1', ['email-detail-sidebar']);
     viewer(textMail('Hi'));
 
-    fireEvent.click(screen.getByRole('button', { name: 'plugin_panel_show' }));
+    fireEvent.click(screen.getByRole('button', { name: 'plugin_panel', pressed: false }));
     const panel = screen.getByTestId('slot-email-detail-sidebar').closest('[data-plugin-detail-panel]')!;
     expect(panel.getAttribute('data-plugin-detail-panel')).toBe('overlay');
     expect(panel.className).toContain('absolute');
@@ -168,7 +168,7 @@ describe('email-detail-sidebar', () => {
     offerSlots('p1', ['email-detail-sidebar'], { startFolded: ['email-detail-sidebar'] });
     const { unmount } = viewer(textMail('Hi'));
     expect(screen.queryByTestId('slot-email-detail-sidebar')).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'plugin_panel_show' }));
+    fireEvent.click(screen.getByRole('button', { name: 'plugin_panel', pressed: false }));
     expect(screen.getByTestId('slot-email-detail-sidebar').closest('[data-plugin-detail-panel]')!.getAttribute('data-plugin-detail-panel')).toBe('docked');
     unmount();
     viewer(textMail('Hi'));
@@ -486,20 +486,27 @@ describe('attachment-actions', () => {
     }
   });
 
-  it('keeps the invisible hover overlay from taking taps', () => {
+  // Only the cards below the message hide their buttons until hover.
+  const cardOverlays = () => {
+    useSettingsStore.setState({ attachmentPosition: 'below-message' });
     viewer(withAttachment());
     const overlays = [...document.querySelectorAll<HTMLElement>('[data-attachment-name="invoice.pdf"] div')]
       .filter((d) => /\bopacity-0\b/.test(d.className));
     expect(overlays.length).toBeGreaterThan(0);
-    for (const overlay of overlays) expect(overlay.className).toMatch(/\bpointer-events-none\b/);
+    return overlays;
+  };
+
+  it('keeps the invisible hover overlay from taking taps', () => {
+    for (const overlay of cardOverlays()) {
+      expect(overlay.className).toMatch(/\bpointer-events-none\b/);
+      expect(overlay.className).toMatch(/\bgroup-hover:pointer-events-auto\b/);
+      // Touch screens show the buttons all the time, so they must take taps there.
+      expect(overlay.className).toMatch(/\[@media\(hover:none\)\]:pointer-events-auto/);
+    }
   });
 
   it("shows the overlay's buttons to keyboard users who tab into them, not only on hover", () => {
-    viewer(withAttachment());
-    const overlays = [...document.querySelectorAll<HTMLElement>('[data-attachment-name="invoice.pdf"] div')]
-      .filter((d) => /\bopacity-0\b/.test(d.className));
-    expect(overlays.length).toBeGreaterThan(0);
-    for (const overlay of overlays) {
+    for (const overlay of cardOverlays()) {
       expect(overlay.className).toMatch(/\bgroup-focus-within:opacity-100\b/);
       expect(overlay.className).toMatch(/\bgroup-focus-within:pointer-events-auto\b/);
     }

@@ -35,7 +35,7 @@ const { useEmailStore } = await import('@/stores/email-store');
 const { useAccountStore } = await import('@/stores/account-store');
 const { TourProvider } = await import('@/components/tour/tour-provider');
 const { AdvancedSettingsProvider } = await import('../settings-section');
-const { tabSearchEntries, getByPath } = await import('@/lib/settings-search');
+const { tabSearchEntries, getByPath } = await import('@/lib/comail-settings-search');
 const pages = {
   account: (await import('../account-settings')).AccountSettings,
   byomc: (await import('../byomc-settings')).ByomcSettings,
@@ -64,7 +64,7 @@ const pages = {
 const OVERRIDES: Record<string, () => unknown> = {
   getAccountId: () => 'acc', getSieveAccountId: () => 'acc', getUsername: () => 'user@example.com',
   getSharedAccounts: () => [], getSieveAccounts: () => [], getSieveCapabilities: () => null,
-  hasAccountCapability: () => false, supportsCalendars: () => true, supportsFiles: () => true, hasDelayedSend: () => true,
+  hasAccountCapability: () => false, supportsCalendars: () => true, supportsPrincipals: () => true, supportsFiles: () => true, hasDelayedSend: () => true,
   // Sharing and Recover deleted items read these on open.
   getShareTargets: async () => ({ targets: [], failed: [] }), listPrincipals: async () => ({ principals: [], status: 'ok' }),
   getPrincipals: async () => [], listArchivedEmails: async () => ({ items: [], nextPosition: null }),

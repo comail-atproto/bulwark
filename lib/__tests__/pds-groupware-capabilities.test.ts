@@ -4,6 +4,7 @@ import { AtmoCalendarAdapter } from '@/lib/jmap/atmo-calendar-adapter';
 import { JMAPClient } from '../jmap/client';
 import { jmapSession } from './fixtures/jmap-session';
 import { useAccountStore } from '@/stores/account-store';
+import { syncVacationBlock } from '@/lib/vacation-calendar';
 
 const serverUrl = 'https://mail.example.com';
 const username = 'member@example.test';
@@ -11,6 +12,30 @@ const username = 'member@example.test';
 afterEach(() => {
   vi.restoreAllMocks();
   useAccountStore.setState({ accounts: [], activeAccountId: null });
+});
+
+it('keeps configured PDS gates authoritative when Stalwart advertises calendars and contacts', async () => {
+  const id = useAccountStore.getState().addAccount({ serverUrl, username, label: 'Member', email: username, displayName: 'Member', authMode: 'basic', rememberMe: true, lastLoginAt: 1, isConnected: true, hasError: false, isDefault: true });
+  const slot = useAccountStore.getState().getAccountById(id)!.cookieSlot;
+  const fetcher = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(Response.json(jmapSession({ accountCapabilities: {
+    'urn:ietf:params:jmap:mail': {}, 'urn:ietf:params:jmap:calendars': {}, 'urn:ietf:params:jmap:contacts': {},
+  } })));
+  const client = new JMAPClient(serverUrl, username, 'synthetic');
+  await client.connect();
+  expect(client.supportsCalendars()).toBe(true);
+  expect(client.supportsContacts()).toBe(true);
+  client.configurePrivateGroupware(slot, { calendar: false, contacts: false });
+  expect(client.supportsCalendars()).toBe(false);
+  expect(client.supportsContacts()).toBe(false);
+  fetcher.mockClear();
+  expect(await syncVacationBlock(client, undefined, { isEnabled: false, fromDate: null, toDate: null, subject: '' }, 'load')).toBe('none');
+  expect(fetcher).not.toHaveBeenCalled();
+  client.configurePrivateGroupware(slot, { calendar: true, contacts: true });
+  expect(client.supportsCalendars()).toBe(true);
+  expect(client.supportsContacts()).toBe(true);
+  useAccountStore.getState().updateAccount(id, { cookieSlot: slot + 1 });
+  expect(client.supportsCalendars()).toBe(false);
+  expect(client.supportsContacts()).toBe(false);
 });
 
 it('discovers private calendars and contacts without restoring Stalwart permissions', async () => {

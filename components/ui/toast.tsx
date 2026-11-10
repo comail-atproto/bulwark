@@ -393,7 +393,10 @@ export function ToastContainer({ toasts, onClose }: { toasts: Toast[]; onClose: 
   const returnFocusRef = useRef<HTMLElement | null>(null);
   // The stack moves to the top corner while it would cover the element that
   // has the keyboard focus (WCAG 2.4.11): a Save button at the foot of the
-  // event editor sat right under it.
+  // event editor sat right under it. Not on a phone: there the top of the
+  // screen is the header with Back and the message actions, which an Undo
+  // toast covered after a delete (#1472), and the stack already rides above
+  // the bottom bars.
   const [dodge, setDodge] = useState(false);
 
   useEffect(() => {
@@ -402,7 +405,7 @@ export function ToastContainer({ toasts, onClose }: { toasts: Toast[]; onClose: 
 
   const hasToasts = toasts.length > 0;
   useLayoutEffect(() => {
-    if (!hasToasts) {
+    if (!hasToasts || phone) {
       setDodge(false);
       return;
     }
@@ -419,7 +422,7 @@ export function ToastContainer({ toasts, onClose }: { toasts: Toast[]; onClose: 
       document.removeEventListener("focusin", check);
       window.removeEventListener("resize", check);
     };
-  }, [hasToasts, toasts.length]);
+  }, [hasToasts, toasts.length, phone]);
   useEffect(() => {
     if (!hasToasts) return;
     const onKeyDown = (e: KeyboardEvent) => {
@@ -463,7 +466,7 @@ export function ToastContainer({ toasts, onClose }: { toasts: Toast[]; onClose: 
         "max-sm:inset-x-3 max-sm:bottom-[calc(var(--bottom-controls-height,3.75rem)+0.75rem)]",
         "max-sm:[html[data-composer-open]_&]:bottom-[max(5rem,calc(var(--bottom-controls-height,3.75rem)+0.75rem))]",
         // Out of the way of the focused element: the top end corner.
-        dodge && "top-5 bottom-auto! max-sm:top-[calc(env(safe-area-inset-top)+0.75rem)]",
+        dodge && "top-5 bottom-auto!",
         held && "invisible"
       )}
       data-dodging={dodge || undefined}

@@ -25,7 +25,8 @@ const currentGroupwareEnabled = vi.fn().mockResolvedValue(true);
 vi.mock('@/lib/groupware/access', () => ({ currentGroupwareEnabled: (...args: unknown[]) => currentGroupwareEnabled(...args) }));
 
 vi.mock('@/lib/logger', () => ({
-  logger: { debug: vi.fn() },
+  configureLogger: vi.fn(),
+  logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 
 // Env vars these tests drive. Stubbed to undefined before each test so the
@@ -45,7 +46,7 @@ const MANAGED_ENV = [
   'LOGIN_IMPRINT_URL', 'LOGIN_PRIVACY_POLICY_URL', 'LOGIN_WEBSITE_URL', 'DOMAIN_BRANDING',
   'JMAP_SERVERS', 'JMAP_SERVER_AUTO_PICK_BY_DOMAIN', 'SOURCE_CODE_URL', 'LOGIN_SHOW_REMEMBER_ME',
   'ACCESSIBILITY_STATEMENT_URL', 'ACCESSIBILITY_FEEDBACK_URL', 'HELP_URL', 'EASY_READ_URL', 'SIGN_LANGUAGE_URL',
-  'LOGIN_USERNAME_PLACEHOLDER',
+  'LOGIN_USERNAME_PLACEHOLDER', 'BUILDERS_WEBSITE_URL',
 ] as const;
 
 describe('config API route', () => {
@@ -101,6 +102,15 @@ describe('config API route', () => {
     expect(isConfigData(config)).toBe(true);
     return config;
   }
+
+  it('publishes the configured Builders website before sign-in', async () => {
+    vi.stubEnv('BUILDERS_WEBSITE_URL', 'https://builders.stage.test');
+    expect((await getConfig()).buildersWebsiteUrl).toBe('https://builders.stage.test');
+  });
+
+  it('publishes the default Builders website when no override is set', async () => {
+    expect((await getConfig()).buildersWebsiteUrl).toBe('https://build.comail.at');
+  });
 
   it('reads feature gates from the selected encrypted account session', async () => {
     vi.stubEnv('SESSION_SECRET', 's'.repeat(64));

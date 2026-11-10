@@ -9,22 +9,30 @@
 // plugin id, one switch at a time.
 
 import { usePolicyStore } from '@/stores/policy-store';
-import type { HostFeaturesView } from '../plugin-types';
+import { useAuthStore } from '@/stores/auth-store';
+import { noThirdPartyTraffic, subscribeThirdPartyMode } from '@/lib/third-party-mode';
+import type { HostFeaturesView, InstalledPlugin } from '../plugin-types';
 import type { OrganisationPolicy } from '@/lib/admin/organisation-policy';
+import { assistantFeatures } from './assistant';
 
 /** The external-mail-warning plugin, retired in favour of organisation.externalMail. */
 export const EXTERNAL_MAIL_WARNING_PLUGIN_ID = 'external-mail-warning';
 
-/** The flags for an externalMail policy section (missing = both off). */
-export function hostFeaturesFor(externalMail: OrganisationPolicy['externalMail'] | undefined): HostFeaturesView {
+/** The flags for an externalMail policy section (missing = both off) and the third-party mode. */
+export function hostFeaturesFor(externalMail: OrganisationPolicy['externalMail'] | undefined, thirdPartyOff = false): HostFeaturesView {
   return {
     externalSenderLabel: externalMail?.senderLabel === true,
     externalRecipientWarning: externalMail?.recipientWarning === true,
+    noThirdPartyTraffic: thirdPartyOff,
   };
 }
 
-export function snapshotHostFeatures(): HostFeaturesView {
-  return hostFeaturesFor(usePolicyStore.getState().getOrganisation().externalMail);
+export function snapshotHostFeatures(plugin?: InstalledPlugin): HostFeaturesView {
+  return {
+    ...hostFeaturesFor(usePolicyStore.getState().getOrganisation().externalMail, noThirdPartyTraffic()),
+    // The AI assistant's host APIs this webmail offers (lib/plugin-sandbox/assistant).
+    ...assistantFeatures(plugin),
+  };
 }
 
 /**
@@ -32,11 +40,11 @@ export function snapshotHostFeatures(): HostFeaturesView {
  * with the recipient warning, the banner and the new-mail toast (both about
  * incoming mail from outside) with the sender label.
  */
-const HOOK_FLAGS: Record<string, keyof HostFeaturesView> = {
+const HOOK_FLAGS: Record<string, 'externalSenderLabel' | 'externalRecipientWarning'> = {
   onBeforeEmailSend: 'externalRecipientWarning',
   onNewEmailReceived: 'externalSenderLabel',
 };
-const SLOT_FLAGS: Record<string, keyof HostFeaturesView> = {
+const SLOT_FLAGS: Record<string, 'externalSenderLabel' | 'externalRecipientWarning'> = {
   'email-banner': 'externalSenderLabel',
 };
 
@@ -62,11 +70,16 @@ export function watchHostFeatures(onChange: (features: HostFeaturesView) => void
   if (watching) return;
   watching = true;
   lastKey = JSON.stringify(snapshotHostFeatures());
-  usePolicyStore.subscribe(() => {
+  const check = () => {
     const features = snapshotHostFeatures();
     const key = JSON.stringify(features);
     if (key === lastKey) return;
     lastKey = key;
     onChange(features);
-  });
+  };
+  usePolicyStore.subscribe(check);
+  // The mode is known once the config has been read, and an admin may turn it on later.
+  subscribeThirdPartyMode(check);
+  // Flags that depend on the server (Files) change with the signed-in session.
+  useAuthStore.subscribe((state, previous) => { if (state.client !== previous.client) check(); });
 }

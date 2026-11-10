@@ -137,7 +137,7 @@ export function MvTopBar({
         });
       }
     : undefined);
-  const { appName, appLogoLightUrl, appLogoDarkUrl } = useConfig();
+  const { appName, appLogoLightUrl, appLogoDarkUrl, buildersWebsiteUrl } = useConfig();
   const resolvedTheme = useThemeStore((s) => s.resolvedTheme);
   const toggleSidebarCollapsed = useUIStore((s) => s.toggleSidebarCollapsed);
 
@@ -399,7 +399,7 @@ export function MvTopBar({
                 })}
                 {buildersEnrolled && (
                   <a
-                    href="https://build.comail.at"
+                    href={buildersWebsiteUrl}
                     target="_blank"
                     rel="noopener noreferrer"
                     role="menuitem"

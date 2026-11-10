@@ -100,6 +100,11 @@ export const LITE_API_STRING_ALLOWLIST = [
   "/api/auth/reauth/sso/complete",
   "/api/auth/pair/create",
   "/api/auth/pair/status",
+  // Mobile sign-in hand-off with a code (login page, SSO callback) - skipped
+  // in Lite, which has no server to park the sign-in on and hands over in
+  // the fragment.
+  "/api/auth/handoff/create",
+  "/api/auth/handoff/confirm",
   "/api/auth/totp-token-exchange",
   "/api/auth/session",
   "/api/auth/verify",
@@ -130,6 +135,10 @@ export const LITE_API_STRING_ALLOWLIST = [
   "/api/push/active",
   "/api/push/verify",
   "/api/push/jmap",
+  // Offline mode (#523) - OfflineHost isn't mounted in Lite, and the update
+  // check (lib/app-update.ts) asks lite-build.json there instead.
+  "/api/offline/shell",
+  "/api/version",
   // Dev-only JMAP mock.
   "/api/jmap",
   "/api/dev-jmap",
@@ -858,11 +867,17 @@ multiple accounts, calendar, contacts, files, themes, settings export/import,
 password and TOTP login, demo mode, deep links.
 
 Not available in Lite (they need the Node.js server): the admin console and
-setup wizard, plugins and sidebar apps, settings sync across devices, OAuth /
-SSO login, the account security tab (app passwords, 2FA setup), ICS URL
-subscriptions and CalDAV discovery, sender favicons, office (WOPI) editing,
-web push notifications, the update banner, device pairing, and the
-"Default apps" page (registering Lite as the mailto:/webcal: handler).
+setup wizard, plugins and sidebar apps, settings sync across devices, the
+account security tab (app passwords, 2FA setup), ICS URL subscriptions and
+CalDAV discovery, sender favicons, office (WOPI) editing, web push
+notifications, the update banner, device pairing, and the "Default apps" page
+(registering Lite as the mailto:/webcal: handler).
+
+OAuth / SSO login is not in this build. It is in Lite when Stalwart serves it
+as an Application (\`npm run build:lite -- --target=stalwart\`, or the
+\`${STALWART_ZIP_NAME}\` of a release): accounts whose domain signs in at an
+OpenID provider are sent there, and setting the Application's
+\`oauthClientId\` adds **Sign in with SSO**. That bundle's README explains it.
 
 ## Security notes
 

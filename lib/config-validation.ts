@@ -52,6 +52,7 @@ const configValidators = {
   oauthClientId: isString,
   oauthIssuerUrl: isString,
   oauthScopes: isString,
+  oauthResource: isString,
   rememberMeEnabled: isBoolean,
   settingsSyncEnabled: isBoolean,
   stalwartFeaturesEnabled: isBoolean,
@@ -66,6 +67,7 @@ const configValidators = {
   loginImprintUrl: isString,
   loginPrivacyPolicyUrl: isString,
   loginWebsiteUrl: isString,
+  buildersWebsiteUrl: isOptionalString,
   loginUsernamePlaceholder: isString,
   hostedInboxLogoutDestination: isOptionalString,
   loginLogoMaxHeight: isString,
@@ -92,6 +94,14 @@ const configValidators = {
   noThirdPartyTraffic: isBoolean,
   // Lite only (lib/lite-config.ts); the server's response leaves it out.
   oauthRevokeOnSignOut: (value): value is boolean | undefined => value === undefined || typeof value === 'boolean',
+  // Absent from Lite's config and from servers before 1.20.
+  errorReporting: (value): value is ConfigData['errorReporting'] => value === undefined || (
+    isRecord(value)
+    && typeof value.dsn === 'string'
+    && typeof value.sampleRate === 'number'
+    && typeof value.environment === 'string'
+    && typeof value.collect === 'boolean'
+  ),
 } satisfies Validators<ConfigData>;
 
 /**

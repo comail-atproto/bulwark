@@ -7,7 +7,9 @@ import { configManager } from '@/lib/admin/config-manager';
 import { isConfigReadOnly, ConfigReadOnlyError } from '@/lib/admin/paths';
 import { auditLog } from '@/lib/admin/audit';
 import { logger } from '@/lib/logger';
+import { configWriteErrorResponse } from '@/lib/admin/config-read-only-response';
 import { locales as ALL_LOCALES } from '@/i18n/routing';
+import { trimTrailingSlashes } from '@/lib/url-normalization';
 
 const CLIENT_ID = 'bulwark-webmail';
 const CLIENT_DESCRIPTION = 'Bulwark Webmail (auto-configured)';
@@ -195,14 +197,14 @@ export async function POST(request: NextRequest) {
     }
 
     const body = await request.json() as SetupRequestBody;
-    const origin = (body.origin ?? '').trim().replace(/\/+$/, '');
+    const origin = trimTrailingSlashes((body.origin ?? '').trim());
     if (!isValidOriginUrl(origin)) {
       return NextResponse.json(
         { error: 'Webmail origin must be a URL like "https://webmail.example.com" with no path.' },
         { status: 400 },
       );
     }
-    const issuerUrl = (body.issuerUrl ?? origin).trim().replace(/\/+$/, '');
+    const issuerUrl = trimTrailingSlashes((body.issuerUrl ?? origin).trim());
     if (!isValidOriginUrl(issuerUrl)) {
       return NextResponse.json(
         { error: 'Stalwart issuer URL must be a URL like "https://mail.example.com" with no path.' },
@@ -384,6 +386,8 @@ export async function POST(request: NextRequest) {
       mobileRedirectUri: MOBILE_REDIRECT_URI,
     });
   } catch (error) {
+    const refused = configWriteErrorResponse(error);
+    if (refused) return refused;
     logger.error('Admin OAuth setup error', { error: error instanceof Error ? error.message : 'Unknown error' });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal server error' },

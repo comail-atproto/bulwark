@@ -7,6 +7,7 @@
  */
 
 import type { NextRequest } from 'next/server';
+import { trimTrailingDots } from '@/lib/url-normalization';
 
 /** Config keys that can be overridden per domain. */
 export const BRANDING_OVERRIDE_KEYS = [
@@ -76,7 +77,7 @@ export interface DomainBrandingEntry {
 const HOST_RE = /^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/;
 
 function normalizeHost(host: string): string {
-  return host.trim().toLowerCase().replace(/\.+$/, '');
+  return trimTrailingDots(host.trim().toLowerCase());
 }
 
 /** Parse the raw config value (array of entries, or string-JSON). Invalid entries are dropped. */

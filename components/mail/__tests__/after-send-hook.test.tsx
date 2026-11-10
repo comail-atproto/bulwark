@@ -25,7 +25,7 @@ const sendData = vi.hoisted(() => ({ delayedUntil: undefined as string | undefin
 vi.mock('@/components/email/email-composer', () => ({
   EmailComposer: ({ onSend }: { onSend?: (data: unknown) => Promise<void> }) => (
     <button onClick={() => {
-      onSend?.({ to: ['bob@example.com'], cc: ['carol@example.com'], bcc: [], subject: 'Hi', body: 'Hello', delayedUntil: sendData.delayedUntil })
+      onSend?.({ to: ['bob@example.com'], cc: ['carol@example.com'], bcc: [], subject: 'Hi', body: 'Hello', delayedUntil: sendData.delayedUntil, composerId: 'composer-1' })
         .catch((e) => { sendData.error = e; });
     }}>
       stub send
@@ -121,14 +121,14 @@ describe('onAfterEmailSend', () => {
     useSettingsStore.setState({ sendDelaySeconds: 0 } as never);
     const sent = vi.fn();
     emailHooks.onAfterEmailSend.register('test', sent);
-    sendEmail.mockResolvedValue({ scheduled: false, emailId: 'e1', emailSubmissionId: 's1' });
+    sendEmail.mockResolvedValue({ scheduled: false, emailId: 'e1', emailAccountId: 'acc', emailSubmissionId: 's1' });
 
     await sendFromComposer();
 
     await waitFor(() => expect(sent).toHaveBeenCalledTimes(1));
     expect(sent).toHaveBeenCalledWith({
-      emailId: 'e1', submissionId: 's1', to: ['bob@example.com'], cc: ['carol@example.com'], bcc: [],
-      subject: 'Hi', scheduledFor: null,
+      emailId: 'e1', accountId: 'acc', submissionId: 's1', to: ['bob@example.com'], cc: ['carol@example.com'], bcc: [],
+      subject: 'Hi', scheduledFor: null, composerId: 'composer-1',
     });
   });
 

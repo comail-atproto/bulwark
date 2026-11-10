@@ -97,6 +97,7 @@ export function CalendarSidebarPanel({
   const paint = useCvdColor();
   const tSub = useTranslations("calendar.subscription");
   const tMgmt = useTranslations("calendar.management");
+  const tCompany = useTranslations("company_calendars");
   const isSubscriptionCalendar = useCalendarStore((s) => s.isSubscriptionCalendar);
   const allSubs = useCalendarStore((s) => s.icalSubscriptions);
   const currentAccountId = client?.getAccountId();
@@ -153,7 +154,9 @@ export function CalendarSidebarPanel({
   // view but hidden from the event calendar list here.
   const eventCalendars = useMemo(() => calendars.filter(c => !c.isTasksOnly), [calendars]);
 
-  const personalCalendars = useMemo(() => eventCalendars.filter(c => !c.isShared), [eventCalendars]);
+  const personalCalendars = useMemo(() => eventCalendars.filter(c => !c.isShared && !c.isCompany), [eventCalendars]);
+  // Company calendars the admin set: under "Organisation", read-only.
+  const companyCalendars = useMemo(() => eventCalendars.filter(c => c.isCompany), [eventCalendars]);
 
   // Names for the "shared with" hint. Principal ids belong to one server, so
   // only calendars of the account `client` talks to are resolved.
@@ -281,7 +284,7 @@ export function CalendarSidebarPanel({
   const renderCalendarItem = (cal: Calendar) => {
     const isVisible = selectedCalendarIds.includes(cal.id);
     const color = paint(cal.color || "#3b82f6");
-    const hasMenu = !isPublicAtprotoCalendar(cal) && (isSubscriptionCalendar(cal.id) ? !!client : true);
+    const hasMenu = !cal.isCompany && !isPublicAtprotoCalendar(cal) && (isSubscriptionCalendar(cal.id) ? !!client : true);
 
     return (
       <div key={cal.id} className="relative group/cal">
@@ -608,6 +611,12 @@ export function CalendarSidebarPanel({
             t('my_calendars'),
             personalCalendars,
             onCreateCalendar,
+          )}
+
+          {companyCalendars.length > 0 && (
+            <div className="mt-2" data-testid="company-calendars-section">
+              {renderSection('__organisation__', tCompany('section'), companyCalendars)}
+            </div>
           )}
 
           {sharedAccountGroups.length > 0 && (

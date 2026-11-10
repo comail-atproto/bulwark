@@ -11,6 +11,7 @@ import { DEFAULT_RELAY_BASE_URL } from '@/lib/push-relays';
 import { isBuiltInHost, relayAllowed } from '@/lib/outgoing-hosts';
 import { noThirdPartyTraffic } from '@/lib/third-party-mode';
 import { IS_LITE } from '@/lib/lite';
+import { serviceWorkerUrl, SW_SCOPE } from '@/lib/app-update';
 import {
   EMPTY_NOTIFICATION_MUTES,
   isAccountMuted,
@@ -58,9 +59,6 @@ function relayBaseUrlKey(accountId: string): string {
   return RELAY_BASE_URL_PREFIX + accountId;
 }
 
-const BASE_PATH = (process.env.NEXT_PUBLIC_BASE_PATH ?? '').replace(/\/+$/, '');
-const SW_SCOPE = `${BASE_PATH}/`;
-const SW_URL = `${BASE_PATH}/sw.js`;
 
 // Re-exported for callers that already import the relay default from here.
 // The relay list itself lives in lib/push-relays.ts.
@@ -86,8 +84,11 @@ const PUSH_TYPES = ['EmailDelivery'] as const;
 // capability and get the plain EmailDelivery subscription as before.
 export const EMAIL_PUSH_CAPABILITY = 'urn:ietf:params:jmap:emailpush';
 
-// Only ids: the relay stays content-blind and the SW dedupes on them.
-const EMAIL_PUSH_PROPERTIES = ['id', 'threadId'];
+// Only ids: the relay stays content-blind and the SW dedupes on them. Never
+// add from, subject or preview: they would reach the push service around
+// the device policy "Push without sender and subject" (its text is held
+// back in app/api/push/preview). A test keeps this list as it is.
+export const EMAIL_PUSH_PROPERTIES: readonly string[] = ['id', 'threadId'];
 
 function sameTypes(a: readonly string[] | null | undefined, b: readonly string[]): boolean {
   if (!a || a.length !== b.length) return false;
@@ -411,7 +412,11 @@ export interface EnableWebPushParams {
   client: IJMAPClient;
   // Optional - falls back to DEFAULT_RELAY_BASE_URL.
   relayBaseUrl?: string;
-  // Free-form label the relay shows in /metrics; never returned in pushes.
+  // Free-form label (callers pass the sign-in name). The relay stores it with
+  // the registration and copies it into every push it forwards: encrypted for
+  // the browser in a Web Push payload, readable to Google and Apple in the FCM
+  // and APNs payloads of the native apps. It is not part of the relay's
+  // /metrics.
   accountLabel?: string;
   // Destroy the recorded server-side subscription and create a brand-new one
   // instead of refreshing the existing record's expiry. Stalwart binds the set
@@ -551,7 +556,7 @@ async function ensureServiceWorker(): Promise<ServiceWorkerRegistration> {
   // push handler is in place.
   let registration = await navigator.serviceWorker.getRegistration(SW_SCOPE);
   if (!registration) {
-    registration = await navigator.serviceWorker.register(SW_URL, { scope: SW_SCOPE });
+    registration = await navigator.serviceWorker.register(serviceWorkerUrl(), { scope: SW_SCOPE });
   }
   await navigator.serviceWorker.ready;
   return registration;

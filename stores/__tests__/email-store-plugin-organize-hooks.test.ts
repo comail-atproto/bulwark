@@ -373,6 +373,45 @@ describe('read, star and keyword hooks', () => {
     expect(after).toHaveBeenCalledWith({ emailIds: ['e1'], starred: true });
   });
 
+  it('names a group mailbox\'s account on a star toggle', async () => {
+    const groupInbox = makeMailbox({ id: 'vertrieb:inbox', originalId: 'inbox', role: 'inbox', isShared: true, accountId: 'vertrieb' });
+    openFolder('vertrieb:inbox', [makeEmail('e1', { mailboxIds: { 'vertrieb:inbox': true } })]);
+    useEmailStore.setState({ mailboxes: [...mailboxes, groupInbox] });
+    const before = vi.fn(() => true);
+    const after = vi.fn();
+    emailHooks.onBeforeEmailStarToggle.register('t', before);
+    emailHooks.onEmailStarToggle.register('t', after);
+
+    expect(await useEmailStore.getState().toggleStar(client, 'e1')).toBe(true);
+
+    expect(client.toggleStar).toHaveBeenCalledWith('e1', true, 'vertrieb');
+    expect(before).toHaveBeenCalledWith({ emailIds: ['e1'], starred: true, accountId: 'vertrieb' });
+    expect(after).toHaveBeenCalledWith({ emailIds: ['e1'], starred: true, accountId: 'vertrieb' });
+  });
+
+  it('names a stamped row\'s account only when it is not the own one', async () => {
+    openFolder('inbox', [
+      makeEmail('own', { sourceClientAccountId: 'acct', sourceAccountId: 'me' }),
+      makeEmail('shared', { sourceClientAccountId: 'acct', sourceAccountId: 'vertrieb' }),
+    ]);
+    const before = vi.fn(() => true);
+    const after = vi.fn();
+    emailHooks.onBeforeEmailStarToggle.register('t', before);
+    emailHooks.onEmailStarToggle.register('t', after);
+
+    await useEmailStore.getState().toggleStar(client, 'own');
+    await useEmailStore.getState().toggleStar(client, 'shared');
+
+    expect(before.mock.calls).toEqual([
+      [{ emailIds: ['own'], starred: true }],
+      [{ emailIds: ['shared'], starred: true, accountId: 'vertrieb' }],
+    ]);
+    expect(after.mock.calls).toEqual([
+      [{ emailIds: ['own'], starred: true }],
+      [{ emailIds: ['shared'], starred: true, accountId: 'vertrieb' }],
+    ]);
+  });
+
   it('stops a star toggle a plugin refuses', async () => {
     openFolder('inbox', [makeEmail('e1')]);
     emailHooks.onBeforeEmailStarToggle.register('t', () => false);

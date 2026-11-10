@@ -1,3 +1,4 @@
+import { installRuntimeTestChannel, sendToRuntime } from './sandbox-runtime-test-channel';
 /**
  * A slot frame renders the props the host sent with init and follows every
  * props-update after that. An update that landed after the slot's first
@@ -19,9 +20,7 @@ const BUNDLE = `module.exports = { slots: { 'email-banner': { component: functio
 const hooks = globalThis as { __slotRendered?: (props: unknown) => void };
 
 function post(source: unknown, origin: string, data: unknown): void {
-  const ev = new MessageEvent('message', { data, origin });
-  Object.defineProperty(ev, 'source', { value: source });
-  window.dispatchEvent(ev);
+  sendToRuntime(source, origin, data);
 }
 
 let hostWindow: { postMessage: ReturnType<typeof vi.fn> };
@@ -31,6 +30,7 @@ beforeEach(() => {
   // The runtime keeps its host binding and boot flag at module scope.
   vi.resetModules();
   hostWindow = { postMessage: vi.fn() };
+  installRuntimeTestChannel(hostWindow);
   Object.defineProperty(window, 'parent', { configurable: true, get: () => hostWindow as unknown as Window });
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
 });

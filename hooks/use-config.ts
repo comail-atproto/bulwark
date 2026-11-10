@@ -10,6 +10,7 @@ import { applyLiteConfig, liteStalwartDefaults } from '@/lib/lite-config';
 import { publishConfig } from '@/lib/groupware/config-events';
 import { isConfigData } from '@/lib/config-validation';
 import { setNoThirdPartyTraffic } from '@/lib/third-party-mode';
+import { configureErrorReporting, type ClientSettings } from '@/lib/error-reporting/client';
 
 export interface ConfigData {
   appName: string;
@@ -19,6 +20,7 @@ export interface ConfigData {
   oauthClientId: string;
   oauthIssuerUrl: string;
   oauthScopes: string;
+  oauthResource: string;
   rememberMeEnabled: boolean;
   settingsSyncEnabled: boolean;
   stalwartFeaturesEnabled: boolean;
@@ -34,6 +36,7 @@ export interface ConfigData {
   loginImprintUrl: string;
   loginPrivacyPolicyUrl: string;
   loginWebsiteUrl: string;
+  buildersWebsiteUrl?: string;
   loginUsernamePlaceholder: string;
   hostedInboxLogoutDestination?: string;
   loginLogoMaxHeight: string;
@@ -80,9 +83,12 @@ export interface ConfigData {
   noThirdPartyTraffic: boolean;
   /** Lite only: whether sign-out revokes the refresh token (#1388). The server build decides in its token route. */
   oauthRevokeOnSignOut?: boolean;
+  /** Server build only; Lite reads it from policy.json (stores/policy-store.ts). */
+  errorReporting?: ClientSettings;
 }
 
 interface AppConfig extends ConfigData {
+  buildersWebsiteUrl: string;
   isLoading: boolean;
   error: string | null;
 }
@@ -203,6 +209,7 @@ export async function fetchConfig(): Promise<ConfigData> {
         configCache = data;
         setNoThirdPartyTraffic(data.noThirdPartyTraffic === true);
         publishConfig(data, slot);
+        if (!IS_LITE) configureErrorReporting(data.errorReporting ?? null);
       }
       // Fetch admin policy alongside config (non-blocking)
       usePolicyStore.getState().fetchPolicy();
@@ -237,6 +244,7 @@ export function useConfig(): AppConfig {
     oauthClientId: '',
     oauthIssuerUrl: '',
     oauthScopes: '',
+    oauthResource: '',
     rememberMeEnabled: false,
     settingsSyncEnabled: false,
     stalwartFeaturesEnabled: true,
@@ -252,6 +260,7 @@ export function useConfig(): AppConfig {
     loginImprintUrl: '',
     loginPrivacyPolicyUrl: '',
     loginWebsiteUrl: '',
+    buildersWebsiteUrl: 'https://build.comail.at',
     hostedInboxLogoutDestination: '',
     loginUsernamePlaceholder: '',
     loginLogoMaxHeight: '',
@@ -305,6 +314,7 @@ export function useConfig(): AppConfig {
         oauthClientId: cached.oauthClientId,
         oauthIssuerUrl: cached.oauthIssuerUrl,
         oauthScopes: cached.oauthScopes,
+        oauthResource: cached.oauthResource,
         rememberMeEnabled: cached.rememberMeEnabled,
         settingsSyncEnabled: cached.settingsSyncEnabled,
         stalwartFeaturesEnabled: cached.stalwartFeaturesEnabled,
@@ -320,6 +330,7 @@ export function useConfig(): AppConfig {
         loginImprintUrl: cached.loginImprintUrl,
         loginPrivacyPolicyUrl: cached.loginPrivacyPolicyUrl,
         loginWebsiteUrl: cached.loginWebsiteUrl,
+        buildersWebsiteUrl: cached.buildersWebsiteUrl || 'https://build.comail.at',
         loginUsernamePlaceholder: cached.loginUsernamePlaceholder,
         hostedInboxLogoutDestination: cached.hostedInboxLogoutDestination || '',
         loginLogoMaxHeight: cached.loginLogoMaxHeight,
@@ -375,6 +386,7 @@ export function useConfig(): AppConfig {
           oauthClientId: data.oauthClientId,
           oauthIssuerUrl: data.oauthIssuerUrl,
           oauthScopes: data.oauthScopes,
+          oauthResource: data.oauthResource,
           rememberMeEnabled: data.rememberMeEnabled,
           settingsSyncEnabled: data.settingsSyncEnabled,
           stalwartFeaturesEnabled: data.stalwartFeaturesEnabled,
@@ -390,6 +402,7 @@ export function useConfig(): AppConfig {
           loginImprintUrl: data.loginImprintUrl,
           loginPrivacyPolicyUrl: data.loginPrivacyPolicyUrl,
           loginWebsiteUrl: data.loginWebsiteUrl,
+          buildersWebsiteUrl: data.buildersWebsiteUrl || 'https://build.comail.at',
           loginUsernamePlaceholder: data.loginUsernamePlaceholder,
           hostedInboxLogoutDestination: data.hostedInboxLogoutDestination || '',
           loginLogoMaxHeight: data.loginLogoMaxHeight,

@@ -99,6 +99,29 @@ describe('reset', () => {
     // A shared everyday preference is not an accessibility setting to reset.
     expect(settings().disableThreading).toBe(true);
   });
+
+  it("gives back the organisation's defaults instead of writing Bulwark's as the user's choice", () => {
+    usePolicyStore.setState({ policy: { ...DEFAULT_POLICY, defaults: { appFont: 'atkinson', fontSize: 'large' } }, loaded: true });
+    settings().applyAdminPolicy();
+    settings().updateSetting('appFont', 'lexend');
+    settings().updateSetting('fontSize', 'huge');
+    render(<AccessibilitySettings />);
+    fireEvent.click(screen.getByRole('button', { name: 'settings.accessibility.reset.button' }));
+    expect(settings().appFont).toBe('atkinson');
+    expect(settings().fontSize).toBe('large');
+    // Nothing is left marked as chosen, so a later change of the default reaches the user.
+    expect(settings().explicitSettings).not.toContain('appFont');
+    expect(settings().explicitSettings).not.toContain('fontSize');
+  });
+
+  it('also resets the plain text font and the send confirmation', () => {
+    settings().updateSetting('plainTextFont', 'mono');
+    settings().updateSetting('sendConfirmation', true);
+    render(<AccessibilitySettings />);
+    fireEvent.click(screen.getByRole('button', { name: 'settings.accessibility.reset.button' }));
+    expect(settings().plainTextFont).toBe('sans');
+    expect(settings().sendConfirmation).toBe(false);
+  });
 });
 
 describe('toast duration', () => {

@@ -3,9 +3,9 @@ import type { ComponentProps } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MvTopBar } from '../mv-top-bar';
 
-const membership = vi.hoisted(() => ({ enrolled: false }));
+const membership = vi.hoisted(() => ({ enrolled: false, buildersWebsiteUrl: 'https://build.comail.at' }));
 vi.mock('@/hooks/use-builders-membership', () => ({ useBuildersMembership: () => membership.enrolled }));
-vi.mock('@/hooks/use-config', () => ({ useConfig: () => ({ appName: 'Comail' }) }));
+vi.mock('@/hooks/use-config', () => ({ useConfig: () => ({ appName: 'Comail', buildersWebsiteUrl: membership.buildersWebsiteUrl }) }));
 vi.mock('@/hooks/use-resolved-sidebar-apps', () => ({ useResolvedSidebarApps: () => [] }));
 vi.mock('@/hooks/use-stalwart-admin', () => ({ useStalwartAdmin: () => false }));
 vi.mock('@/stores/policy-store', () => ({
@@ -26,7 +26,15 @@ vi.mock('@/i18n/navigation', () => ({
 }));
 
 describe('Builders in Mountain View Apps', () => {
-  beforeEach(() => { membership.enrolled = false; });
+  beforeEach(() => { membership.enrolled = false; membership.buildersWebsiteUrl = 'https://build.comail.at'; });
+
+  it('opens the configured Builders staging site', () => {
+    membership.enrolled = true;
+    membership.buildersWebsiteUrl = 'https://builders.stage.test';
+    render(<MvTopBar />);
+    fireEvent.click(screen.getByRole('button', { name: 'add_app' }));
+    expect(screen.getByRole('menuitem', { name: 'builders_label' })).toHaveAttribute('href', membership.buildersWebsiteUrl);
+  });
 
   it('offers the enrolled account its Builders console even with custom apps disabled', () => {
     membership.enrolled = true;

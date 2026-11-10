@@ -5,6 +5,7 @@ import { InboxRecovery } from "@/components/inbox-recovery";
 import { useEffect } from "react";
 import { useTranslations } from "next-intl";
 import { ErrorState } from "@/components/error/error-fallbacks";
+import { captureException } from "@/lib/error-reporting/client";
 
 /**
  * Route-level error boundary for locale pages.
@@ -21,6 +22,7 @@ export default function LocaleError({
 
   useEffect(() => {
     console.error("Route error:", error);
+    captureException(error, "boundary", false);
   }, [error]);
 
   return (

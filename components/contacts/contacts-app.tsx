@@ -23,6 +23,9 @@ import { DirectoryEntryDetail } from "@/components/contacts/directory-entry-deta
 import { PromptDialog } from "@/components/ui/prompt-dialog";
 import { exportContacts } from "@/components/contacts/contact-export";
 import { AppTopBannerSlot } from "@/components/plugins/app-top-banner-slot";
+import { AppSidePanelPhoneButton, useAppSidePanel } from "@/components/plugins/app-side-panel";
+import { contactToView } from "@/lib/plugin-projection";
+import { useStrictestDevices } from "@/hooks/use-device-policy";
 import { useContactStore, getContactDisplayName, getContactPrimaryEmail, type DirectoryEntry } from "@/stores/contact-store";
 import { inlineContactMedia, type ContactSaveOptions } from "@/lib/contact-media";
 import { getContactPhotoClient } from "@/hooks/use-contact-photo";
@@ -52,6 +55,8 @@ import { useDeepLinkUrl } from "@/hooks/use-deep-link-url";
 import { useProInterfaceActive } from "@/components/pro/pro-interface-redirect";
 import { useLiteLinkSegments } from "@/hooks/use-lite-link-segments";
 import { useDocumentTitle } from "@/hooks/use-document-title";
+import { ContactsSkeleton, ContactsSkeletonBody } from "@/components/boot-skeleton/contacts-skeleton";
+import { useSkeletonLabels } from "@/components/boot-skeleton/use-skeleton-labels";
 import { useRegisterCommands } from "@/lib/command-registry";
 import { useCloseOnBack } from "@/hooks/use-close-on-back";
 import { useLeaveGuard } from "@/lib/leave-guard";
@@ -89,6 +94,9 @@ function ContactsAppContent({ linkSegments: routeSegments }: ContactsAppProps = 
   // Static Lite build: the route params are empty, read the link from the URL.
   const linkSegments = useLiteLinkSegments('contacts', routeSegments);
   const t = useTranslations("contacts");
+  const skeleton = useSkeletonLabels();
+  // Organisation > Devices > No printing: no Print buttons (Ctrl+P prints a note).
+  const printOff = useStrictestDevices().noPrint;
   const tSidebar = useTranslations("sidebar");
   const tCommon = useTranslations("common");
   const tShell = useTranslations("shell");
@@ -169,7 +177,8 @@ function ContactsAppContent({ linkSegments: routeSegments }: ContactsAppProps = 
   const [directorySelection, setDirectorySelection] = useState<Set<string>>(() => new Set());
   const [openDirectoryKey, setOpenDirectoryKey] = useState<string | null>(null);
   const directoryPrincipals = useContactStore((s) => s.directoryPrincipals);
-  const showDirectory = !!client?.supportsPrincipals();
+  // Domain membership is not consent to share a directory with other members.
+  const showDirectory = false;
   const hasFetched = useRef(false);
   const { dialogProps: confirmDialogProps, confirm: confirmDialog } = useConfirmDialog();
   const isMobile = useIsMobile();
@@ -399,6 +408,20 @@ function ContactsAppContent({ linkSegments: routeSegments }: ContactsAppProps = 
   const selectedGroup = selectedGroupId ? contacts.find(c => c.id === selectedGroupId) || null : null;
   const selectedGroupMembers = useMemo(() => selectedGroupId ? getGroupMembers(selectedGroupId) : [], [selectedGroupId, getGroupMembers]);
 
+  // The plugin side panel (app-side-panel), with the contact the user opened
+  // and how many are ticked. On desktop it sits under a row of its own with
+  // the open contact's name and the panel's button.
+  const openContact = (view === "detail" || view === "edit") && activeCategory !== "directory" && selectedContact?.kind !== "group" ? selectedContact : null;
+  const selectedCount = selectedContactIds.size;
+  const sidePanelContext = useMemo(() => ({
+    ...(openContact ? { contact: contactToView(openContact) } : {}),
+    selectedCount,
+  }), [openContact, selectedCount]);
+  const sidePanel = useAppSidePanel({ view: "contacts", context: sidePanelContext });
+  const sidePanelTitle = openContact
+    ? getContactDisplayName(openContact)
+    : view === "group-detail" && selectedGroup ? getContactDisplayName(selectedGroup) : "";
+
   // Collect all unique keywords across contacts
   const allKeywords = useMemo(() => {
     const kws = new Set<string>();
@@ -477,6 +500,17 @@ function ContactsAppContent({ linkSegments: routeSegments }: ContactsAppProps = 
     }));
     return books.size === 1 ? [...books][0] : null;
   }, [movingContactIds, contacts]);
+
+  // The directory went away while open (turned off, or the server refused
+  // to list it): back to all contacts.
+  useEffect(() => {
+    if (!showDirectory && activeCategory === "directory") {
+      setActiveCategory("all");
+      setDirectorySelection(new Set());
+      setOpenDirectoryKey(null);
+      setView("list");
+    }
+  }, [showDirectory, activeCategory]);
 
   // Deleting a category only takes a label off contacts: no question, an Undo (R3).
   const deleteCategory = useDeleteCategory();
@@ -961,10 +995,12 @@ function ContactsAppContent({ linkSegments: routeSegments }: ContactsAppProps = 
     }
   };
 
-  if (!isAuthenticated) return null;
-  // Contacts is gated off (env config flag OR per-server policy). The effect
-  // above redirects to /; render nothing meanwhile (mirrors Calendar/Files,
-  // PR #1776, #1766).
+  // Until the session is restored: the page skeleton the server drew.
+  if (!isAuthenticated) {
+    return isEmbedded
+      ? <ContactsSkeletonBody embedded />
+      : <ContactsSkeleton label={skeleton.label} labels={skeleton.labels} />;
+  }
   if (!contactsEnabled) return null;
 
   const renderRightPanel = () => {
@@ -973,7 +1009,7 @@ function ContactsAppContent({ linkSegments: routeSegments }: ContactsAppProps = 
       return (
         <DirectoryEntryDetail
           entry={directoryPrincipals.find((e) => directoryKey(e) === openDirectoryKey) ?? null}
-          onPrint={(entry) => { void requestPrint({ kind: "directory-entry", entry }); }}
+          onPrint={printOff ? undefined : (entry) => { void requestPrint({ kind: "directory-entry", entry }); }}
           onCompose={(entry) => handleComposeDirectory([entry])}
           onAddToContacts={guard(handleAddDirectoryEntryToContacts)}
         />
@@ -1007,7 +1043,7 @@ function ContactsAppContent({ linkSegments: routeSegments }: ContactsAppProps = 
             onDelete={handleDeleteGroup}
             onRemoveMember={handleRemoveGroupMember}
             onComposeGroup={(field) => handleComposeGroupFromSidebar(selectedGroup.id, field)}
-            onPrint={() => { void requestPrint({ kind: "contact-group", group: selectedGroup }); }}
+            onPrint={printOff ? undefined : () => { void requestPrint({ kind: "contact-group", group: selectedGroup }); }}
             isMobile={isMobile}
             onSelectMember={guard((id: string) => {
               setSelectedContact(id);
@@ -1114,7 +1150,7 @@ function ContactsAppContent({ linkSegments: routeSegments }: ContactsAppProps = 
                 : undefined
             }
             onMoveTo={selectedContact && canMoveContacts ? () => handleMoveContacts([selectedContact.id]) : undefined}
-            onPrint={selectedContact ? () => { void printContact(selectedContact); } : undefined}
+            onPrint={selectedContact && !printOff ? () => { void printContact(selectedContact); } : undefined}
             isMobile={isMobile}
           />
         );
@@ -1335,7 +1371,7 @@ function ContactsAppContent({ linkSegments: routeSegments }: ContactsAppProps = 
                       onSelectedChange={setDirectorySelection}
                       onOpen={(entry) => { setOpenDirectoryKey(directoryKey(entry)); setView("directory-detail"); }}
                       activeKey={openDirectoryKey}
-                      onPrint={() => { void requestPrint({ kind: "directory-list" }); }}
+                      onPrint={printOff ? undefined : () => { void requestPrint({ kind: "directory-list" }); }}
                       printing={printContent?.kind === "directory-list"}
                       onMenuClick={isNarrow ? () => setNarrowSidebarOpen(true) : undefined}
                       className="flex-1"
@@ -1388,11 +1424,13 @@ function ContactsAppContent({ linkSegments: routeSegments }: ContactsAppProps = 
                     <>
                       <ContextMenuItem icon={UsersRound} label={t("groups.create")} onClick={() => { close(); guard(handleCreateGroup)(); }} />
                       <ContextMenuItem icon={Upload} label={t("import.title")} onClick={() => { close(); setShowImportDialog(true); }} />
-                      <ContextMenuItem icon={Printer} label={tCommon("print")} onClick={() => { close(); void requestPrint({ kind: "contact-list" }); }} />
+                      {!printOff && <ContextMenuItem icon={Printer} label={tCommon("print")} onClick={() => { close(); void requestPrint({ kind: "contact-list" }); }} />}
                     </>
                   )}
-                  isLoading={supportsSync && !contactsLoaded}
-                  onPrint={() => { void requestPrint({ kind: "contact-list" }); }}
+                  // Until the session is back, nobody knows yet whether the server
+                  // keeps contacts: show the rows loading, not an empty book.
+                  isLoading={!contactsLoaded && (supportsSync || !client)}
+                  onPrint={printOff ? undefined : () => { void requestPrint({ kind: "contact-list" }); }}
                   printTitle={printContent?.kind === "list" ? listTitle : null}
                 />
                 )}
@@ -1428,11 +1466,20 @@ function ContactsAppContent({ linkSegments: routeSegments }: ContactsAppProps = 
             </>
           )}
 
-          {/* Panel 3: Detail / Form */}
+          {/* Panel 3: Detail / Form. With a plugin side panel, a row with the
+              contact's name and the panel's button sits over it, like the
+              reader's toolbar. The same element either way, so a form keeps
+              what was typed when the panel starts or stops docking. */}
           {showRightPanel && (
-            <div className="flex-1 min-w-0 flex flex-col">
+            <div className="flex-1 min-w-0 flex flex-col" data-contacts-side-panel-column="">
+              {sidePanel.docks && (
+                <div className="flex items-center gap-2 h-14 box-content border-b border-border px-2 sm:px-4 lg:px-6 shrink-0" data-contacts-panel-row="">
+                  <div className="flex-1 min-w-0 truncate text-sm font-semibold" title={sidePanelTitle || undefined}>{sidePanelTitle}</div>
+                  {sidePanel.toggle}
+                </div>
+              )}
               {isMobile && (
-                <div className="px-3 py-2 border-b border-border">
+                <div className="flex items-center gap-2 px-3 py-2 border-b border-border">
                   <Button
                     variant="ghost"
                     size="sm"
@@ -1442,10 +1489,15 @@ function ContactsAppContent({ linkSegments: routeSegments }: ContactsAppProps = 
                     <ArrowLeft className="w-4 h-4 me-2" />
                     {returnToEmail ? t("back_to_email") : t("back_to_contacts")}
                   </Button>
+                  {/* The list's header with its button is hidden while a contact is open. */}
+                  <AppSidePanelPhoneButton className="ms-auto" />
                 </div>
               )}
-              <div className="flex-1 min-h-0">
-                {renderRightPanel()}
+              <div ref={sidePanel.rowRef} className="relative flex flex-1 min-h-0">
+                <div className="flex-1 min-w-0 min-h-0">
+                  {renderRightPanel()}
+                </div>
+                {sidePanel.panel}
               </div>
             </div>
           )}
@@ -1565,8 +1617,14 @@ function ContactsAppContent({ linkSegments: routeSegments }: ContactsAppProps = 
 // prerender (static Lite build); at runtime it never suspends.
 export function ContactsApp(props: ContactsAppProps = {}) {
   return (
-    <Suspense fallback={null}>
+    // The static Lite export writes this fallback into the page's HTML.
+    <Suspense fallback={<ContactsFallback />}>
       <ContactsAppContent {...props} />
     </Suspense>
   );
+}
+
+function ContactsFallback() {
+  const { label, labels } = useSkeletonLabels();
+  return <ContactsSkeleton label={label} labels={labels} />;
 }

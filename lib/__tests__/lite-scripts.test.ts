@@ -311,6 +311,10 @@ describe('lite build helpers', () => {
     expect(readme).toMatch(/On the current 1\.0 pre-releases `ReloadSettings` fails while the\s+stock spam-filter rules are loaded, so restart Stalwart there instead\./);
     expect(readme).not.toContain('permissive-cors = true');
     expect(readme).toContain('currently `https://m.example`');
+    // OAuth / SSO works in Lite once Stalwart serves it (lib/auth/lite-oauth.ts).
+    expect(readme.match(/Not available in Lite[\s\S]*?handler\)\./)?.[0]).not.toContain('OAuth');
+    expect(readme).toMatch(/OAuth \/ SSO login is not in this build\. It is in Lite when Stalwart serves it/);
+    expect(readme).toContain('--target=stalwart');
   });
 
   it('renders the container nginx template with every header in every header-bearing location', () => {

@@ -53,6 +53,9 @@ describe('command palette', () => {
     const input = screen.getByRole('combobox');
     expect(input).toHaveFocus();
     expect(input).toHaveAttribute('aria-controls', screen.getByRole('listbox').id);
+    // The field fills the header of a dialog that clips its overflow: the
+    // focus outline goes inside it, or the dialog cuts its top edge off.
+    expect(input).toHaveClass('focus-inset');
 
     act(() => { fireEvent.keyDown(input, { key: 'Escape' }); });
     expect(screen.queryByRole('dialog')).toBeNull();

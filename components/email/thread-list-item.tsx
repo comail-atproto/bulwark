@@ -84,6 +84,16 @@ export function listMailboxRole(state: {
     ?? (state.isUnifiedView ? (state.unifiedRole ?? undefined) : undefined);
 }
 
+/**
+ * The account dot tells signed-in accounts apart. With a single account every
+ * row would carry the same dot, so it only shows once there are two or more.
+ */
+function useShowAccountDot(tintListRowsByAccount: boolean): boolean {
+  const enabled = useSettingsStore((state) => state.showAccountDot);
+  const severalAccounts = useAccountStore((state) => state.accounts.length > 1);
+  return enabled && severalAccounts && !tintListRowsByAccount;
+}
+
 /** Hover actions mount on the first pointerover or keyboard focus in the row. */
 function useArmOnPointerOver(): [boolean, () => void] {
   const [armed, setArmed] = React.useState(false);
@@ -445,7 +455,7 @@ const SingleEmailItem = React.forwardRef<HTMLDivElement, SingleEmailItemProps>(
     const tintListRowsByTag = useSettingsStore((state) => state.tintListRowsByTag);
     const tintListRowsByAccount = useSettingsStore((state) => state.tintListRowsByAccount);
     // The tint replaces the dot, and the dot can be switched off on its own (#912).
-    const showAccountDot = useSettingsStore((state) => state.showAccountDot) && !tintListRowsByAccount;
+    const showAccountDot = useShowAccountDot(tintListRowsByAccount);
     const density = useSettingsStore((state) => state.density);
     const timeFormat = useSettingsStore((state) => state.timeFormat);
     const showAvatarsInJunk = useSettingsStore((state) => state.showAvatarsInJunk);
@@ -1175,7 +1185,7 @@ export const ThreadListItem = React.forwardRef<HTMLDivElement, ThreadListItemPro
     const tintListRowsByTag = useSettingsStore((state) => state.tintListRowsByTag);
     const tintListRowsByAccount = useSettingsStore((state) => state.tintListRowsByAccount);
     // The tint replaces the dot, and the dot can be switched off on its own (#912).
-    const showAccountDot = useSettingsStore((state) => state.showAccountDot) && !tintListRowsByAccount;
+    const showAccountDot = useShowAccountDot(tintListRowsByAccount);
     // A collapsed row speaks for every message under it, so it carries their tags too.
     const tagIds = sortTagIds(getThreadTagIds(thread.emails));
     const threadTintSource = threadAccountColor

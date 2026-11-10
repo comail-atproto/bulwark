@@ -291,6 +291,7 @@ describe('slots remembered from the last start', () => {
     let fail!: (err: Error) => void;
     const bg = fakeBackground();
     bg.initPromise = new Promise((res, rej) => { finish = res; fail = rej; });
+    mocks.createBackgroundInstance.mockClear();
     mocks.createBackgroundInstance.mockImplementation(() => bg);
     return { finish, fail };
   }
@@ -324,8 +325,12 @@ describe('slots remembered from the last start', () => {
     // Another bundle: wait for its own list.
     localStorage.setItem('plugin-slot-offers:managed-plugin', JSON.stringify({ hash: 'f'.repeat(64), slots: OFFERS }));
     const { fail } = startingBackground();
+    mocks.getCode.mockImplementationOnce(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      return CODE;
+    });
     const load = loadSandboxedPlugin(plugin(perms));
-    await new Promise((r) => setTimeout(r, 20));
+    await vi.waitFor(() => expect(mocks.createBackgroundInstance).toHaveBeenCalled(), { timeout: 5_000 });
     expect(offersForSlot('sidebar-section')).toEqual([]);
     fail(new Error('done'));
     await load;
@@ -335,7 +340,7 @@ describe('slots remembered from the last start', () => {
     localStorage.setItem('plugin-slot-offers:managed-plugin', JSON.stringify({ hash: HASH, slots: OFFERS }));
     const { fail } = startingBackground();
     const load = loadSandboxedPlugin(plugin());
-    await new Promise((r) => setTimeout(r, 20));
+    await vi.waitFor(() => expect(mocks.createBackgroundInstance).toHaveBeenCalled(), { timeout: 5_000 });
     expect(offersForSlot('sidebar-section')).toEqual([]);
     fail(new Error('done'));
     await load;

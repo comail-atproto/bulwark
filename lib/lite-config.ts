@@ -84,6 +84,7 @@ export function applyLiteConfig(raw: unknown, defaults?: { jmapServerUrl?: strin
     oauthClientId: '',
     oauthIssuerUrl: '',
     oauthScopes: '',
+    oauthResource: '',
     rememberMeEnabled: bool(input.rememberMeEnabled, true),
     faviconUrl: str(input.faviconUrl, '') || '/branding/Bulwark_Favicon.svg',
     appLogoLightUrl: str(input.appLogoLightUrl, ''),

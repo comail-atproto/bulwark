@@ -34,6 +34,7 @@ const languages = [
   { value: 'tr', label: 'Türkçe' },
   { value: 'ru', label: 'Русский' },
   { value: 'uk', label: 'Українська' },
+  { value: 'vi', label: 'Tiếng Việt' },
   { value: 'ko', label: '한국어' },
   { value: 'ja', label: '日本語' },
   { value: 'mn', label: 'Монгол' },

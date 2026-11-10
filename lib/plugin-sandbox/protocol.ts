@@ -99,6 +99,12 @@ export type InitPayload = BackgroundInit | SlotInit;
 
 // ─── Sandbox → Host messages ─────────────────────────────────
 
+/**
+ * The runtime is listening. Carries in `event.ports[0]` the port the runtime
+ * reports user input in the frame through, for the host's idle timeout; a
+ * message on it means "the user did something here just now". `event.ports[1]`
+ * carries the RPC channel bound to this runtime document.
+ */
 export interface ReadyMsg { type: 'sandbox-ready'; }
 
 export interface InitDoneMsg {

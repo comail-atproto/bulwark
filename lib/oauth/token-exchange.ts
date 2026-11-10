@@ -1,4 +1,5 @@
 import { logger } from '@/lib/logger';
+import { observeUpstream } from '@/lib/metrics/upstream';
 import { discoverOAuth } from '@/lib/oauth/discovery';
 import type { EndpointValidator, OAuthMetadata } from '@/lib/oauth/discovery';
 import { isPublicHttpUrl } from '@/lib/security/url-guard';
@@ -6,6 +7,7 @@ import { readFileEnv } from '@/lib/read-file-env';
 import { configManager } from '@/lib/admin/config-manager';
 import { parseJmapServers, findServerById } from '@/lib/admin/jmap-servers';
 import { stalwartDefaultClientId } from '@/lib/auth/stalwart-password-login';
+import { getOauthResource } from '@/lib/oauth/tokens';
 
 // Fallback OAuth client id used when no client is configured. The password+TOTP
 // login route mints tokens against the mail server's built-in OAuth with this
@@ -125,7 +127,10 @@ export function getRequiredConfig(serverId?: string | null, options?: ClientConf
   const endSessionUrl = entry
     ? entry.oauth?.endSessionUrl
     : (configManager.get<string>('oauthEndSessionUrl', '') || process.env.OAUTH_END_SESSION_URL)?.trim() || undefined;
-  return { clientId, serverUrl, discoveryUrl, serverId: entry?.id, endSessionUrl };
+  // The resource names an API of the global provider, so it follows the
+  // issuer's rule too: never sent to a server entry's provider (#1461).
+  const resource = entry ? undefined : getOauthResource() || undefined;
+  return { clientId, serverUrl, discoveryUrl, serverId: entry?.id, endSessionUrl, resource };
 }
 
 /**
@@ -205,12 +210,12 @@ export async function exchangeCodeForTokens(
   // The body carries the code, the PKCE verifier and the client secret. The
   // endpoint was validated; a redirect would re-send all of it to a host
   // that was not, so none is followed.
-  const tokenResponse = await fetch(tokenEndpoint, {
+  const tokenResponse = await observeUpstream('oauth', () => fetch(tokenEndpoint, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: params.toString(),
     redirect: 'error',
-  });
+  }));
 
   if (!tokenResponse.ok) {
     const errorText = await tokenResponse.text();

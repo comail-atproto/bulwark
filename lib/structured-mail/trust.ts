@@ -57,7 +57,7 @@ const OUTLOOK_HEADER_RE = /^\s*(?:from|von|de|da|van|od):[^\n]*\n\s*(?:sent|gese
 
 function htmlToLines(html: string): string {
   return html
-    .replace(/<(?:script|style)[\s\S]*?<\/(?:script|style)>/gi, ' ')
+    .replace(/<(script|style)\b[\s\S]*?<\/\1\s*>/gi, ' ')
     .replace(/<(?:br|\/p|\/div|\/tr|\/li|\/h\d|\/td)\b[^>]*>/gi, '\n')
     .replace(/<[^>]+>/g, ' ')
     .replace(/&nbsp;/gi, ' ')

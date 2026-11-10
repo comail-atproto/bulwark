@@ -117,6 +117,7 @@ describe('isAllowedLoginRedirect', () => {
     expect(isAllowedLoginRedirect('https://mail.example/api/auth', 'https://mail.example/s/api/auth')).toBe(true);
     expect(isAllowedLoginRedirect('http://mail.example/api/auth', 'https://mail.example/api/auth')).toBe(true);
     expect(isAllowedLoginRedirect('http://mail.example:8080/api/auth', 'https://mail.example/api/auth')).toBe(true);
+    expect(isAllowedLoginRedirect('http://mail.example/api/auth', 'https://mail.example:8443/api/auth')).toBe(false);
     expect(isAllowedLoginRedirect('https://mail.example/api/auth', 'http://mail.example/api/auth')).toBe(false);
     expect(isAllowedLoginRedirect('https://mail.example/api/auth', 'https://other.example/api/auth')).toBe(false);
     expect(isAllowedLoginRedirect('https://mail.example/api/auth', 'https://mail.example:8443/api/auth')).toBe(false);

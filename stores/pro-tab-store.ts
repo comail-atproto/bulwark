@@ -35,6 +35,7 @@ export interface ProReplyContext {
   to?: { email?: string; name?: string }[];
   cc?: { email?: string; name?: string }[];
   bcc?: { email?: string; name?: string }[];
+  deliveredTo?: string[];
   subject?: string;
   body?: string;
   htmlBody?: string;
@@ -50,6 +51,10 @@ export interface ProReplyContext {
   quoteHeaderHtml?: string;
   quoteHeaderText?: string;
   quoteWrapInBlockquote?: boolean;
+  /** The original's label headers (lib/outgoing/classification.ts labelSourceHeaders). */
+  headers?: Record<string, string | string[]>;
+  /** The original's From for a forward as attachment, whose `from` stays empty. */
+  originalFrom?: { email?: string; name?: string }[];
 }
 
 export interface ProComposeTabData {

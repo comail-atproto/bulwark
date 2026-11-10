@@ -115,9 +115,8 @@ export function IdentityForm({ identity, onSave, onCancel, onDirtyChange }: Iden
   const validate = (): boolean => {
     const newErrors: Record<string, string> = {};
 
-    if (!formData.name.trim()) {
-      newErrors.name = t('name_required');
-    }
+    // The display name may be empty (RFC 8621 §6, default ""): the From line
+    // then carries only the address.
 
     // Use secure email validation
     const emailError = getEmailValidationError(formData.email);
@@ -159,6 +158,7 @@ export function IdentityForm({ identity, onSave, onCancel, onDirtyChange }: Iden
       const trimmedHtml = formData.htmlSignature?.trim() ?? '';
       const sanitizedData: IdentityFormData = {
         ...formData,
+        name: formData.name.trim() ? formData.name : '',
         textSignature: trimmedText ? formData.textSignature : null,
         htmlSignature: trimmedHtml ? sanitizeSignatureHtml(formData.htmlSignature!) : null,
         replyTo: parseEmailList(replyToInput) ?? null,
@@ -181,7 +181,7 @@ export function IdentityForm({ identity, onSave, onCancel, onDirtyChange }: Iden
       {/* Name */}
       <div>
         <label htmlFor="identity-name" className="block text-sm font-medium mb-1">
-          {t('name_label')} <span className="text-destructive">*</span>
+          {t('name_label')}
         </label>
         <Input
           id="identity-name"

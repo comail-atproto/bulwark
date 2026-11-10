@@ -18,7 +18,9 @@ import {
   Tag,
   Trash2,
   RefreshCw,
+  Fish,
 } from "@/components/icons";
+import { usePhishingReport } from "@/hooks/use-phishing-report";
 import { useTranslations } from "next-intl";
 import { useAuthStore } from "@/stores/auth-store";
 import { useShallow } from "zustand/react/shallow";
@@ -137,6 +139,7 @@ export function MvListToolbar({
     batchMoveToMailbox,
     isUnifiedView,
     unifiedRole,
+    queryTotal,
   } = useEmailStore(useShallow((state) => ({
     emails: state.emails,
     mailboxes: state.mailboxes,
@@ -153,6 +156,7 @@ export function MvListToolbar({
     batchMoveToMailbox: state.batchMoveToMailbox,
     isUnifiedView: state.isUnifiedView,
     unifiedRole: state.unifiedRole,
+    queryTotal: state.totalEmails,
   })));
 
   const [isProcessing, setIsProcessing] = useState(false);
@@ -197,7 +201,10 @@ export function MvListToolbar({
   const allSelected = hasSelection && selectionCount === emails.length;
   // Optimistic updates and demo fixtures can briefly leave the server total
   // behind the rows already loaded. Never render an impossible "23 of 22".
-  const displayedTotal = Math.max(totalCount ?? loadedCount, loadedCount);
+  // A unified or cross-account view is no single folder, so it has no folder
+  // count: its total is what the accounts' queries reported (#1471).
+  const knownTotal = totalCount ?? (isUnifiedView ? queryTotal : undefined);
+  const displayedTotal = Math.max(knownTotal ?? loadedCount, loadedCount);
   // The "Unread first" inbox gives each section its own readout instead.
   const sectioned = !!useUnreadFirstSection();
 
@@ -207,6 +214,10 @@ export function MvListToolbar({
   const isInTrash = currentRole === "trash";
   // Marking your own drafts or sent mail as spam is meaningless.
   const spamApplicable = !["sent", "drafts", "scheduled"].includes(currentRole ?? "");
+  // Report phishing for the selection, one report per message (enterprise pack).
+  const selectionForPhishing = useEmailStore(useShallow((state) => resolveSelectedEmails(state)));
+  const phishing = usePhishingReport(selectionForPhishing, currentRole);
+  const tPhishing = useTranslations("phishing_report");
 
   // Every action reports its outcome the way the default toolbar does: a
   // rejected promise or a store error turns into an error toast instead of
@@ -400,7 +411,9 @@ export function MvListToolbar({
     });
 
   return (
-    <div className="flex items-center gap-1 h-12 px-2 shrink-0">
+    // 5px in, so select-all's box sits over the rows' boxes: a row draws its
+    // 18px box 16px in (12px row padding + 4px), centred at 25px (#1473).
+    <div className="flex items-center gap-1 h-12 ps-[5px] pe-2 shrink-0">
       <button
         type="button"
         role="checkbox"
@@ -522,6 +535,14 @@ export function MvListToolbar({
               icon={isInJunk ? ShieldCheck : ShieldAlert}
               label={isInJunk ? tMenu("not_spam") : tMenu("mark_as_spam")}
               onClick={handleSpam}
+              disabled={isProcessing}
+            />
+          )}
+          {phishing.available && (
+            <ToolbarButton
+              icon={Fish}
+              label={tPhishing("action")}
+              onClick={phishing.report}
               disabled={isProcessing}
             />
           )}

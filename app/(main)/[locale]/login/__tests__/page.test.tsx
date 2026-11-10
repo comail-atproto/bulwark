@@ -31,6 +31,7 @@ const configState = vi.hoisted(() => ({
   loginImprintUrl: '',
   loginPrivacyPolicyUrl: '',
   loginWebsiteUrl: '',
+  buildersWebsiteUrl: 'https://build.comail.at',
   hostedInboxLogoutDestination: '',
   sourceCodeUrl: '',
   loginLogoMaxHeight: '',
@@ -223,6 +224,8 @@ describe('LoginPage atproto handle submit (handleAtprotoLogin)', () => {
     useThemeStore.setState({ theme: 'system', resolvedTheme: 'light' });
     configState.atprotoLoginUrl = 'https://relay.example.com/atproto/login';
     configState.sourceCodeUrl = '';
+    configState.loginWebsiteUrl = '';
+    configState.buildersWebsiteUrl = 'https://build.comail.at';
     vi.stubEnv('NEXT_PUBLIC_CORRESPONDING_SOURCE_URL', 'https://tangled.org/comail.at/bulwark');
     installMockStorage();
     installMockLocation();
@@ -307,6 +310,17 @@ describe('LoginPage atproto handle submit (handleAtprotoLogin)', () => {
     configState.sourceCodeUrl = 'https://source.example.com/releases/tested-revision.tar.gz';
     render(<LoginPage />);
     expect(screen.getByRole('link', { name: /^Source$/ })).toHaveAttribute('href', configState.sourceCodeUrl);
+  });
+
+  it('uses the configured staging websites in the header and footer', () => {
+    configState.loginWebsiteUrl = 'https://site.stage.test';
+    configState.buildersWebsiteUrl = 'https://builders.stage.test';
+    render(<LoginPage />);
+    expect(screen.getByRole('link', { name: 'comail' })).toHaveAttribute('href', configState.loginWebsiteUrl);
+    expect(screen.getByRole('link', { name: 'comail_builders' })).toHaveAttribute('href', configState.buildersWebsiteUrl);
+    for (const [name, path] of [['Terms', '/terms'], ['Privacy', '/privacy'], ['Docs', '/docs']]) {
+      expect(screen.getByRole('link', { name })).toHaveAttribute('href', configState.loginWebsiteUrl + path);
+    }
   });
 
   it('keeps the hosted marketing shell and its links in both themes without changing the saved preference', () => {

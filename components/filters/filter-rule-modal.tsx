@@ -18,6 +18,7 @@ import type {
 } from "@/lib/jmap/sieve-types";
 import type { Mailbox } from "@/lib/jmap/types";
 import { isValidSieveHeaderName } from "@/lib/sieve/generator";
+import { REGEX_FIELDS, isValidSieveRegex, usesRegex } from "@/lib/sieve/regex";
 import { buildMailboxTree, flattenMailboxTree, type MailboxNode, generateUUID, cn } from "@/lib/utils";
 import type { RuleSuggestion } from "@/lib/filters/quick-rules";
 import { retroactiveSupport } from "@/lib/filters/retroactive";
@@ -50,6 +51,8 @@ interface FilterRuleModalProps {
   forwardsAfter?: number;
   /** The server can confine a rule to a period (Sieve "date" and "relational"). */
   periodsSupported?: boolean;
+  /** The server lists the Sieve "regex" extension. */
+  regexSupported?: boolean;
   onSave: (rule: FilterRule, options?: { applyToExisting: boolean }) => void;
   onClose: () => void;
 }
@@ -72,12 +75,19 @@ const ATTACHMENT_COMPARATORS: FilterComparator[] = ["has_any", "has_type"];
 // "All messages" has nothing to choose: its one comparator is not shown.
 const ALL_MESSAGES_COMPARATORS: FilterComparator[] = ["any"];
 
-function comparatorsFor(field: FilterConditionField): FilterComparator[] {
+function baseComparatorsFor(field: FilterConditionField): FilterComparator[] {
   if (field === "size") return SIZE_COMPARATORS;
   if (field === "attachment") return ATTACHMENT_COMPARATORS;
   if (field === "all") return ALL_MESSAGES_COMPARATORS;
   if (field === "from" || field === "to" || field === "cc") return ADDRESS_COMPARATORS;
   return TEXT_COMPARATORS;
+}
+
+// "matches regex" only where the server can run it, or on a row that already
+// uses it, so editing such a rule does not change its comparator.
+function comparatorsFor(field: FilterConditionField, regex: boolean): FilterComparator[] {
+  const base = baseComparatorsFor(field);
+  return regex && REGEX_FIELDS.has(field) ? [...base, "regex"] : base;
 }
 
 const ALL_ACTION_TYPES: FilterActionType[] = [
@@ -115,6 +125,13 @@ function isConditionValueEmpty(v: string | string[]): boolean {
 // Conditions that test without a value: "has an attachment" and "all messages".
 function takesNoValue(c: Pick<FilterCondition, "field" | "comparator">): boolean {
   return c.field === "all" || (c.field === "attachment" && c.comparator === "has_any");
+}
+
+// A regex row whose expression (or one of them) would not compile.
+function regexInvalid(c: FilterCondition): boolean {
+  if (!usesRegex(c) || isConditionValueEmpty(c.value)) return false;
+  const values = Array.isArray(c.value) ? c.value : [c.value];
+  return values.some((v) => !isValidSieveRegex(v));
 }
 
 function makeEmptyAction(): FilterAction {
@@ -162,6 +179,7 @@ export function FilterRuleModal({
   forwardsBefore = 0,
   forwardsAfter = 0,
   periodsSupported = false,
+  regexSupported = false,
   onSave,
   onClose,
 }: FilterRuleModalProps) {
@@ -255,6 +273,9 @@ export function FilterRuleModal({
       if (takesNoValue(c)) return c;
       if (c.field === "size") return c; // numeric, single-value only
       if (typeof c.value !== "string") return c; // already structured
+      // A comma belongs to the expression ("a{1,3}"); several patterns are
+      // written with "|".
+      if (usesRegex(c)) return c;
       const parsed = inputStringToValue(c.value);
       return { ...c, value: parsed };
     })
@@ -306,7 +327,11 @@ export function FilterRuleModal({
       // it the whole script, so every other rule would stop working too.
       : validConditions.some((c) => c.field === "header" && !isValidSieveHeaderName(c.headerName ?? ""))
         ? t("validation_header_name")
-        : null,
+        // The server compiles every expression on save and refuses the
+        // whole script for one that does not compile.
+        : validConditions.some(regexInvalid)
+          ? t("validation_regex")
+          : null,
     // A row that is there but unfinished says what it misses; "at least one
     // action" is left for when no row has a type at all.
     actions: firstIncompleteAction
@@ -339,6 +364,7 @@ export function FilterRuleModal({
   const headerInvalid = (c: FilterCondition) =>
     !!shown(errors.conditions) && c.field === "header" && !isConditionValueEmpty(c.value) &&
     !isValidSieveHeaderName((c.headerName ?? "").trim());
+  const regexInvalidShown = (c: FilterCondition) => !!shown(errors.conditions) && regexInvalid(c);
   const actionInvalid = (index: number) => !!shown(errors.actions) && actionIncomplete[index];
 
   const handleSave = useCallback(() => {
@@ -394,7 +420,7 @@ export function FilterRuleModal({
         // with e.g. (field=attachment, comparator=contains) — invalid for the
         // Sieve generator. Each field has its own valid comparator set.
         if (updates.field && updates.field !== c.field) {
-          const allowed = comparatorsFor(updates.field);
+          const allowed = comparatorsFor(updates.field, regexSupported);
           if (!allowed.includes(c.comparator)) {
             updated.comparator = allowed[0];
           }
@@ -579,7 +605,7 @@ export function FilterRuleModal({
                       className={selectClass}
                       aria-label={t("comparators.contains")}
                     >
-                      {comparatorsFor(condition.field).map((c) => (
+                      {comparatorsFor(condition.field, regexSupported || condition.comparator === "regex").map((c) => (
                         <option key={c} value={c}>
                           {t(`comparators.${c}`)}
                         </option>
@@ -607,6 +633,7 @@ export function FilterRuleModal({
                         // stays numeric/single-value; attachment-has_any has
                         // no value at all.
                         if (condition.field === "size") return;
+                        if (usesRegex(condition)) return;
                         if (
                           condition.field === "attachment" &&
                           condition.comparator === "has_any"
@@ -627,13 +654,15 @@ export function FilterRuleModal({
                           ? t("size_placeholder")
                           : condition.field === "attachment"
                             ? t("attachment_type_placeholder")
-                            : t("value_placeholder_multi")
+                            : usesRegex(condition)
+                              ? t("regex_placeholder")
+                              : t("value_placeholder_multi")
                       }
                       aria-label={t("condition_value")}
-                      aria-invalid={valueMissing(condition)}
-                      aria-describedby={valueMissing(condition) ? "rule-conditions-error" : undefined}
-                      data-rule-error={valueMissing(condition)}
-                      className={cn("flex-1 min-w-[120px]", valueMissing(condition) && "border-destructive")}
+                      aria-invalid={valueMissing(condition) || regexInvalidShown(condition)}
+                      aria-describedby={valueMissing(condition) || regexInvalidShown(condition) ? "rule-conditions-error" : undefined}
+                      data-rule-error={valueMissing(condition) || regexInvalidShown(condition)}
+                      className={cn("flex-1 min-w-[120px]", (valueMissing(condition) || regexInvalidShown(condition)) && "border-destructive")}
                       type={condition.field === "size" ? "number" : "text"}
                     />
                   )}

@@ -1,3 +1,4 @@
+import { isSharedOut } from '@/lib/mailbox-shared-out';
 import { IncompleteDeleteError } from "@/lib/jmap/delete-error";
 import { ArchiveEmailsError } from "@/lib/jmap/archive-error";
 import { RescheduleRestoredError } from "@/lib/jmap/reschedule-error";
@@ -36,6 +37,7 @@ import { mailAccountKind } from "@/lib/plugin-sandbox/account-kind";
 import { SendCancelledCleanupError } from "@/lib/send-failure-message";
 import type { StorageQuota } from "@/lib/quota";
 import { isArchiveActionEnabled } from "@/lib/archive-gate";
+import { getOutboxHooks } from "@/lib/offline/outbox-hooks";
 import {
   READ_FILTER, UNREAD_FILTER, UNREAD_SECTION_SIZE, andFilters, isUnreadFirstView, mergeUnreadSection,
   openSectionRows, sectionFromUnreadRows, unreadSectionRowCount, withoutReached, type UnreadSection,
@@ -200,6 +202,12 @@ export interface BatchActionTarget {
   client: IJMAPClient;
   /** JMAP account the messages belong to. */
   accountId?: string;
+  /**
+   * The messages themselves, when the caller has them: archiving files them
+   * by date (archiveMode), and a tag change skips those already in the
+   * wanted state. batchArchive and batchSetTag act on these only.
+   */
+  emails?: Email[];
 }
 
 interface EmailStore {
@@ -212,6 +220,13 @@ interface EmailStore {
    * `mailboxes` for back-compat with the single-account view.
    */
   accountMailboxes: Record<string, Mailbox[]>;
+  /**
+   * The shared (group/delegated) mailboxes each login can reach, keyed by
+   * login. Kept apart from `accountMailboxes`, which holds a login's own
+   * folders only, so nothing that looks up a role there picks a shared one.
+   * Only the Pro sidebar reads it, to list them under each login (#1486).
+   */
+  accountSharedMailboxes: Record<string, Mailbox[]>;
   /**
    * When set, the mail view is reading from this account instead of the
    * global active one. `null` means "use the global active account" - i.e.
@@ -437,8 +452,12 @@ interface EmailStore {
   /** `ownerAccountId`: the JMAP account a link names for the message (#1351). */
   fetchEmailContent: (client: IJMAPClient, emailId: string, ownerAccountId?: string) => Promise<Email | null>;
   fetchQuota: (client: IJMAPClient) => Promise<void>;
-  sendEmail: (client: IJMAPClient, to: string[], subject: string, body: string, cc?: string[], bcc?: string[], identityId?: string, fromEmail?: string, draftId?: string, fromName?: string, htmlBody?: string, attachments?: Array<{ blobId: string; name: string; type: string; size: number; disposition?: 'attachment' | 'inline'; cid?: string }>, inReplyTo?: string[], references?: string[], delayedUntil?: string, envelopeMailFrom?: string, options?: { requestReadReceipt?: boolean; requestDsn?: boolean; requireTls?: boolean; priority?: MessagePriority; localAccountId?: string; draftAccountId?: string }) => Promise<SendEmailResult>;
-  sendRawEmail: (client: IJMAPClient, rawMimeBlob: Blob, identityId: string, delayedUntil?: string, envelopeRecipients?: string[]) => Promise<SendEmailResult>;
+  /**
+   * `options.outbox`: a send from the composer or quick reply, which offline
+   * mode may keep in its outbox while the server can't be reached (#523).
+   */
+  sendEmail: (client: IJMAPClient, to: string[], subject: string, body: string, cc?: string[], bcc?: string[], identityId?: string, fromEmail?: string, draftId?: string, fromName?: string, htmlBody?: string, attachments?: Array<{ blobId: string; name: string; type: string; size: number; disposition?: 'attachment' | 'inline'; cid?: string }>, inReplyTo?: string[], references?: string[], delayedUntil?: string, envelopeMailFrom?: string, options?: { requestReadReceipt?: boolean; requestDsn?: boolean; requireTls?: boolean; priority?: MessagePriority; headers?: Record<string, string>; labelHeaders?: Record<string, string>; localAccountId?: string; draftAccountId?: string; outbox?: boolean }) => Promise<SendEmailResult>;
+  sendRawEmail: (client: IJMAPClient, rawMimeBlob: Blob, identityId: string, delayedUntil?: string, envelopeRecipients?: string[], options?: { outbox?: boolean }) => Promise<SendEmailResult>;
   /** `emailKey` (emailKeyFor of the row) picks the right row when the id repeats across accounts. */
   deleteEmail: (client: IJMAPClient, emailId: string, forceDelete?: boolean, emailKey?: string) => Promise<boolean>;
   /** `emailKey` (emailKeyFor of the row) picks the right row when the id repeats across accounts. */
@@ -558,7 +577,8 @@ interface EmailStore {
    * and keywords stay as they are, and so does the selection, so several
    * tags can be applied in a row. Rejects when a write fails. (#1077)
    */
-  batchSetTag: (client: IJMAPClient, tagId: string, add: boolean) => Promise<boolean>;
+  /** `target`: these messages (target.emails) instead of the selection. */
+  batchSetTag: (client: IJMAPClient, tagId: string, add: boolean, target?: BatchActionTarget) => Promise<boolean>;
   batchDelete:(client: IJMAPClient, permanent?: boolean) => Promise<boolean>;
   /**
    * Acts on the selection, or on `target`'s messages when given; with a
@@ -566,17 +586,23 @@ interface EmailStore {
    */
   /** `receipts` collects what went to another account, for Undo. */
   batchMoveToMailbox: (client: IJMAPClient, mailboxId: string, target?: BatchActionTarget, receipts?: CrossAccountMoveReceipt[]) => Promise<boolean>;
-  batchArchive: (client: IJMAPClient) => Promise<boolean>;
+  /** `target`: these messages (target.emails) of one account instead of the selection. */
+  batchArchive: (client: IJMAPClient, target?: BatchActionTarget) => Promise<boolean>;
 
   // Spam operations
   // For unified-view emails the undo must hit the same account: `accountId` is the
   // owning JMAP account (passed to JMAP), `sourceClientAccountId` is the login the
   // email is reachable through (used to pick the right client). (#281)
   spamUndoCache: Map<string, { emailId: string; originalMailboxId: string; accountId?: string; sourceClientAccountId?: string }>;
-  /** `emailKey` (emailKeyFor of the row) picks the right row when the id repeats across accounts. */
-  markAsSpam: (client: IJMAPClient, emailId: string, emailKey?: string) => Promise<boolean>;
-  /** `emailKey` (emailKeyFor of the row) picks the right row when the id repeats across accounts. */
-  undoSpam: (client: IJMAPClient, emailId: string, emailKey?: string) => Promise<boolean>;
+  /**
+   * `emailKey` (emailKeyFor of the row) picks the right row when the id
+   * repeats across accounts. `options.keywords`: more keywords set with the
+   * move, `options.markRead` marks it read too ($phishing and $seen for a
+   * phishing report, lib/phishing-report.ts).
+   */
+  markAsSpam: (client: IJMAPClient, emailId: string, emailKey?: string, options?: { keywords?: string[]; markRead?: boolean }) => Promise<boolean>;
+  /** `emailKey` as for markAsSpam; `options.clearKeywords` are removed with the move back. */
+  undoSpam: (client: IJMAPClient, emailId: string, emailKey?: string, options?: { clearKeywords?: string[] }) => Promise<boolean>;
   batchMarkAsSpam: (client: IJMAPClient, emailIds: string[]) => Promise<boolean>;
   batchUndoSpam: (client: IJMAPClient, emailIds: string[]) => Promise<boolean>;
 
@@ -1360,6 +1386,61 @@ export async function ensureArchiveMailbox(opts: {
 }
 
 /**
+ * batchArchive for messages a caller names (a plugin's batch over search
+ * results): one login and account, its folders read from the server, the
+ * Archive found or made like for the selection, archiveMode honoured, the
+ * move hooks asked and told. The moved rows leave the open list.
+ */
+async function archiveTarget(client: IJMAPClient, target: BatchActionTarget): Promise<boolean> {
+  const emails = target.emails ?? [];
+  if (emails.length === 0) return true;
+  const own = async () => (await target.client.getMailboxes(target.accountId)).filter(m => !m.isShared);
+  let mailboxes = await own();
+  const archive = await ensureArchiveMailbox({
+    client: target.client, mailboxes, selectedMailboxId: null, accountId: target.accountId,
+    refresh: async () => (mailboxes = await own()),
+  });
+  if (!archive) return false;
+  // Never into an Archive someone else reads (or a year or month folder of
+  // it): the share map isn't in the folder list, so the server is asked.
+  if (await isSharedOut(target.client, [...mailboxes, archive], archive.originalId || archive.id, target.accountId, { descendants: true })) {
+    throw new Error('The Archive folder is shared with other people');
+  }
+  const hookMailboxes = [...mailboxes.filter(m => m.id !== archive.id), archive];
+  const move = { emailIds: [...new Set(emails.map(e => e.id))], fromMailboxId: moveSourceMailboxId(emails, mailboxes), toMailboxId: archive.id };
+  if (!(await allowEmailMove(move, hookMailboxes))) return false;
+  await target.client.batchArchiveEmails(
+    emails.map(e => ({ id: e.id, receivedAt: e.receivedAt })),
+    archive.originalId || archive.id, useSettingsStore.getState().archiveMode, mailboxes, target.accountId,
+  );
+  emitEmailMove(move, hookMailboxes);
+  const moved = new Set(move.emailIds);
+  // The rows leave the open list only where they no longer belong: not the
+  // Archive itself (or a year or month folder in it), not a search, which
+  // still finds them. Elsewhere the refresh below settles the rest.
+  const state = useEmailStore.getState();
+  const archiveTree = new Set([archive.id]);
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const m of [...state.mailboxes, ...mailboxes]) {
+      if (m.parentId && archiveTree.has(m.parentId) && !archiveTree.has(m.id)) { archiveTree.add(m.id); grew = true; }
+    }
+  }
+  const searching = !!state.searchQuery || !isFilterEmpty(state.searchFilters);
+  const stillListed = searching || (!!state.selectedMailbox && archiveTree.has(state.selectedMailbox));
+  if (!stillListed) {
+    useEmailStore.setState(current => ({
+      emails: current.emails.filter(e => !moved.has(e.id)),
+      selectedEmailKeys: dropFromSelection(current, e => moved.has(e.id)),
+    }));
+  }
+  if (!useEmailStore.getState().isUnifiedView) await useEmailStore.getState().refreshCurrentMailbox(client);
+  // The folders' message and unread counts changed.
+  await useEmailStore.getState().fetchMailboxes(client);
+  return true;
+}
+
+/**
  * JMAP accountId for opening an email that carries no source stamps.
  *
  * Normally the selected folder decides: a shared/group folder's owner, else
@@ -1387,6 +1468,11 @@ function mailboxesInView(state: Pick<EmailStore, 'viewingAccountId' | 'accountMa
     return state.accountMailboxes[state.viewingAccountId] ?? state.mailboxes;
   }
   return state.mailboxes;
+}
+
+/** The search scope `openMailboxId` starts with under the user's "Search in" setting (#1485). */
+function currentSearchScopeDefault(mailboxes: Mailbox[], openMailboxId: string | null | undefined): string {
+  return defaultSearchScopeFor(mailboxes, openMailboxId, useSettingsStore.getState().searchDefaultScope);
 }
 
 function resolveActionMailboxes(): Mailbox[] {
@@ -1853,12 +1939,24 @@ async function unifiedMailboxesFor(
  * the unified scope uses, so the two never fetch the same list twice and a
  * list already there is not fetched again until that login reports a change.
  */
-export async function loadAccountMailboxes(client: IJMAPClient, accountId: string): Promise<boolean> {
+export async function loadAccountMailboxes(
+  client: IJMAPClient,
+  accountId: string,
+  opts: { withShared?: boolean } = {},
+): Promise<boolean> {
+  const withShared = opts.withShared ?? false;
   try {
-    const { mailboxes, fresh } = await unifiedMailboxesFor(client, false);
-    if (!fresh && useEmailStore.getState().accountMailboxes[accountId]) return true;
+    const { mailboxes, fresh } = await unifiedMailboxesFor(client, withShared);
+    const state = useEmailStore.getState();
+    if (!fresh && state.accountMailboxes[accountId] && (!withShared || state.accountSharedMailboxes[accountId])) return true;
+    // With the shared ones the list is getAllMailboxes: own folders go where
+    // they always went, the shared ones beside them.
+    const own = withShared ? mailboxes.filter((m) => !m.isShared) : mailboxes.slice();
     useEmailStore.setState((state) => ({
-      accountMailboxes: { ...state.accountMailboxes, [accountId]: mailboxes.slice() },
+      accountMailboxes: { ...state.accountMailboxes, [accountId]: own },
+      ...(withShared
+        ? { accountSharedMailboxes: { ...state.accountSharedMailboxes, [accountId]: mailboxes.filter((m) => m.isShared) } }
+        : {}),
     }));
     return true;
   } catch (error) {
@@ -3238,6 +3336,7 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
   emails: [],
   mailboxes: [],
   accountMailboxes: {},
+  accountSharedMailboxes: {},
   viewingAccountId: null,
   selectedEmail: null,
   selectedMailbox: "",
@@ -3332,7 +3431,7 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
     // the open folder moves to the new one.
     searchMailboxId: state.searchScopeFollowsFolder
       ? mailboxId
-      : defaultSearchScopeFor(
+      : currentSearchScopeDefault(
         accountId ? state.accountMailboxes[accountId] ?? [] : state.mailboxes,
         mailboxId,
       ),
@@ -3479,13 +3578,13 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
     // The folder's default search scope follows it (Spam and Trash search
     // themselves); a scope the user picked in the dropdown stays. The
     // unread badge's scope follows any real folder.
-    const scopeIsDefault = state.searchMailboxId === defaultSearchScopeFor(mailboxes, state.selectedMailbox);
+    const scopeIsDefault = state.searchMailboxId === currentSearchScopeDefault(mailboxes, state.selectedMailbox);
     const scopeFollows = state.searchScopeFollowsFolder && mailboxes.some(m => m.id === mailboxId);
     return {
       selectedMailbox: mailboxId,
       ...(scopeFollows
         ? { searchMailboxId: mailboxId }
-        : scopeIsDefault ? { searchMailboxId: defaultSearchScopeFor(mailboxes, mailboxId) } : {}),
+        : scopeIsDefault ? { searchMailboxId: currentSearchScopeDefault(mailboxes, mailboxId) } : {}),
       isLoadingMore: false,
       selectedEmail: null,
       selectedEmailKeys: new Set(),
@@ -3653,22 +3752,27 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
       const loadingPatch = isInitialLoad && mailboxes.length === 0
         ? { isLoading: false, mailboxSyncStates: fetched.states }
         : { mailboxSyncStates: fetched.states };
+      // Find inbox from PRIMARY account (not shared accounts)
+      const inboxMailbox = mailboxes.find(m => m.role === 'inbox' && !m.isShared);
+      const nextSelected = selectionValid ? currentSelectedMailbox : inboxMailbox?.id ?? '';
+      // A default search scope moves to the default of the folder now open:
+      // a folder opened before the list arrived, or the inbox picked here,
+      // only gets its scope once it is in the list (#1485). A scope naming a
+      // folder that is gone (e.g. the Spam/Trash the default scope followed)
+      // falls back to the default as well.
+      const { searchMailboxId: scope, searchScopeFollowsFolder } = get();
+      const nextInView = mailboxesInView({ ...get(), mailboxes });
+      const nextDefault = currentSearchScopeDefault(nextInView, nextSelected);
+      const scopeGone = !isAllFoldersSearchScope(scope) && !nextInView.some(m => m.id === scope);
+      const scopeWasDefault = !searchScopeFollowsFolder
+        && scope === currentSearchScopeDefault(mailboxesInView(get()), currentSelectedMailbox);
+      const scopePatch = (scopeGone || scopeWasDefault) && scope !== nextDefault
+        ? { searchMailboxId: nextDefault }
+        : {};
       if (!selectionValid) {
-        // A search scope naming a folder that is gone (e.g. the Spam/Trash
-        // the default scope followed) falls back to the default.
-        const scope = get().searchMailboxId;
-        const scopePatch = !isAllFoldersSearchScope(scope) && !mailboxes.some(m => m.id === scope)
-          ? { searchMailboxId: '' }
-          : {};
-        // Find inbox from PRIMARY account (not shared accounts)
-        const inboxMailbox = mailboxes.find(m => m.role === 'inbox' && !m.isShared);
-        if (inboxMailbox) {
-          set({ mailboxes, selectedMailbox: inboxMailbox.id, ...scopePatch, ...loadingPatch });
-        } else {
-          set({ mailboxes, selectedMailbox: '', ...scopePatch, ...loadingPatch });
-        }
+        set({ mailboxes, selectedMailbox: nextSelected, ...scopePatch, ...loadingPatch });
       } else {
-        set({ mailboxes, ...loadingPatch });
+        set({ mailboxes, ...scopePatch, ...loadingPatch });
       }
     } catch (error) {
       if (stale()) return;
@@ -4268,9 +4372,16 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
   },
 
   sendEmail: async (client, to, subject, body, cc, bcc, identityId, fromEmail, draftId, fromName, htmlBody, attachments, inReplyTo, references, delayedUntil, envelopeMailFrom, options) => {
+    // Offline (#523): everything up to here ran at Send (checks, label,
+    // signature, plugin checks); the finished send waits in the outbox.
+    const outbox = options?.outbox ? getOutboxHooks() : null;
+    const queueArgs = () => [to, subject, body, cc, bcc, identityId, fromEmail, draftId, fromName, htmlBody, attachments, inReplyTo, references, delayedUntil, envelopeMailFrom, options];
+    if (outbox?.shouldQueue(client)) return outbox.queueEmail(client, queueArgs());
     set({ isLoading: true, error: null });
     try {
-      const result = await client.sendEmail(to, subject, body, cc, bcc, identityId, fromEmail, draftId, fromName, htmlBody, attachments, inReplyTo, references, delayedUntil, envelopeMailFrom, options);
+      // Files attached while offline are uploaded now that the server answers.
+      const sendAttachments = attachments && getOutboxHooks() ? await getOutboxHooks()!.resolveHeldAttachments(client, attachments) : attachments;
+      const result = await client.sendEmail(to, subject, body, cc, bcc, identityId, fromEmail, draftId, fromName, htmlBody, sendAttachments, inReplyTo, references, delayedUntil, envelopeMailFrom, options);
       // Each send leaves a submission record; sweep the ones that can go
       // (throttled per account by the client).
       void client.pruneEmailSubmissions();
@@ -4298,6 +4409,13 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
       });
       return result;
     } catch (error) {
+      // The network went away before anything was handed to the server
+      // (the client says so: SendNotStartedError): keep it. Any other
+      // failure may have come after the server took the message.
+      if (outbox && error instanceof Error && error.name === 'SendNotStartedError' && outbox.shouldQueue(client)) {
+        set({ isLoading: false });
+        return outbox.queueEmail(client, queueArgs());
+      }
       set({
         error: error instanceof Error ? error.message : "Failed to send email",
         isLoading: false
@@ -4306,7 +4424,11 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
     }
   },
 
-  sendRawEmail: async (client, rawMimeBlob, identityId, delayedUntil, envelopeRecipients) => {
+  sendRawEmail: async (client, rawMimeBlob, identityId, delayedUntil, envelopeRecipients, options) => {
+    // A plugin's send completing the composer's (S/MIME, PGP): signed and
+    // encrypted with the user present, so the finished message can wait.
+    const outbox = options?.outbox ? getOutboxHooks() : null;
+    if (outbox?.shouldQueue(client)) return outbox.queueRaw(client, rawMimeBlob, { identityId, delayedUntil, envelopeRecipients });
     set({ isLoading: true, error: null });
     try {
       const mailboxes = await client.getMailboxes();
@@ -5493,7 +5615,7 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
   clearSearchFilters: () => {
     set((state) => ({
       searchFilters: { ...DEFAULT_SEARCH_FILTERS },
-      searchMailboxId: defaultSearchScopeFor(mailboxesInView(state), state.selectedMailbox),
+      searchMailboxId: currentSearchScopeDefault(mailboxesInView(state), state.selectedMailbox),
       searchScopeFollowsFolder: false,
     }));
   },
@@ -5509,13 +5631,17 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
       if (!email) return false;
 
       const isFlagged = email.keywords.$flagged || false;
-      if (emailHooks.onBeforeEmailStarToggle.size > 0
-        && !(await emailHooks.onBeforeEmailStarToggle.intercept({ emailIds: [emailId], starred: !isFlagged }))) {
-        return false;
-      }
       // In unified view route to the email's own account client + owner accountId
       // (the reaching client's primary is not the owner for shared sources). (#281)
       const { client: actionClient, accountId } = resolveEmailActionContext(email, client);
+      // The hooks name the account as message-row-actions' click does: only
+      // when it is not the user's own, since ids repeat across accounts.
+      const hookAccountId = accountId && accountId !== actionClient.getAccountId?.() ? accountId : undefined;
+      const hookPayload = { emailIds: [emailId], starred: !isFlagged, ...(hookAccountId ? { accountId: hookAccountId } : {}) };
+      if (emailHooks.onBeforeEmailStarToggle.size > 0
+        && !(await emailHooks.onBeforeEmailStarToggle.intercept(hookPayload))) {
+        return false;
+      }
       await actionClient.toggleStar(emailId, !isFlagged, accountId);
 
       // Update local state
@@ -5535,7 +5661,7 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
           emailId,
         ),
       }));
-      void emailHooks.onEmailStarToggle.emit({ emailIds: [emailId], starred: !isFlagged });
+      void emailHooks.onEmailStarToggle.emit(hookPayload);
       refillAfterKeywordChange(get, client, ['$flagged']);
     } catch (error) {
       set({
@@ -5793,9 +5919,9 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
     return true;
   },
 
-  batchSetTag: async (client, tagId, add): Promise<boolean> => {
+  batchSetTag: async (client, tagId, add, target): Promise<boolean> => {
     const { selectedEmailKeys } = get();
-    if (selectedEmailKeys.size === 0) return true;
+    if (!target && selectedEmailKeys.size === 0) return true;
 
     // Both prefixes name the same tag when read, so taking one off clears
     // either spelling; putting one on writes the current spelling only.
@@ -5808,10 +5934,13 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
     // folder's owner in a shared folder. (#281) The selection is keyed by
     // owning account, so a namesake in another account is never written.
     const groups = new Map<IJMAPClient, Map<string | undefined, Email[]>>();
-    for (const email of resolveSelectedEmails(get())) {
+    for (const email of target ? target.emails ?? [] : resolveSelectedEmails(get())) {
       // A message already in the wanted state needs no write.
       if (tagKeys.some(key => email.keywords?.[key] === true) === add) continue;
-      const { client: actionClient, accountId } = resolveEmailActionContext(email, client);
+      // A targeted call names the login and account of its messages itself.
+      const { client: actionClient, accountId } = target
+        ? { client: target.client, accountId: target.accountId }
+        : resolveEmailActionContext(email, client);
       const byAccount = groups.get(actionClient) ?? new Map<string | undefined, Email[]>();
       groups.set(actionClient, byAccount);
       byAccount.set(accountId, [...(byAccount.get(accountId) ?? []), email]);
@@ -6068,8 +6197,9 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
     return true;
   },
 
-  batchArchive: async (client): Promise<boolean> => {
+  batchArchive: async (client, target): Promise<boolean> => {
     if (!isArchiveActionEnabled()) return false;
+    if (target) return archiveTarget(client, target);
     if (get().selectedEmailKeys.size === 0) return true;
     if (isAggregateListView()) {
       // The listed rows and the members of expanded threads the selection
@@ -6343,7 +6473,7 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
   },
 
   // Spam operations
-  markAsSpam: async (client, emailId, emailKey): Promise<boolean> => {
+  markAsSpam: async (client, emailId, emailKey, options): Promise<boolean> => {
     const isTarget = singleEmailMatcher(emailId, emailKey);
     // The viewer may show an email the list no longer holds (e.g. the unread
     // quick-filter dropped it once it was read), so fall back to the selected
@@ -6386,8 +6516,10 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
 
     try {
       const isUnread = !email.keywords?.$seen;
-      const alsoMarkRead = useSettingsStore.getState().deleteAction === 'trash-and-read' && isUnread;
-      await actionClient.markAsSpam(emailId, accountId, alsoMarkRead);
+      const alsoMarkRead = isUnread && (options?.markRead === true || useSettingsStore.getState().deleteAction === 'trash-and-read');
+      // Extra keywords only when asked for: the plain call stays as it was.
+      if (options?.keywords?.length) await actionClient.markAsSpam(emailId, accountId, alsoMarkRead, options.keywords);
+      else await actionClient.markAsSpam(emailId, accountId, alsoMarkRead);
 
       // Same junk resolution the client used for the move itself.
       const junkMailbox = mailboxes.find(m =>
@@ -6435,7 +6567,7 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
     return true;
   },
 
-  undoSpam: async (client, emailId, emailKey): Promise<boolean> => {
+  undoSpam: async (client, emailId, emailKey, options): Promise<boolean> => {
     const isTarget = singleEmailMatcher(emailId, emailKey);
     if (emailHooks.onBeforeEmailSpamToggle.size > 0
       && !(await emailHooks.onBeforeEmailSpamToggle.intercept({ emailIds: [emailId], spam: false }))) {
@@ -6491,7 +6623,8 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
     }
 
     try {
-      await undoClient.undoSpam(emailId, targetMailboxId, accountId);
+      if (options?.clearKeywords?.length) await undoClient.undoSpam(emailId, targetMailboxId, accountId, options.clearKeywords);
+      else await undoClient.undoSpam(emailId, targetMailboxId, accountId);
 
       // Drop the restored mail from the current junk view and advance the open
       // message to the next one, mirroring markAsSpam. Without this the viewer
@@ -8437,6 +8570,19 @@ useEmailStore.subscribe((state, prev) => {
   state.holdListRow(listRowKey(email, state.isScheduledView));
 });
 
+// Changing "Search in" moves the open folder's scope along with it, unless
+// the user picked a scope in the search panel (#1485). Otherwise the old
+// default would look like a picked scope and stick to every folder.
+useSettingsStore.subscribe((settings, prevSettings) => {
+  if (settings.searchDefaultScope === prevSettings.searchDefaultScope) return;
+  const state = useEmailStore.getState();
+  if (state.searchScopeFollowsFolder) return;
+  const mailboxes = mailboxesInView(state);
+  const before = defaultSearchScopeFor(mailboxes, state.selectedMailbox, prevSettings.searchDefaultScope);
+  const after = defaultSearchScopeFor(mailboxes, state.selectedMailbox, settings.searchDefaultScope);
+  if (state.searchMailboxId === before && before !== after) useEmailStore.setState({ searchMailboxId: after });
+});
+
 // A folder's remembered list follows what happens to it on screen - a message
 // read, archived or deleted here is shown that way when the folder is opened
 // again, rather than as it was when the folder was loaded.
@@ -8520,7 +8666,7 @@ if (typeof window !== 'undefined') {
         useEmailStore.setState({
           mailboxes: snap.mailboxes,
           selectedMailbox,
-          searchMailboxId: defaultSearchScopeFor(snap.mailboxes, selectedMailbox),
+          searchMailboxId: currentSearchScopeDefault(snap.mailboxes, selectedMailbox),
           ...(selectedMailbox === snapMailbox && Array.isArray(snap.emails) && snap.emails.length > 0
             ? {
                 emails: snap.emails,

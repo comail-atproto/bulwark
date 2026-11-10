@@ -6,6 +6,8 @@ import { useAuthStore } from '@/stores/auth-store';
 import { useSettingsStore } from '@/stores/settings-store';
 import { useToastStore } from '@/stores/toast-store';
 import { useTaskStore } from '@/stores/task-store';
+import { usePolicyStore } from '@/stores/policy-store';
+import { DEFAULT_ORGANISATION_POLICY } from '@/lib/admin/organisation-policy';
 
 // The whole calendar page, with the shell around it stubbed out and the
 // stores holding a fixed set of calendars and events.
@@ -26,8 +28,13 @@ vi.mock('@/hooks/use-refresh-gesture', () => ({ useRefreshGesture: () => ({ indi
 vi.mock('@/hooks/use-calendar-push-refresh', () => ({ useCalendarPushRefresh: () => {} }));
 vi.mock('@/hooks/use-account-principal-emails', () => ({ useAccountPrincipalEmails: () => [] }));
 vi.mock('../participant-availability', () => ({ ParticipantAvailability: () => null }));
-const config = vi.hoisted(() => ({ demoMode: false, calendarEnabled: true }));
+const config = vi.hoisted(() => ({ demoMode: false }));
 vi.mock('@/hooks/use-config', () => ({ useConfig: () => config }));
+const lite = vi.hoisted(() => ({ on: false }));
+vi.mock('@/lib/lite', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/lite')>()),
+  get IS_LITE() { return lite.on; },
+}));
 
 import { CalendarApp } from '../calendar-app';
 import { useRegisteredCommandGroups } from '@/lib/command-registry';
@@ -742,6 +749,21 @@ describe('CalendarApp in the demo', () => {
   });
 });
 
+describe('CalendarApp in Lite', () => {
+  it('leaves Subscribe out, since the static build has no feed proxy', async () => {
+    lite.on = true;
+    try {
+      render(<><CalendarApp /><PaletteGroups /></>);
+      fireEvent.click(screen.getByRole('button', { name: 'toolbar.more' }));
+      expect(await screen.findByRole('menuitem', { name: 'toolbar.import' })).toBeInTheDocument();
+      expect(screen.queryByRole('menuitem', { name: 'toolbar.subscribe' })).toBeNull();
+      expect(screen.getByTestId('palette').textContent).not.toContain('toolbar.subscribe');
+    } finally {
+      lite.on = false;
+    }
+  });
+});
+
 describe('CalendarApp view menu', () => {
   it('opens as a menu the keyboard can use and switches the view', async () => {
     renderApp();
@@ -819,6 +841,26 @@ describe('CalendarApp day view tasks', () => {
       expect(screen.getByRole('heading', { name: 'tasks.edit' })).toBeInTheDocument();
     } finally {
       useSettingsStore.setState({ showTasksOnCalendar: false } as never);
+    }
+  });
+});
+
+describe('CalendarApp company calendars on a phone', () => {
+  it('lists them in the toolbar\'s calendar list, where hiding one is the synced choice', async () => {
+    media.mobile = true;
+    media.desktop = false;
+    const policy = usePolicyStore.getState().policy;
+    usePolicyStore.setState({ policy: { ...policy, organisation: { ...DEFAULT_ORGANISATION_POLICY, calendars: { feeds: [{ id: 'hol', name: 'Holidays', url: '', urlHeld: true, color: '#16a34a', refreshMinutes: 60 }], freeBusyGroup: '' } } } });
+    useSettingsStore.setState({ hiddenCompanyCalendars: [] } as never);
+    try {
+      renderApp();
+      // The toolbar's list (the sidebar heading has the same words).
+      fireEvent.click(document.querySelector<HTMLElement>('button[aria-label="my_calendars"]')!);
+      const list = (await screen.findByRole('heading', { name: 'my_calendars' })).parentElement!;
+      fireEvent.click(within(list).getByRole('button', { name: 'Holidays' }));
+      expect(useSettingsStore.getState().hiddenCompanyCalendars).toEqual(['hol']);
+    } finally {
+      usePolicyStore.setState({ policy });
     }
   });
 });

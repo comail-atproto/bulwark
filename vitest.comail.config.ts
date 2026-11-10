@@ -7,12 +7,20 @@ const nativeRoutes = [
   "lib/__tests__/caldav-discover-route.test.ts",
   "lib/__tests__/calendar-agenda-route.test.ts",
   "lib/__tests__/fetch-ical-route.test.ts",
+  "lib/__tests__/fetch-ical-feed-route.test.ts",
   "lib/__tests__/webdav-route.test.ts",
   "lib/__tests__/wopi-file-routes.test.ts",
   "lib/__tests__/wopi-reverse-proxy.test.ts",
   "lib/__tests__/wopi-shared-file-routes.test.ts"
 ];
 const nativeComponents = [
+  "components/contacts/__tests__/contacts-side-panel.test.tsx",
+  "components/settings/__tests__/settings-side-panel.test.tsx",
+  "components/calendar/__tests__/calendar-app.test.tsx",
+  "components/calendar/__tests__/calendar-side-panel.test.tsx",
+  "components/calendar/__tests__/calendar-app-boot-skeleton.test.tsx",
+  "components/boot-skeleton/__tests__/contacts-files-apps-gates.test.tsx",
+  "components/settings/__tests__/settings-boot-skeleton.test.tsx",
   "components/email/__tests__/mv-list-toolbar.test.tsx",
   "components/email/__tests__/plugin-row-badges.test.tsx",
   "components/email/__tests__/thread-list-item-account-dot.test.tsx",
@@ -27,8 +35,14 @@ const nativeComponents = [
 export default mergeConfig(upstream, {
   test: {
     setupFiles: ['./vitest.comail.setup.ts'],
+    expect: { poll: { timeout: 5_000 } },
     // These scripts run separately under node:test or Playwright.
-    exclude: ['scripts/release-assets.test.mjs', 'scripts/verify-source-run.test.mjs', 'scripts/demo-assets/demo-mail.spec.ts'],
+    exclude: [
+      'scripts/release-assets.test.mjs', 'scripts/verify-source-run.test.mjs', 'scripts/demo-assets/demo-mail.spec.ts',
+      // Comail keeps the domain directory unavailable. Its ContactsApp suite
+      // checks that advertised server capabilities cannot enable discovery.
+      'components/contacts/__tests__/contacts-directory-entry.test.tsx',
+    ],
     projects: [
       { extends: true, test: { name: 'native-routes', include: nativeRoutes, setupFiles: ['./vitest.native-routes.setup.ts'] } },
       { extends: true, test: { name: 'native-components', include: nativeComponents, setupFiles: ['./vitest.native-components.setup.ts'] } },

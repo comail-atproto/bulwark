@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { densityVarsFor } from '@/lib/density';
 import { persist } from 'zustand/middleware';
 import { useThemeStore } from './theme-store';
 import { useLocaleStore } from './locale-store';
@@ -9,12 +10,14 @@ import type { NotificationSoundChoice } from '@/lib/notification-sound';
 import { EMPTY_NOTIFICATION_MUTES, normalizeNotificationMutes, type NotificationMutes } from '@/lib/notification-mutes';
 import { apiFetch } from '@/lib/browser-navigation';
 import { writePushPreferences } from '@/lib/push-preferences';
-import { settingsHooks } from '@/lib/plugin-hooks';
+import { calendarHooks, settingsHooks } from '@/lib/plugin-hooks';
+import { BIRTHDAY_CALENDAR_ID } from '@/lib/birthday-calendar';
 import { generateAccountId } from '@/lib/account-utils';
 import { subscriptionOwnerFor } from '@/lib/calendar-subscription-sync';
 import type { FolderCountMode } from '@/lib/folder-counts';
 import { DEFAULT_FILES_SETTINGS, normalizeFilesSettings, type FilesSettings } from '@/lib/files-settings';
 import { orderForMailbox, sanitizeSortLevels, type MessageListOrderScope, type SortLevel } from '@/lib/message-list-order';
+import { isSearchDefaultScope, type SearchDefaultScope } from '@/lib/search-default-scope';
 import { EMPTY_SIGNATURE_DETAILS, sanitizeSignatureDetails, type SignatureDetails } from '@/lib/org-signature';
 import {
   ACCESSIBILITY_DEFAULTS,
@@ -251,12 +254,23 @@ const BOOKKEEPING_SETTING_KEYS = new Set<string>(['onboardingCompleted', 'tourCo
  * tells onSettingChange. With no interceptor registered the change applies
  * synchronously, so inputs bound to the store keep behaving as before.
  */
+/**
+ * Turning proofreading off, overall or for one plugin, stops text going to a
+ * plugin: no plugin may hold that up (onBeforeSettingChange).
+ */
+function stopsSendingText(key: string, value: unknown, previous: unknown): boolean {
+  if (key === 'proofreading') return value === false;
+  if (key !== 'proofreadingPlugins' || !value || typeof value !== 'object') return false;
+  const before = (previous && typeof previous === 'object' ? previous : {}) as Record<string, unknown>;
+  return Object.entries(value as Record<string, unknown>).some(([id, on]) => on === false && before[id] !== false);
+}
+
 function changePreference(key: string, value: unknown, previous: unknown, apply: () => void): void {
   const commit = () => {
     apply();
     void settingsHooks.onSettingChange.emit({ key, value, previous });
   };
-  if (settingsHooks.onBeforeSettingChange.size === 0) {
+  if (settingsHooks.onBeforeSettingChange.size === 0 || stopsSendingText(key, value, previous)) {
     commit();
     return;
   }
@@ -302,7 +316,8 @@ export type FirstDayOfWeek = 0 | 1 | 6; // 0 = Sunday, 1 = Monday, 6 = Saturday
 export type TimeZoneSetting = 'auto' | (string & {});
 export type ExternalContentPolicy = 'ask' | 'block' | 'allow';
 export type MailAttachmentAction = 'preview' | 'download';
-export type AttachmentPosition = 'beside-sender' | 'below-header';
+/** 'below-header': a bar of tiles under the header. 'below-message': preview cards after the body. */
+export type AttachmentPosition = 'below-header' | 'below-message';
 export type ToolbarPosition = 'top' | 'below-subject';
 export type ArchiveMode = 'single' | 'year' | 'month';
 export type MailLayout = 'split' | 'focus' | 'horizontal';
@@ -337,6 +352,13 @@ export type MessageSpacing = 'auto' | 'always' | 'edge';
 /** Font used to render text/plain email bodies. */
 export type PlainTextFont = 'mono' | 'sans';
 export type CalendarHoverPreview = 'off' | 'instant' | 'delay-500ms' | 'delay-1s' | 'delay-2s';
+/**
+ * How the month view draws an event with a start time (#1449): a filled bar
+ * like all-day events, its time and title in the calendar colour, or a dot
+ * in the calendar colour before them.
+ */
+export type MonthTimedEventStyle = 'bar' | 'text' | 'dot';
+export const MONTH_TIMED_EVENT_STYLES: readonly MonthTimedEventStyle[] = ['bar', 'text', 'dot'];
 export type SendDelaySeconds = 0 | 10 | 30 | 60;
 export type ProtocolOpenMode = 'active-session' | 'new-tab';
 
@@ -347,6 +369,20 @@ export type ProtocolOpenMode = 'active-session' | 'new-tab';
  * import.
  */
 const DEVICE_LOCAL_SETTING_KEYS = new Set<string>(['proInterface']);
+
+/** A map of plugin id → boolean, whatever came in (sync, import, storage). */
+function booleanRecord(value: unknown): Record<string, boolean> {
+  const out: Record<string, boolean> = {};
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return out;
+  for (const [k, v] of Object.entries(value)) {
+    if (typeof v === 'boolean' && k.length <= 200 && k !== '__proto__') out[k] = v;
+  }
+  return out;
+}
+
+export function isWritingLanguage(value: unknown): value is string {
+  return value === 'auto' || (typeof value === 'string' && /^[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8}){0,3}$/.test(value));
+}
 
 /**
  * Settings that shape views spanning every logged-in account. They are synced
@@ -551,6 +587,7 @@ interface SettingsState extends AccessibilitySettings {
   confirmBulkDelete: boolean; // Ask before moving several selected emails to Trash (permanent deletes always ask)
   returnToListAfterAction: boolean; // After delete / archive / move / spam / mark-unread in an open message, return to the list instead of opening the next message
   clearSearchOnFolderChange: boolean; // Reset the search query + advanced filters when switching folders, instead of re-running the search in the newly selected folder (#553 keeps it applied when this is off)
+  searchDefaultScope: SearchDefaultScope; // Where a new search looks: all folders, or only the open one (#1485)
   showPreview: boolean;
   showVerificationCodes: boolean; // Offer the one-time code of a sign-in mail as a copy chip in the list and the reader
   mailLayout: MailLayout;
@@ -570,17 +607,30 @@ interface SettingsState extends AccessibilitySettings {
   swipeLeftAction: SwipeAction; // Mobile: action when a list row is swiped left
 
   // Composer
-  autoSaveDraftInterval: number; // milliseconds
   sendConfirmation: boolean;
   quickReplyEnabled: boolean;
   defaultReplyMode: ReplyMode;
   autoSelectReplyIdentity: boolean;
   replyIdentityMatch: ReplyIdentityMatch; // With autoSelectReplyIdentity on: 'exact' = configured identities only, 'domain' = also same-domain catch-all addresses (rewrites From) #1000
   plainTextMode: boolean; // Send plain text only (no rich text editor)
+  /**
+   * Proofreading: checker plugins (compose:check) get what the user writes
+   * and underline mistakes. The admin may preset or lock it; the checker
+   * reads the policy itself when it runs (lib/proofreading/gate.ts).
+   */
+  proofreading: boolean;
+  /** The user's own on/off per checker plugin id, over `proofreading`. */
+  proofreadingPlugins: Record<string, boolean>;
+  /** Plugin ids whose "what is sent where" notice the user has seen. */
+  proofreadingNoticeSeen: Record<string, boolean>;
+  /** The language the user writes in: 'auto' or a BCP 47 tag (editor lang, checkers). */
+  writingLanguage: string;
   rtlEditingSupport: boolean; // Show a per-paragraph LTR/RTL direction control in the composer (Gmail-style)
   subAddressDelimiter: string; // Character separating user from tag (e.g. "user+tag@")
   sendDelaySeconds: SendDelaySeconds;
   signaturePosition: SignaturePosition; // Position of the signature relative to quoted text in replies/forwards
+  signatureNewMailEnabled: boolean; // Insert the signature automatically in new messages
+  signatureReplyForwardEnabled: boolean; // Insert the signature automatically in replies and forwards
   signatureSeparatorEnabled: boolean; // Prefix the signature with the RFC 3676 "-- " delimiter
   signatureDetails: SignatureDetails; // Title, department, phone, mobile for the organisation signature (lib/org-signature.ts)
   requestReadReceiptDefault: boolean; // Pre-check "request read receipt" in the composer
@@ -602,6 +652,8 @@ interface SettingsState extends AccessibilitySettings {
   showTimeInMonthView: boolean;
   /** Events as a light tint of their colour with a bar at the start (the Outlook look), not solid blocks. */
   calendarTintedEvents: boolean;
+  /** Month view look of events with a start time (#1449). All-day and multi-day events stay bars. */
+  calendarMonthTimedEvents: MonthTimedEventStyle;
   showWeekNumbers: boolean;
   /** Scroll continuously through months/weeks/days (#759) instead of one period at a time. */
   calendarFreeScroll: boolean;
@@ -614,6 +666,12 @@ interface SettingsState extends AccessibilitySettings {
   calendarHideNonWorkingDays: boolean;
   /** Weekdays as `Date.getDay` numbers (0 = Sunday). */
   calendarWorkingDays: number[];
+  /** An out-of-office reply with dates puts a busy event in the calendar (lib/vacation-calendar.ts). */
+  vacationBlockCalendar: boolean;
+  /** The times of each account's out-of-office event as Bulwark last wrote them, by account id. */
+  vacationCalendarBlocks: Record<string, { start: string; end: string }>;
+  /** Company calendars (organisation.calendars.feeds) the user hid, by feed id. */
+  hiddenCompanyCalendars: string[];
 
   // Calendar Tasks
   enableCalendarTasks: boolean;
@@ -633,6 +691,9 @@ interface SettingsState extends AccessibilitySettings {
   // Sort (and group) the contact list by surname instead of given name so
   // family members sit together (#963).
   sortContactsByLastName: boolean;
+  // The Directory entry in the Contacts sidebar (#1457). Autocomplete, the
+  // share dialog and free/busy use the directory either way.
+  showContactsDirectory: boolean;
 
   // Files: view, sort and icons (Settings > Files)
   filesSettings: FilesSettings;
@@ -713,6 +774,9 @@ interface SettingsState extends AccessibilitySettings {
   // Turning it off hides every shared account's folders; their calendars,
   // contacts and files stay. (#1228)
   showSharedMailAccounts: boolean;
+  // Each shared account's mail as one row that is its inbox, its folders
+  // below it and its empty Drafts, Scheduled, Junk and Trash left out (#1342).
+  compactSharedMailboxes: boolean;
   // Shared accounts whose mail folders are hidden one by one, keyed by
   // AccountEntry.id -> JMAP accountIds, since those ids are per server.
   hiddenSharedMailAccounts: Record<string, string[]>;
@@ -793,6 +857,12 @@ interface SettingsState extends AccessibilitySettings {
   ) => void;
   resetToDefaults: () => void;
   /**
+   * Forgets the user's own value for each of `keys`: the setting loses its
+   * "chosen by the user" mark and takes the admin default (policy.defaults)
+   * again, or the built-in one when the admin set none.
+   */
+  resetSettings: (keys: readonly string[]) => void;
+  /**
    * Applies the admin policy (#1248): `policy.defaults` to every setting the
    * user has not chosen, and a locked restriction's value to its setting
    * whatever the user chose. Runs when the policy loads and after every
@@ -871,6 +941,7 @@ const DEFAULT_SETTINGS = {
   confirmBulkDelete: true,
   returnToListAfterAction: true,
   clearSearchOnFolderChange: false,
+  searchDefaultScope: 'all' as SearchDefaultScope,
   showPreview: true,
   showVerificationCodes: true,
   mailLayout: 'split' as MailLayout,
@@ -880,7 +951,7 @@ const DEFAULT_SETTINGS = {
   messageSpacing: 'auto' as MessageSpacing,
   plainTextFont: 'sans' as PlainTextFont,
   mailAttachmentAction: 'preview' as MailAttachmentAction,
-  attachmentPosition: 'beside-sender' as AttachmentPosition,
+  attachmentPosition: 'below-header' as AttachmentPosition,
   emailAlwaysLightMode: false,
   archiveMode: 'single' as ArchiveMode,
   hoverActions: ['delete', 'star', 'markRead', 'archive'] as HoverAction[],
@@ -890,17 +961,24 @@ const DEFAULT_SETTINGS = {
   swipeLeftAction: 'delete' as SwipeAction,
 
   // Composer
-  autoSaveDraftInterval: 60000, // 1 minute
   sendConfirmation: false,
   quickReplyEnabled: true,
   defaultReplyMode: 'reply' as ReplyMode,
   autoSelectReplyIdentity: false,
   replyIdentityMatch: 'domain' as ReplyIdentityMatch,
   plainTextMode: false,
+  proofreading: false,
+  proofreadingPlugins: {} as Record<string, boolean>,
+  proofreadingNoticeSeen: {} as Record<string, boolean>,
+  writingLanguage: 'auto',
   rtlEditingSupport: false,
   subAddressDelimiter: DEFAULT_SUB_ADDRESS_DELIMITER,
   sendDelaySeconds: 0 as SendDelaySeconds,
   signaturePosition: 'below_quote' as SignaturePosition,
+  // On, as before the toggles existed: saved settings and server copies
+  // from older builds lack these keys and fall back to this default.
+  signatureNewMailEnabled: true,
+  signatureReplyForwardEnabled: true,
   signatureSeparatorEnabled: true,
   signatureDetails: EMPTY_SIGNATURE_DETAILS,
   requestReadReceiptDefault: false,
@@ -917,6 +995,7 @@ const DEFAULT_SETTINGS = {
   // Calendar
   showTimeInMonthView: false,
   calendarTintedEvents: false,
+  calendarMonthTimedEvents: 'bar' as MonthTimedEventStyle,
   showWeekNumbers: false,
   calendarFreeScroll: true,
   calendarHoverPreview: 'delay-500ms' as CalendarHoverPreview,
@@ -925,6 +1004,9 @@ const DEFAULT_SETTINGS = {
   calendarDayEndHour: 20,
   calendarHideNonWorkingDays: false,
   calendarWorkingDays: [1, 2, 3, 4, 5] as number[],
+  vacationBlockCalendar: true,
+  vacationCalendarBlocks: {} as Record<string, { start: string; end: string }>,
+  hiddenCompanyCalendars: [] as string[],
 
   // Calendar Tasks
   enableCalendarTasks: false,
@@ -939,6 +1021,7 @@ const DEFAULT_SETTINGS = {
   // Contacts Display
   groupContactsByLetter: true,
   sortContactsByLastName: false,
+  showContactsDirectory: true,
 
   // Files
   filesSettings: DEFAULT_FILES_SETTINGS,
@@ -993,6 +1076,7 @@ const DEFAULT_SETTINGS = {
   showAccountDot: true,
   showFolderTotalCount: true,
   showSharedMailAccounts: true,
+  compactSharedMailboxes: false,
   hiddenSharedMailAccounts: {} as Record<string, string[]>,
 
   // Folders
@@ -1101,6 +1185,8 @@ function isAllowedPolicyValue(key: string, value: unknown, restriction?: Setting
   if (key === 'sendDelaySeconds' && ![0, 10, 30, 60].includes(value as number)) return false;
   if (key === 'subAddressDelimiter' && !isValidSubAddressDelimiter(value as string)) return false;
   if (key === 'messageListOrderScope' && value !== 'inbox' && value !== 'all') return false;
+  if (key === 'searchDefaultScope' && !isSearchDefaultScope(value)) return false;
+  if (key === 'calendarMonthTimedEvents' && !MONTH_TIMED_EVENT_STYLES.includes(value as MonthTimedEventStyle)) return false;
   if (!isAllowedAccessibilityValue(key, value)) return false;
   if (restriction && typeof restriction === 'object') {
     if (Array.isArray(restriction.allowedValues) && !restriction.allowedValues.includes(value)) return false;
@@ -1273,6 +1359,13 @@ export const useSettingsStore = create<SettingsState>()(
           applyInterfaceLayout(value as InterfaceLayout, get().density);
         }
 
+        // Notify calendar plugins (e.g. calendar-agenda) when the virtual birthday calendar is toggled or recolored
+        if (key === 'showBirthdayCalendar' || key === 'birthdayCalendarColor') {
+          void calendarHooks.onCalendarChange.emit({
+            calendarId: BIRTHDAY_CALENDAR_ID,
+            change: key === 'showBirthdayCalendar' && !value ? 'removed' : 'updated',
+          });
+        }
       };
 
       const buildExport = (opts?: { forSync?: boolean; subscriptionOwner?: string }): string => {
@@ -1297,7 +1390,9 @@ export const useSettingsStore = create<SettingsState>()(
           deleteAction: state.deleteAction,
           returnToListAfterAction: state.returnToListAfterAction,
           confirmBulkDelete: state.confirmBulkDelete,
+          permanentlyDeleteJunk: state.permanentlyDeleteJunk,
           clearSearchOnFolderChange: state.clearSearchOnFolderChange,
+          searchDefaultScope: state.searchDefaultScope,
           showPreview: state.showPreview,
           showVerificationCodes: state.showVerificationCodes,
           mailLayout: state.mailLayout,
@@ -1316,17 +1411,22 @@ export const useSettingsStore = create<SettingsState>()(
           swipeLeftAction: state.swipeLeftAction,
           disableThreading: state.disableThreading,
           trustedSenders: state.trustedSenders,
-          autoSaveDraftInterval: state.autoSaveDraftInterval,
           sendConfirmation: state.sendConfirmation,
           quickReplyEnabled: state.quickReplyEnabled,
           defaultReplyMode: state.defaultReplyMode,
           autoSelectReplyIdentity: state.autoSelectReplyIdentity,
           replyIdentityMatch: state.replyIdentityMatch,
           plainTextMode: state.plainTextMode,
+          proofreading: state.proofreading,
+          proofreadingPlugins: state.proofreadingPlugins,
+          proofreadingNoticeSeen: state.proofreadingNoticeSeen,
+          writingLanguage: state.writingLanguage,
           rtlEditingSupport: state.rtlEditingSupport,
           subAddressDelimiter: state.subAddressDelimiter,
           sendDelaySeconds: state.sendDelaySeconds,
           signaturePosition: state.signaturePosition,
+          signatureNewMailEnabled: state.signatureNewMailEnabled,
+          signatureReplyForwardEnabled: state.signatureReplyForwardEnabled,
           signatureSeparatorEnabled: state.signatureSeparatorEnabled,
           signatureDetails: state.signatureDetails,
           requestReadReceiptDefault: state.requestReadReceiptDefault,
@@ -1349,10 +1449,12 @@ export const useSettingsStore = create<SettingsState>()(
           sharedCalendarColors: state.sharedCalendarColors,
           groupContactsByLetter: state.groupContactsByLetter,
           sortContactsByLastName: state.sortContactsByLastName,
+          showContactsDirectory: state.showContactsDirectory,
           filesSettings: state.filesSettings,
           expandedFilterView: state.expandedFilterView,
           showTimeInMonthView: state.showTimeInMonthView,
           calendarTintedEvents: state.calendarTintedEvents,
+          calendarMonthTimedEvents: state.calendarMonthTimedEvents,
           showWeekNumbers: state.showWeekNumbers,
           calendarFreeScroll: state.calendarFreeScroll,
           calendarHoverPreview: state.calendarHoverPreview,
@@ -1361,6 +1463,9 @@ export const useSettingsStore = create<SettingsState>()(
           calendarDayEndHour: state.calendarDayEndHour,
           calendarHideNonWorkingDays: state.calendarHideNonWorkingDays,
           calendarWorkingDays: state.calendarWorkingDays,
+          vacationBlockCalendar: state.vacationBlockCalendar,
+          vacationCalendarBlocks: state.vacationCalendarBlocks,
+          hiddenCompanyCalendars: state.hiddenCompanyCalendars,
           toolbarPosition: state.toolbarPosition,
           hideAccountSwitcher: state.hideAccountSwitcher,
           showRailAccountList: state.showRailAccountList,
@@ -1384,6 +1489,7 @@ export const useSettingsStore = create<SettingsState>()(
           showAccountDot: state.showAccountDot,
           showFolderTotalCount: state.showFolderTotalCount,
           showSharedMailAccounts: state.showSharedMailAccounts,
+          compactSharedMailboxes: state.compactSharedMailboxes,
           hiddenSharedMailAccounts: state.hiddenSharedMailAccounts,
           folderIcons: state.folderIcons,
           folderCountModes: state.folderCountModes,
@@ -1478,6 +1584,26 @@ export const useSettingsStore = create<SettingsState>()(
         void settingsHooks.onSettingsReset.emit({});
       },
 
+      resetSettings: (keys) => {
+        const own = keys.filter((key) => hasOwn(DEFAULT_SETTINGS, key) && key !== 'explicitSettings' && !BOOKKEEPING_SETTING_KEYS.has(key));
+        if (own.length === 0) return;
+        const before = get() as unknown as Record<string, unknown>;
+        const previous = Object.fromEntries(own.map((key) => [key, before[key]]));
+        const dropped = new Set(own);
+        set({
+          ...Object.fromEntries(own.map((key) => [key, builtInDefault(key)])),
+          explicitSettings: get().explicitSettings.filter((key) => !dropped.has(key)),
+        } as Partial<SettingsState>);
+        applyAdminPolicyPatch();
+        applyVisualSettings();
+        const after = get() as unknown as Record<string, unknown>;
+        for (const key of own) {
+          if (after[key] !== previous[key]) {
+            void settingsHooks.onSettingChange.emit({ key, value: after[key], previous: previous[key] });
+          }
+        }
+      },
+
       exportSettings: (opts) => {
         const json = buildExport(opts);
         if (!opts?.forSync) {
@@ -1501,6 +1627,7 @@ export const useSettingsStore = create<SettingsState>()(
           migrateAnimationsSetting(settings);
           migrateNotificationSoundDefault(settings);
           migrateTintListRowsDefault(settings);
+          migrateAttachmentPosition(settings);
 
           // Apply settings, noting which keys were taken over for the
           // onSettingsImport hook.
@@ -1543,6 +1670,13 @@ export const useSettingsStore = create<SettingsState>()(
               if (key === 'preferredIdentityIds' && !isPlainRecord(settings[key])) {
                 return;
               }
+              if (key === 'proofreadingPlugins' || key === 'proofreadingNoticeSeen') {
+                put(key, { [key]: booleanRecord(settings[key]) });
+                return;
+              }
+              if (key === 'writingLanguage' && !isWritingLanguage(settings[key])) {
+                return;
+              }
               if (key === 'hiddenSharedMailAccounts' && !isPlainRecord(settings[key])) {
                 return;
               }
@@ -1566,6 +1700,13 @@ export const useSettingsStore = create<SettingsState>()(
                 return;
               }
               if (key === 'messageListOrderScope' && settings[key] !== 'inbox' && settings[key] !== 'all') {
+                return;
+              }
+              if (key === 'searchDefaultScope' && !isSearchDefaultScope(settings[key])) {
+                return;
+              }
+              // Anything but a real true must not turn on deleting junk for good.
+              if (key === 'permanentlyDeleteJunk' && typeof settings[key] !== 'boolean') {
                 return;
               }
               if (DEVICE_LOCAL_SETTING_KEYS.has(key)) {
@@ -1902,7 +2043,7 @@ export const useSettingsStore = create<SettingsState>()(
     },
     {
       name: 'settings-storage',
-      version: 11,
+      version: 12,
       migrate: migrateSettings,
       onRehydrateStorage: () => {
         return (state) => {
@@ -1916,6 +2057,9 @@ export const useSettingsStore = create<SettingsState>()(
             if (!isPlainRecord(state.preferredIdentityIds)) {
               state.preferredIdentityIds = {};
             }
+            state.proofreadingPlugins = booleanRecord(state.proofreadingPlugins);
+            state.proofreadingNoticeSeen = booleanRecord(state.proofreadingNoticeSeen);
+            if (!isWritingLanguage(state.writingLanguage)) state.writingLanguage = 'auto';
             if (!isPlainRecord(state.hiddenSharedMailAccounts)) {
               state.hiddenSharedMailAccounts = {};
             }
@@ -1926,6 +2070,9 @@ export const useSettingsStore = create<SettingsState>()(
             state.messageListOrder = sanitizeSortLevels(state.messageListOrder);
             if (state.messageListOrderScope !== 'inbox' && state.messageListOrderScope !== 'all') {
               state.messageListOrderScope = 'inbox';
+            }
+            if (!isSearchDefaultScope(state.searchDefaultScope)) {
+              state.searchDefaultScope = 'all';
             }
             applyAccessibility(state);
             applyDensity(state.density, state.interfaceLayout);
@@ -1954,6 +2101,8 @@ export function migrateSettings(persisted: unknown, version: number): SettingsSt
           state.protocolOpenMode = state.protocolMailtoOpenMode;
         }
         delete state.protocolMailtoOpenMode;
+        // Never read: drafts save 2 s after the last change.
+        delete state.autoSaveDraftInterval;
         // v4: `dateFormat` was repurposed from 'regional'|'iso'|'custom' to
         // 'smart'|'relative'|'full'. The old setting was never read anywhere,
         // so every persisted value maps to the new default.
@@ -2005,6 +2154,8 @@ export function migrateSettings(persisted: unknown, version: number): SettingsSt
         // taken as chosen below.
         migrateNotificationSoundDefault(state);
         migrateTintListRowsDefault(state);
+        // The old default must not be taken as chosen below either.
+        migrateAttachmentPosition(state);
         // v8: admin policy defaults (#1248) skip settings the user chose.
         // Earlier builds did not record that, so a setting that differs from
         // the build default is taken as chosen.
@@ -2013,6 +2164,18 @@ export function migrateSettings(persisted: unknown, version: number): SettingsSt
         }
         migrateAnimationsSetting(state);
         return state as unknown as SettingsState;
+}
+
+/**
+ * v12: the attachments next to the sender ('beside-sender', the old default)
+ * gave way to the bar under the header. Imports and server copies from older
+ * builds still carry the old value and go through this too.
+ */
+export function migrateAttachmentPosition(state: Record<string, unknown>): void {
+  if (state.attachmentPosition === undefined) return;
+  if (state.attachmentPosition !== 'below-header' && state.attachmentPosition !== 'below-message') {
+    state.attachmentPosition = 'below-header';
+  }
 }
 
 /**
@@ -2069,63 +2232,9 @@ function applyAccessibility(state: { fontSize: FontSize } & AccessibilitySetting
   applyAccessibilityTo(document.documentElement, state);
 }
 
-type DensityVars = Record<string, string>;
-
-const DEFAULT_DENSITY: Record<Density, DensityVars> = {
-  'extra-compact': {
-    '--list-item-height': 'auto',
-    '--density-item-py': '2px',
-    '--density-item-gap': '6px',
-    '--density-header-py': '4px',
-    '--density-card-p': '8px',
-    '--density-sidebar-py': '0px',
-  },
-  compact: {
-    '--list-item-height': 'auto',
-    '--density-item-py': '4px',
-    '--density-item-gap': '8px',
-    '--density-header-py': '6px',
-    '--density-card-p': '10px',
-    '--density-sidebar-py': '1px',
-  },
-  regular: {
-    '--list-item-height': '48px',
-    '--density-item-py': '12px',
-    '--density-item-gap': '12px',
-    '--density-header-py': '12px',
-    '--density-card-p': '16px',
-    '--density-sidebar-py': '4px',
-  },
-  comfortable: {
-    '--list-item-height': '64px',
-    '--density-item-py': '16px',
-    '--density-item-gap': '16px',
-    '--density-header-py': '16px',
-    '--density-card-p': '20px',
-    '--density-sidebar-py': '6px',
-  },
-};
-
-/**
- * Mountain View's rows come in three rhythms - 32, 40 and 48 pixels - and the
- * app offers four densities. The four are laid over that scale: `compact`,
- * `regular` and `comfortable` land on the three exactly, and `extra-compact`
- * continues the series a step below, so every density still does something.
- *
- * Only the vertical rhythm is restated. Everything else a density touches -
- * gaps, card padding, the sidebar's own row padding - keeps its default value;
- * a navigation row is already pinned to 32px by the layout's own token.
- */
-const MOUNTAIN_VIEW_DENSITY: Record<Density, DensityVars> = {
-  'extra-compact': { ...DEFAULT_DENSITY['extra-compact'], '--list-item-height': '28px', '--density-item-py': '4px' },
-  compact: { ...DEFAULT_DENSITY.compact, '--list-item-height': '32px', '--density-item-py': '6px' },
-  regular: { ...DEFAULT_DENSITY.regular, '--list-item-height': '40px', '--density-item-py': '10px' },
-  comfortable: { ...DEFAULT_DENSITY.comfortable, '--list-item-height': '48px', '--density-item-py': '14px' },
-};
-
-export function densityVarsFor(density: Density, layout: InterfaceLayout): DensityVars {
-  return (layout === 'mountain-view' ? MOUNTAIN_VIEW_DENSITY : DEFAULT_DENSITY)[density];
-}
+// The tables live in lib/density.ts so the pre-paint boot script can use
+// the same values (app/(main)/layout.tsx).
+export { densityVarsFor };
 
 function applyDensity(density: Density, layout: InterfaceLayout) {
   if (typeof document === 'undefined') return;

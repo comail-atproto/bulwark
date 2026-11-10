@@ -37,6 +37,7 @@ import { toUnicodeEmail } from "@/lib/idn";
 import { usePluginPages, pluginPageHref, isPluginPageActive } from "@/hooks/use-plugin-pages";
 import { NotificationBell } from "@/components/notifications/notification-center";
 import { useBottomControls } from "@/hooks/use-bottom-controls";
+import { writeRailHints, type RailHint } from "@/lib/boot-skeleton/hints";
 
 interface NavItem {
   id: string;
@@ -236,6 +237,7 @@ export function NavigationRail({
   const {
     appLogoLightUrl,
     appLogoDarkUrl,
+    buildersWebsiteUrl,
     // Operator gates combine with server policy and JMAP capabilities.
     calendarEnabled: calendarConfigEnabled,
     contactsEnabled: contactsConfigEnabled,
@@ -368,6 +370,23 @@ export function NavigationRail({
     : !activeAppId && pathname.startsWith("/settings");
 
   const visibleItems = navItems.filter((item) => !item.hidden);
+
+  // Leave the next page load's skeleton a note of what this rail shows
+  // (lib/boot-skeleton/hints.ts). Only once a session is up: before that the
+  // rail is still missing the apps the server offers.
+  const quotaShown = !!quota && quota.total > 0;
+  useEffect(() => {
+    if (!client) return;
+    const items: RailHint[] = [];
+    for (const item of navItems) if (item.id !== 'mail' && !item.hidden) items.push(item.id as RailHint);
+    if (sidebarAppsEnabled && onManageApps) items.push('add-app');
+    if (isStalwartAdmin) items.push('admin');
+    if (showAccessibilityButton) items.push('a11y');
+    if (quotaShown) items.push('quota');
+    writeRailHints(items);
+    // navItems is rebuilt every render; its inputs are listed instead.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, supportsCalendar, calendarEnabled, supportsContacts, contactsEnabled, supportsFiles, filesEnabled, sidebarAppsEnabled, !!onManageApps, isStalwartAdmin, showAccessibilityButton, quotaShown]);
 
   const getIsActive = (href: string, itemId: string) => {
     if (activeAppId) return false;
@@ -796,7 +815,7 @@ export function NavigationRail({
         <NotificationBell placement="side" className="w-10 h-10 rounded-md" />
         {buildersEnrolled && (
         <a
-          href="https://build.comail.at"
+          href={buildersWebsiteUrl}
           target="_blank"
           rel="noopener noreferrer"
           className="flex items-center justify-center w-10 h-10 rounded-md transition-colors text-muted-foreground hover:text-foreground hover:bg-muted"

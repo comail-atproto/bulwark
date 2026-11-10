@@ -10,6 +10,7 @@ import { readAccountFilters } from "@/lib/filters/account-filters";
 import { forwardsAround, inRunOrder } from "@/lib/filters/forward-limit";
 import { createFolderAndRunPreset, saveEditorRule } from "@/lib/filters/quick-rule-flow";
 import { supportsPeriods } from "@/lib/sieve/period";
+import { supportsRegex } from "@/lib/sieve/regex";
 
 /**
  * Draws what a rule made from a message opens: the rule editor ("Create
@@ -61,6 +62,7 @@ export function QuickRuleHost() {
           forwardsBefore={forwards.before}
           forwardsAfter={forwards.after}
           periodsSupported={supportsPeriods(editor.target.client.getSieveCapabilities(editor.target.sieveAccountId)?.sieveExtensions)}
+          regexSupported={supportsRegex(editor.target.client.getSieveCapabilities(editor.target.sieveAccountId)?.sieveExtensions)}
           onSave={(rule, options) => {
             closeEditor();
             void saveEditorRule(editor, rule, options?.applyToExisting ?? false, text);

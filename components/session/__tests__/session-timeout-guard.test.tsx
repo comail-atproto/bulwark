@@ -9,6 +9,7 @@ import { DEFAULT_ORGANISATION_POLICY } from '@/lib/admin/organisation-policy';
 import { registerComposeFlush, resetComposeFlushRegistry } from '@/lib/compose-flush-registry';
 import { consumeSessionEnd } from '@/lib/session-policy/sign-out-reason';
 import { LAST_ACTIVITY_KEY } from '@/lib/session-policy/activity-channel';
+import { reportFrameActivity } from '@/lib/session-policy/frame-activity';
 
 /** BroadcastChannel between "tabs" of one test. */
 class FakeBroadcastChannel {
@@ -140,6 +141,32 @@ describe('session timeout guard', () => {
     fireEvent.pointerDown(window);
     expect(heard).toHaveBeenCalledWith(START + 10 * SECOND);
     expect(localStorage.getItem(LAST_ACTIVITY_KEY)).toBe(String(START + 10 * SECOND));
+  });
+
+  it('counts input a plugin frame reports like input here, and tells the other tabs', async () => {
+    await signIn(policyWith({ idleMinutes: 1, maxHours: 0, warnSeconds: 30 }));
+    const otherTab = new FakeBroadcastChannel('bulwark-session-activity');
+    const heard = vi.fn();
+    otherTab.onmessage = (event) => heard((event.data as { at: number }).at);
+
+    await advance(20 * SECOND);
+    act(() => { reportFrameActivity(); });
+    expect(heard).toHaveBeenCalledWith(START + 20 * SECOND);
+    await advance(29 * SECOND);
+    expect(screen.queryByText('idle_title')).toBeNull();
+    await advance(1 * SECOND);
+    expect(screen.getByText('idle_title')).toBeTruthy();
+  });
+
+  it('does not end the idle warning on input a plugin frame reports', async () => {
+    await signIn(policyWith({ idleMinutes: 1, maxHours: 0, warnSeconds: 30 }));
+
+    await advance(40 * SECOND);
+    expect(screen.getByText('idle_title')).toBeTruthy();
+    act(() => { reportFrameActivity(); });
+    expect(screen.getByText('idle_title')).toBeTruthy();
+    await advance(20 * SECOND);
+    expect(logoutAll).toHaveBeenCalled();
   });
 
   it('saves the drafts, then signs every account out with the reason, at zero', async () => {

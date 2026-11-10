@@ -207,4 +207,27 @@ describe('toasts and the focused element', () => {
     act(() => { vi.advanceTimersByTime(20); });
     expect(toastContainer()).not.toHaveAttribute('data-dodging');
   });
+
+  // On a phone the top of the screen is the header with Back and the message
+  // actions; an Undo toast that moved there blocked them. (#1472)
+  it('stays at the bottom on a phone, clear of the header', () => {
+    vi.spyOn(window, 'matchMedia').mockImplementation((query: string) => ({
+      matches: query === '(width < 40rem)',
+      media: query, onchange: null,
+      addEventListener: () => {}, removeEventListener: () => {}, addListener: () => {}, removeListener: () => {},
+      dispatchEvent: () => false,
+    }) as MediaQueryList);
+    const h = window.innerHeight;
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      if (this.hasAttribute('data-toast-container')) return rect(h - 140, 12, 366, 80);
+      if (this.id === 'list') return rect(56, 0, 390, h - 116);
+      return rect(10, 10, 80, 36);
+    });
+    render(<><Toasts /><div id="list" tabIndex={-1}>Messages</div></>);
+    act(() => { (document.getElementById('list') as HTMLElement).focus(); });
+    act(() => { toast.success('Moved to Trash'); });
+    act(() => { vi.advanceTimersByTime(20); });
+    expect(toastContainer()).not.toHaveAttribute('data-dodging');
+    expect(toastContainer().className).not.toMatch(/(^|\s)(max-sm:)?top-/);
+  });
 });

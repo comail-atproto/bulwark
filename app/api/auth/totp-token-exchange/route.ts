@@ -15,6 +15,7 @@ import { rejectCrossOriginRequest } from '@/lib/security/same-origin';
 import { stalwartPasswordLogin } from '@/lib/auth/stalwart-password-login';
 import { loginClientAddress } from '@/lib/auth/client-address';
 import { LOGIN_BUDGET_RETRY_AFTER_SECONDS, reserveLoginAttempt } from '@/lib/auth/verify-budget';
+import { isStoreUnavailable, storeUnavailableResponse } from '@/lib/auth/store-unavailable';
 import { writeSignInStamp } from '@/lib/auth/session-age';
 
 /**
@@ -60,7 +61,7 @@ async function attemptLogin(
 
   // Wrong passwords tried from here count against this server's address
   // upstream, so each client gets a failure budget (lib/auth/verify-budget.ts).
-  const refund = reserveLoginAttempt(clientIp);
+  const refund = await reserveLoginAttempt(clientIp);
   if (!refund) {
     return NextResponse.json(
       { error: 'too_many_attempts' },
@@ -83,7 +84,7 @@ async function attemptLogin(
   // Only a rejected password spends the budget. `totp_required` means the
   // password was right and the code is still missing, which every TOTP login
   // goes through once; outages say nothing about the password.
-  if (result.ok || result.error !== 'invalid_credentials') refund();
+  if (result.ok || result.error !== 'invalid_credentials') await refund();
 
   if (!result.ok) {
     switch (result.error) {
@@ -198,6 +199,8 @@ export async function POST(request: NextRequest) {
       rememberMe !== false,
     );
   } catch (error) {
+    // The sign-in limit can't be counted without the shared store: refused.
+    if (isStoreUnavailable(error)) return storeUnavailableResponse();
     logger.error('TOTP login error', { error: error instanceof Error ? error.message : 'Unknown error' });
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }

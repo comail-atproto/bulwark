@@ -13,7 +13,7 @@ import type { CalendarEvent, Calendar, CalendarTask } from "@/lib/jmap/types";
 import { useAuthStore } from "@/stores/auth-store";
 import { useCalendarStore } from "@/stores/calendar-store";
 import { movedEventUpdates } from "@/lib/calendar-participants";
-import { useSettingsStore } from "@/stores/settings-store";
+import { useSettingsStore, type MonthTimedEventStyle } from "@/stores/settings-store";
 import type { PendingEventPreview } from "./event-modal";
 import { toast } from "@/stores/toast-store";
 import { useCalendarLocale } from "@/hooks/use-calendar-locale";
@@ -98,6 +98,7 @@ export function CalendarMonthView({
   const paint = useCvdColor();
   const describeError = useCalendarErrorMessage();
   const showTimeInMonthView = useSettingsStore((state) => state.showTimeInMonthView);
+  const timedStyle = useSettingsStore((state) => state.calendarMonthTimedEvents);
   // On mobile the month view collapses events to dots unless the user opted
   // into full entries via "Show time in month view" (#666).
   const showChips = !isMobile || showTimeInMonthView;
@@ -531,6 +532,7 @@ export function CalendarMonthView({
                       currentUserEmails={currentUserEmails}
                       canEditEvent={canEditEvent}
                       inView={(d) => checkIsSameMonth(d, visibleMonthDate)}
+                      timedStyle={timedStyle}
                       onSelectEvent={onSelectEvent}
                       onHoverEvent={onHoverEvent}
                       onHoverLeave={onHoverLeave}
@@ -567,7 +569,7 @@ type WeekSegment = ReturnType<typeof buildWeekSegments>[number];
  */
 function MonthCellEntries({
   dayIndex, week, segments, rowLimit, rowCount, dayEventRows, dayTasks, hidden, overlayTop, rowHeight, chipHeight,
-  isMobile, calendarMap, pendingPreview, selectedEventId, currentUserEmails, canEditEvent, inView,
+  isMobile, calendarMap, pendingPreview, selectedEventId, currentUserEmails, canEditEvent, inView, timedStyle,
   onSelectEvent, onHoverEvent, onHoverLeave, onContextMenuEvent, onToggleTaskComplete, onSelectTask, onShowMore, moreLabel, paint,
 }: {
   dayIndex: number;
@@ -589,6 +591,7 @@ function MonthCellEntries({
   canEditEvent: (event: CalendarEvent) => boolean;
   /** Whether a day is in the month in view: only those take Tab. */
   inView: (day: Date) => boolean;
+  timedStyle?: MonthTimedEventStyle;
   onSelectEvent: (event: CalendarEvent, anchorRect: DOMRect) => void;
   onHoverEvent?: (event: CalendarEvent, anchorRect: DOMRect) => void;
   onHoverLeave?: () => void;
@@ -636,6 +639,7 @@ function MonthCellEntries({
               isSelected={segment.event.id === selectedEventId}
               calendar={calId ? calendarMap.get(calId) : undefined}
               variant="span"
+              timedStyle={segment.span === 1 ? timedStyle : undefined}
               continuesBefore={segment.continuesBefore}
               continuesAfter={segment.continuesAfter}
               onClick={(rect) => onSelectEvent(segment.event, rect)}

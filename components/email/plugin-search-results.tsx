@@ -10,6 +10,7 @@ import { runPluginAction } from "@/lib/plugin-sandbox/actions";
 import type { ProvidedSearchResult } from "@/lib/plugin-search-results";
 import type { SearchResultEmail } from "@/lib/plugin-types";
 import type { Email } from "@/lib/jmap/types";
+import { type OpenableEmail, reachableEmail } from "@/lib/plugin-sandbox/open-email";
 import { useAuthStore } from "@/stores/auth-store";
 import { useEmailStore } from "@/stores/email-store";
 import { usePluginStore } from "@/stores/plugin-store";
@@ -33,31 +34,6 @@ function groupResults(results: ProvidedSearchResult[], pluginName: (id: string) 
     group.results.push(r);
   }
   return [...groups.values()];
-}
-
-/** A message as the reader opens one that is not a row of the list: the login reaching it and its account. */
-export type OpenableEmail = Required<Pick<Email, "id" | "sourceClientAccountId" | "sourceAccountId">>;
-
-/**
- * The login through which the user reaches a message an entry names, the
- * active one first; null when none does (an account the user cannot read).
- * Without an account the message is the active login's own.
- */
-export function reachableEmail(email: SearchResultEmail): OpenableEmail | null {
-  const auth = useAuthStore.getState();
-  const clients = [...auth.getAllConnectedClients()]
-    .sort(([a], [b]) => Number(b === auth.activeAccountId) - Number(a === auth.activeAccountId));
-  for (const [login, client] of clients) {
-    if (!email.accountId) {
-      return login === auth.activeAccountId
-        ? { id: email.id, sourceClientAccountId: login, sourceAccountId: client.getAccountId() }
-        : null;
-    }
-    const reaches = client.getAccountId() === email.accountId
-      || client.getSharedAccounts().some((a) => a.id === email.accountId && a.capabilities.mail);
-    if (reaches) return { id: email.id, sourceClientAccountId: login, sourceAccountId: email.accountId };
-  }
-  return null;
 }
 
 /** The active login's own account. */

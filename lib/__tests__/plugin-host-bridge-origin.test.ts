@@ -7,6 +7,7 @@ vi.mock('../plugin-sandbox/host-api', () => ({
 
 import { createBackgroundInstance, createSlotInstance } from '../plugin-sandbox/host-bridge';
 import { dispatchApiCall } from '../plugin-sandbox/host-api';
+import { onFrameActivity } from '../session-policy/frame-activity';
 
 function plugin(): InstalledPlugin {
   return {
@@ -15,14 +16,25 @@ function plugin(): InstalledPlugin {
   };
 }
 
+const responsePorts = new WeakMap<Window, MessagePort>();
 function post(source: Window | null, origin: string, data: unknown) {
-  window.dispatchEvent(new MessageEvent('message', { data, origin, source }));
+  const type = (data as { type?: string })?.type;
+  if (source && origin === 'null' && type !== 'sandbox-ready') {
+    const port = responsePorts.get(source);
+    if (port) { port.onmessage?.call(port, new MessageEvent('message', { data })); return; }
+  }
+  const responsePort = { postMessage: (message: unknown) => source?.postMessage(message, '*'), close: () => {}, onmessage: null } as unknown as MessagePort;
+  const activityPort = { close: () => {}, onmessage: null } as unknown as MessagePort;
+  const ports = type === 'sandbox-ready' ? [activityPort, responsePort] : [];
+  if (source && type === 'sandbox-ready' && origin === 'null') responsePorts.set(source, responsePort);
+  window.dispatchEvent(new MessageEvent('message', { data, origin, source, ports }));
 }
 
 const instances: Array<{ destroy(): void }> = [];
 
 /** The frame answers init: its hooks and slots are in place. */
 function booted<T extends { iframe: HTMLIFrameElement }>(inst: T): T {
+  post(inst.iframe.contentWindow, 'null', { type: 'sandbox-ready' });
   post(inst.iframe.contentWindow, 'null', { type: 'init-done', hooks: [], slots: [], shortcuts: [] });
   return inst;
 }
@@ -36,10 +48,79 @@ describe('host bridge origin pin for untrusted sandboxes', () => {
     const inst = createBackgroundInstance({ plugin: plugin(), code: '', locale: 'en', tier: 'untrusted' });
     instances.push(inst);
 
+    post(inst.iframe.contentWindow, 'null', { type: 'sandbox-ready' });
     post(inst.iframe.contentWindow, 'null', { type: 'api-request', id: '1', method: 'storage.keys', args: [] });
     await new Promise((r) => setTimeout(r, 0));
 
     expect(dispatchApiCall).toHaveBeenCalledTimes(1);
+  });
+
+  it('sends a pending API response through the original document port', async () => {
+    const inst = createBackgroundInstance({ plugin: plugin(), code: '', locale: 'en', tier: 'untrusted' });
+    instances.push(inst);
+    const port = { postMessage: vi.fn(), close: vi.fn() } as unknown as MessagePort;
+    const framePost = vi.spyOn(inst.iframe.contentWindow!, 'postMessage');
+    window.dispatchEvent(new MessageEvent('message', {
+      source: inst.iframe.contentWindow, origin: 'null', data: { type: 'sandbox-ready' },
+      ports: [{ close: () => {} } as MessagePort, port],
+    }));
+    await new Promise((r) => setTimeout(r, 0));
+    framePost.mockClear();
+    let finish!: (result: string) => void;
+    vi.mocked(dispatchApiCall).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    port.onmessage?.call(port, new MessageEvent('message', { data: { type: 'api-request', id: '1', method: 'storage.keys', args: [] } }));
+    // A WindowProxy survives navigation; the original document's port does not move with it.
+    finish('private result');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'api-response', id: '1', result: 'private result' }));
+    expect(framePost).not.toHaveBeenCalled();
+  });
+
+  it('rejects an old runtime immediately and closes its transferred port', async () => {
+    const inst = createBackgroundInstance({ plugin: plugin(), code: '', locale: 'en', tier: 'untrusted' });
+    instances.push(inst);
+    const port = { close: vi.fn() } as unknown as MessagePort;
+    const framePost = vi.spyOn(inst.iframe.contentWindow!, 'postMessage');
+    window.dispatchEvent(new MessageEvent('message', { source: inst.iframe.contentWindow, origin: 'null', data: { type: 'sandbox-ready' }, ports: [port] }));
+    await expect(inst.initPromise).rejects.toThrow(/out of date.*Reload/i);
+    expect(port.close).toHaveBeenCalledOnce();
+    expect(framePost).not.toHaveBeenCalled();
+  });
+
+  it('ignores an old-ready message from another origin', async () => {
+    const inst = createBackgroundInstance({ plugin: plugin(), code: '', locale: 'en', tier: 'untrusted' });
+    instances.push(inst);
+    const port = { close: vi.fn() } as unknown as MessagePort;
+    window.dispatchEvent(new MessageEvent('message', { source: inst.iframe.contentWindow, origin: 'https://other.example', data: { type: 'sandbox-ready' }, ports: [port] }));
+    expect(port.close).not.toHaveBeenCalled();
+    post(inst.iframe.contentWindow, 'null', { type: 'sandbox-ready' });
+    await expect(inst.readyPromise).resolves.toBeUndefined();
+  });
+
+  it('ignores window RPC after the port handshake and closes the port on teardown', async () => {
+    const inst = createBackgroundInstance({ plugin: plugin(), code: '', locale: 'en', tier: 'untrusted' });
+    instances.push(inst);
+    const port = { postMessage: vi.fn(), close: vi.fn(), onmessage: null } as unknown as MessagePort;
+    window.dispatchEvent(new MessageEvent('message', { source: inst.iframe.contentWindow, origin: 'null', data: { type: 'sandbox-ready' }, ports: [{ close: () => {} } as MessagePort, port] }));
+    await inst.readyPromise;
+    window.dispatchEvent(new MessageEvent('message', { source: inst.iframe.contentWindow, origin: 'null', data: { type: 'api-request', id: '1', method: 'storage.keys', args: [] } }));
+    expect(dispatchApiCall).not.toHaveBeenCalled();
+    const chunk = new ArrayBuffer(4);
+    inst.sendStream({ type: 'stream-chunk', streamId: 's', chunk });
+    expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'stream-chunk', chunk }), [chunk]);
+    inst.destroy();
+    expect(port.close).toHaveBeenCalled();
+    vi.mocked(port.postMessage).mockClear();
+    inst.sendStream({ type: 'stream-chunk', streamId: 's', chunk });
+    expect(port.postMessage).not.toHaveBeenCalled();
+  });
+
+  it('reports a failure to send the initial payload', async () => {
+    const inst = createBackgroundInstance({ plugin: plugin(), code: '', locale: 'en', tier: 'untrusted' });
+    instances.push(inst);
+    const port = { postMessage: vi.fn(() => { throw new Error('send failed'); }), close: vi.fn(), onmessage: null } as unknown as MessagePort;
+    window.dispatchEvent(new MessageEvent('message', { source: inst.iframe.contentWindow, origin: 'null', data: { type: 'sandbox-ready' }, ports: [{ close: () => {} } as MessagePort, port] }));
+    await expect(inst.initPromise).rejects.toThrow('send failed');
   });
 
   it('ignores the same frame once it has navigated to another origin', async () => {
@@ -102,6 +183,7 @@ describe('slot sizing', () => {
       hostContainer: document.body, onResize,
     });
     instances.push(inst);
+    post(inst.iframe.contentWindow, 'null', { type: 'sandbox-ready' });
     return { inst, onResize };
   }
 
@@ -152,6 +234,7 @@ describe('host bookkeeping', () => {
   it('fails a hook call whose arguments cannot be sent, without keeping it pending', async () => {
     const inst = booted(createBackgroundInstance({ plugin: plugin(), code: '', locale: 'en', tier: 'untrusted' }));
     instances.push(inst);
+    await inst.readyPromise;
     vi.spyOn(inst.iframe.contentWindow!, 'postMessage').mockImplementation(() => { throw new DOMException('no clone', 'DataCloneError'); });
 
     await expect(inst.invokeHook('onEmailOpen', [() => {}])).rejects.toThrow(/no clone/);
@@ -388,5 +471,56 @@ describe('calls before the background frame has booted', () => {
     await expect(hook).rejects.toThrow(/destroyed/);
     await expect(inst.initPromise).rejects.toThrow(/destroyed/);
     expect(inst.closed).toBe(true);
+  });
+});
+
+describe('input in a frame', () => {
+  /** sandbox-ready as the runtime posts it, with its activity port. */
+  function ready(inst: { iframe: HTMLIFrameElement }, port: MessagePort): void {
+    const ev = new MessageEvent('message', { data: { type: 'sandbox-ready' }, origin: 'null', source: inst.iframe.contentWindow });
+    Object.defineProperty(ev, 'ports', { value: [port, channel().port2] });
+    window.dispatchEvent(ev);
+  }
+  const delivered = () => new Promise((r) => setTimeout(r, 20));
+  const channels: MessageChannel[] = [];
+  afterEach(() => {
+    for (const c of channels.splice(0)) { c.port1.close(); c.port2.close(); }
+  });
+  function channel(): MessageChannel {
+    const c = new MessageChannel();
+    channels.push(c);
+    return c;
+  }
+
+  it('counts for the idle timeout what the runtime reports through its port', async () => {
+    const heard = vi.fn();
+    const off = onFrameActivity(heard);
+    try {
+      const inst = createSlotInstance({
+        plugin: plugin(), slot: 'app-page', code: '', locale: 'en', tier: 'untrusted', extraProps: {},
+        hostContainer: document.body, onResize: () => {},
+      });
+      instances.push(inst);
+      const runtime = channel();
+      ready(inst, runtime.port2);
+      runtime.port1.postMessage(null);
+      await delivered();
+      expect(heard).toHaveBeenCalledTimes(1);
+
+      // A second sandbox-ready is not the runtime's: its port is ignored.
+      const forged = channel();
+      ready(inst, forged.port2);
+      forged.port1.postMessage(null);
+      await delivered();
+      expect(heard).toHaveBeenCalledTimes(1);
+
+      // Nor does a frame that is gone count.
+      inst.destroy();
+      runtime.port1.postMessage(null);
+      await delivered();
+      expect(heard).toHaveBeenCalledTimes(1);
+    } finally {
+      off();
+    }
   });
 });

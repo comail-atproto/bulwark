@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   useContactStore,
+  principalsToDirectory,
   findContactPhotoEntry,
   getContactPhotoIndex,
   getContactPhotoRef,
@@ -12,7 +13,6 @@ import {
 import type { ContactCard, ContactMedia } from '@/lib/jmap/types';
 import type { IJMAPClient } from '@/lib/jmap/client-interface';
 import { clearContactPhotoCache } from '@/lib/contact-photo-cache';
-import { PrincipalsRequestError } from '@/lib/jmap/principals-error';
 import { setClientLookup } from '../client-registry';
 
 vi.stubGlobal('crypto', { randomUUID: () => '00000000-0000-0000-0000-000000000000' });
@@ -368,14 +368,13 @@ describe('contact-store', () => {
       expect(results).toHaveLength(2);
     });
 
-    it('should augment results with directory principals', () => {
+    it('excludes stale directory principals from recipient suggestions', () => {
       useContactStore.setState({
         contacts: [],
         directoryPrincipals: [{ name: 'Dana Director', email: 'dana@example.com' }],
       });
       const results = useContactStore.getState().getAutocomplete('dana');
-      expect(results).toHaveLength(1);
-      expect(results[0]).toEqual({ name: 'Dana Director', email: 'dana@example.com' });
+      expect(results).toEqual([]);
     });
 
     it('should not duplicate a directory principal already matched as a contact', () => {
@@ -435,29 +434,27 @@ describe('contact-store', () => {
   });
 
   describe('fetchDirectory', () => {
-    it('keeps what a restricted listing offers on Stalwart 1.0 with directory queries off, without logging an error', async () => {
-      const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    it('clears cached entries without requesting the server directory', async () => {
       const client = {
         supportsPrincipals: () => true,
-        getPrincipals: vi.fn(),
-        listPrincipals: vi.fn().mockResolvedValue({
-          status: 'restricted',
-          principals: [{ id: 'grp', type: 'group', name: 'sales@example.com', description: 'Sales', email: 'sales@example.com' }],
-        }),
+        getPrincipals: vi.fn().mockResolvedValue([]),
+        listPrincipals: vi.fn().mockResolvedValue({ status: 'ok', principals: [] }),
       } as unknown as IJMAPClient;
+      useContactStore.setState({
+        directoryPrincipals: [{ name: 'Other Member', email: 'other@example.com' }],
+        directoryLoaded: true,
+        directoryStatus: 'ready',
+      });
 
       await useContactStore.getState().fetchDirectory(client);
 
-      const state = useContactStore.getState();
-      // Browsing says the directory is closed, but shows who the user knows.
-      expect(state.directoryStatus).toBe('forbidden');
-      expect(state.directoryLoaded).toBe(true);
-      expect(state.directoryPrincipals).toEqual([{ id: 'grp', name: 'Sales', email: 'sales@example.com', description: 'Sales', type: 'group' }]);
-      expect(errors).not.toHaveBeenCalled();
-      errors.mockRestore();
+      expect(client.listPrincipals).not.toHaveBeenCalled();
+      expect(client.getPrincipals).not.toHaveBeenCalled();
+      expect(useContactStore.getState().directoryPrincipals).toEqual([]);
+      expect(useContactStore.getState().directoryStatus).toBe('unavailable');
     });
 
-    it('counts a client without listPrincipals (demo) as a complete listing', async () => {
+    it('does not fall back to getPrincipals for clients without listPrincipals', async () => {
       const client = {
         supportsPrincipals: () => true,
         getPrincipals: vi.fn().mockResolvedValue([{ id: 'a', type: 'individual', name: 'anna@example.com', email: 'anna@example.com' }]),
@@ -465,8 +462,9 @@ describe('contact-store', () => {
 
       await useContactStore.getState().fetchDirectory(client);
 
-      expect(useContactStore.getState().directoryStatus).toBe('ready');
-      expect(useContactStore.getState().directoryPrincipals).toEqual([{ id: 'a', name: 'anna@example.com', email: 'anna@example.com', description: undefined, type: 'individual' }]);
+      expect(client.getPrincipals).not.toHaveBeenCalled();
+      expect(useContactStore.getState().directoryStatus).toBe('unavailable');
+      expect(useContactStore.getState().directoryPrincipals).toEqual([]);
     });
   });
 
@@ -1392,43 +1390,14 @@ describe('contact-store', () => {
     const principal = (id: string, email: string | null, description?: string) =>
       ({ id, type: 'individual' as const, name: email ?? id, email, description });
 
-    it('maps principals with an address to entries named by their description', async () => {
-      const client = {
-        supportsPrincipals: () => true,
-        getPrincipals: vi.fn().mockResolvedValue([
-          principal('a', 'ana@example.org', 'Ana Silva'),
-          principal('b', null),
-          principal('c', 'ANA@example.org', 'Duplicate'),
-        ]),
-      } as unknown as IJMAPClient;
-      await useContactStore.getState().fetchDirectory(client);
-      const state = useContactStore.getState();
-      expect(state.directoryStatus).toBe('ready');
-      expect(state.directoryPrincipals).toEqual([
+    it('maps principals with an address to entries named by their description', () => {
+      expect(principalsToDirectory([
+        principal('a', 'ana@example.org', 'Ana Silva'),
+        principal('b', null),
+        principal('c', 'ANA@example.org', 'Duplicate'),
+      ])).toEqual([
         { id: 'a', name: 'Ana Silva', email: 'ana@example.org', description: 'Ana Silva', type: 'individual' },
       ]);
-    });
-
-    it('marks a refused query as forbidden, not as an empty directory', async () => {
-      // JMAPClient.listPrincipals reports Principal/query's `forbidden` so.
-      const client = {
-        supportsPrincipals: () => true,
-        getPrincipals: vi.fn(),
-        listPrincipals: vi.fn().mockResolvedValue({ status: 'restricted', principals: [] }),
-      } as unknown as IJMAPClient;
-      await useContactStore.getState().fetchDirectory(client);
-      expect(useContactStore.getState().directoryStatus).toBe('forbidden');
-    });
-
-    it('keeps the last list when a refresh fails', async () => {
-      useContactStore.setState({ directoryPrincipals: [{ name: 'Ana', email: 'ana@example.org' }], directoryStatus: 'ready' });
-      const client = {
-        supportsPrincipals: () => true,
-        getPrincipals: vi.fn().mockRejectedValue(new PrincipalsRequestError(null, 'network down')),
-      } as unknown as IJMAPClient;
-      await useContactStore.getState().fetchDirectory(client);
-      expect(useContactStore.getState().directoryStatus).toBe('error');
-      expect(useContactStore.getState().directoryPrincipals).toHaveLength(1);
     });
 
     it('reports a server without principals as unavailable', async () => {

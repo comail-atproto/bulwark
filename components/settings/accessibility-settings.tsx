@@ -14,7 +14,6 @@ import { voicesForLocale } from '@/lib/read-aloud';
 import { useSpeechVoices } from '@/hooks/use-read-aloud';
 import { NOTIFICATION_SOUNDS, playNotificationSound, type NotificationSoundChoice } from '@/lib/notification-sound';
 import {
-  ACCESSIBILITY_DEFAULTS,
   ACCESSIBILITY_KEYS,
   FONT_SIZES,
   MAIL_MIN_FONT_SIZES,
@@ -36,6 +35,9 @@ import { FONT_SIZES as COMPOSE_FONT_SIZES } from '@/components/email/font-size';
 import type { Density, SendDelaySeconds } from '@/stores/settings-store';
 
 type SettingKey = Parameters<ReturnType<typeof useSettingsStore.getState>['updateSetting']>[0];
+
+/** What Reset gives back: the settings only this page has. */
+const RESET_KEYS: SettingKey[] = [...ACCESSIBILITY_KEYS, 'fontSize', 'plainTextFont', 'sendConfirmation'];
 
 /** Opens another settings page (and section) the way deep links do. */
 function goToSettings(tab: string, section?: string) {
@@ -64,7 +66,7 @@ export function AccessibilitySettings() {
   const tNotifications = useTranslations('settings.notifications');
   const tCalendar = useTranslations('calendar.settings');
   const settings = useSettingsStore();
-  const { updateSetting } = settings;
+  const { updateSetting, resetSettings } = settings;
   const { isSettingLocked, isSettingHidden, getRestriction } = usePolicyStore();
   const faviconsAllowed = !useNoThirdPartyTraffic();
   const [applied, setApplied] = useState<{ id: AccessibilityPresetId; changes: PresetChange[] } | null>(null);
@@ -91,12 +93,10 @@ export function AccessibilitySettings() {
     setApplied(null);
   };
 
+  // Forgets the user's own values, so the organisation's defaults (or
+  // Bulwark's) apply again. Shared everyday settings shown here too stay.
   const resetAll = () => {
-    for (const key of ACCESSIBILITY_KEYS) {
-      if (isSettingLocked(key)) continue;
-      set(key, ACCESSIBILITY_DEFAULTS[key]);
-    }
-    set('fontSize', 'medium');
+    resetSettings(RESET_KEYS.filter((key) => !isSettingLocked(key)));
     setApplied(null);
     setResetDone(true);
   };

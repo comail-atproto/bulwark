@@ -67,6 +67,11 @@ export interface AccountEntry {
    * device yet. Kept across reloads, and opening it leads to the sign-in form.
    */
   awaitingSignIn?: boolean;
+  /**
+   * Opened by an admin through an impersonation handoff rather than by the
+   * mailbox owner. The server says so each time the session is restored.
+   */
+  impersonated?: boolean;
 }
 
 interface AccountState {

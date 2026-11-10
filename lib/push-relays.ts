@@ -4,6 +4,7 @@
 
 import type { PushRelayOption, SettingsPolicy } from '@/lib/admin/types';
 import { relayAllowed } from '@/lib/outgoing-hosts';
+import { trimTrailingSlashes } from '@/lib/url-normalization';
 
 // Hosted relay so self-hosters don't need their own VAPID + Firebase setup.
 // The built-in entry can be repointed at build time via NEXT_PUBLIC_PUSH_RELAY_URL.
@@ -15,7 +16,7 @@ export type PushRelayPolicy = Partial<
 >;
 
 export function normalizeRelayUrl(url: string | null | undefined): string {
-  return (url ?? '').trim().replace(/\/+$/, '');
+  return trimTrailingSlashes((url ?? '').trim());
 }
 
 export function isValidRelayUrl(url: string | null | undefined): boolean {

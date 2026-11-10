@@ -36,10 +36,36 @@ export interface HookSpec {
   payload: string;
   /** When the host fires it. */
   when: string;
+  /**
+   * For a hook whose calls carry data behind one of two permissions (a
+   * reminder of an event or of a task): a plugin holding this one instead of
+   * `permission` may register too, and `callPermission` says which of the
+   * two each call needs, so a call reaches only plugins holding that one.
+   */
+  alsoPermission?: Permission;
+  callPermission?: (payload: unknown) => Permission;
 }
 
 const H = (group: HookGroup, kind: HookKind, permission: Permission, payload: string, when: string): HookSpec =>
   ({ group, kind, permission, payload, when });
+
+/** An event's reminder needs calendar:read, a task's tasks:read. */
+const REMINDER = {
+  alsoPermission: 'tasks:read',
+  callPermission: (payload: unknown): Permission =>
+    typeof payload === 'object' && payload !== null && 'taskId' in payload ? 'tasks:read' : 'calendar:read',
+} as const satisfies Pick<HookSpec, 'alsoPermission' | 'callPermission'>;
+
+/**
+ * Taking a reminder over silences Bulwark's own, so it needs the permission
+ * that could remove the alert anyway: calendar:write for an event's,
+ * tasks:write for a task's. Reading a calendar does not let a plugin mute it.
+ */
+const REMINDER_TAKEOVER = {
+  alsoPermission: 'tasks:write',
+  callPermission: (payload: unknown): Permission =>
+    typeof payload === 'object' && payload !== null && 'taskId' in payload ? 'tasks:write' : 'calendar:write',
+} as const satisfies Pick<HookSpec, 'alsoPermission' | 'callPermission'>;
 
 export const HOOK_CATALOG = {
   // ─── Mail: message list ────────────────────────────────────
@@ -57,7 +83,7 @@ export const HOOK_CATALOG = {
   onBeforeReply: H('mail-read', 'intercept', 'email:read', 'ReplyContext', 'when Reply is chosen, before the composer opens'),
   onBeforeReplyAll: H('mail-read', 'intercept', 'email:read', 'ReplyContext', 'when Reply all is chosen, before the composer opens'),
   onBeforeForward: H('mail-read', 'intercept', 'email:read', 'ReplyContext', 'when Forward is chosen, before the composer opens'),
-  onBeforeExternalLink: H('mail-read', 'intercept', 'ui:observe', 'ExternalLinkContext', 'when a link in a message is clicked; return false to stop it or { href } to change it'),
+  onBeforeExternalLink: H('mail-read', 'intercept', 'ui:observe', 'ExternalLinkContext', 'when a link is opened (mail, reader view, events, contacts, notifications, the unsubscribe link, links other plugins open); return false to stop it or { href } to change it'),
   onAvatarResolve: H('mail-read', 'transform', 'email:read', 'string | null (avatar URL), { email, name }', 'when a sender avatar is needed'),
 
   // ─── Mail: composing ───────────────────────────────────────
@@ -80,7 +106,7 @@ export const HOOK_CATALOG = {
   onBeforeEmailSend: H('mail-send', 'intercept', 'email:send', 'OutgoingEmail', 'when Send is pressed; a handler that fails or times out stops the send'),
   onTransformOutgoingEmail: H('mail-send', 'transform', 'email:send', 'OutgoingEmail', 'right before the message is submitted'),
   onComposeSend: H('mail-send', 'takeover', 'email:send', 'ComposeSendRequest', 'at the start of sending; may send the message itself'),
-  onAfterEmailSend: H('mail-send', 'observer', 'email:read', '{ emailId, submissionId, to, cc, bcc, subject, scheduledFor }', 'after the server accepted the message'),
+  onAfterEmailSend: H('mail-send', 'observer', 'email:read', '{ emailId, accountId, submissionId, to, cc, bcc, subject, scheduledFor, composerId }', 'after the server accepted the message'),
 
   // ─── Mail: organizing ──────────────────────────────────────
   onBeforeEmailDelete: H('mail-organize', 'intercept', 'email:write', '{ emailIds, permanent }', 'before messages are deleted or moved to Trash'),
@@ -94,8 +120,8 @@ export const HOOK_CATALOG = {
   onEmailSpamToggle: H('mail-organize', 'observer', 'email:read', '{ emailIds, spam }', 'after messages were marked as spam or not spam'),
   onBeforeEmailReadStateChange: H('mail-organize', 'intercept', 'email:write', '{ emailIds, read }', 'before messages are marked read or unread'),
   onEmailReadStateChange: H('mail-organize', 'observer', 'email:read', '{ emailIds, read }', 'after messages were marked read or unread'),
-  onBeforeEmailStarToggle: H('mail-organize', 'intercept', 'email:write', '{ emailIds, starred }', 'before messages are starred or unstarred'),
-  onEmailStarToggle: H('mail-organize', 'observer', 'email:read', '{ emailIds, starred }', 'after messages were starred or unstarred'),
+  onBeforeEmailStarToggle: H('mail-organize', 'intercept', 'email:write', '{ emailIds, starred, accountId }', 'before messages are starred or unstarred; `accountId` names the messages\' account when it is not the user\'s own (a team or shared mailbox)'),
+  onEmailStarToggle: H('mail-organize', 'observer', 'email:read', '{ emailIds, starred, accountId }', 'after messages were starred or unstarred; `accountId` as on onBeforeEmailStarToggle'),
   onBeforeEmailKeywordChange: H('mail-organize', 'intercept', 'email:write', '{ emailIds, added: string[], removed: string[] }', 'before tags or other keywords are changed'),
   onEmailKeywordChange: H('mail-organize', 'observer', 'email:read', '{ emailIds, added: string[], removed: string[] }', 'after tags or other keywords changed'),
   onBeforeEmailCategorize: H('mail-organize', 'intercept', 'email:read', 'EmailCategorizeContext', 'before messages are moved to another inbox tab'),
@@ -150,8 +176,9 @@ export const HOOK_CATALOG = {
   onCalendarChange: H('calendar', 'observer', 'calendar:read', '{ calendarId, change: "created" | "updated" | "removed" }', 'after a calendar was created, changed or removed'),
   onCalendarVisibilityToggle: H('calendar', 'observer', 'calendar:read', '{ calendarId, visible }', 'when a calendar is shown or hidden'),
   onICalSubscriptionChange: H('calendar', 'observer', 'calendar:read', '{ subscriptionId, change: "added" | "updated" | "removed" | "refreshed" }', 'when a calendar subscription changes'),
-  onCalendarAlert: H('calendar', 'observer', 'calendar:read', 'CalendarAlertView', 'when an event reminder fires'),
-  onCalendarAlertAcknowledge: H('calendar', 'observer', 'calendar:read', '{ alertId, eventId }', 'when a reminder is dismissed'),
+  onBeforeCalendarAlert: { ...H('calendar', 'intercept', 'calendar:write', 'CalendarAlertView', "before Bulwark shows a reminder of an event or a task, in every open tab; return false to show it yourself (no toast, sound or title alert from Bulwark; onCalendarAlert still fires); a task's needs tasks:write, an event's calendar:write"), ...REMINDER_TAKEOVER },
+  onCalendarAlert: { ...H('calendar', 'observer', 'calendar:read', 'CalendarAlertView ({ id, eventId, eventTitle, triggerTime } or { id, taskId, taskTitle, triggerTime })', "when a reminder of an event or a task fires, in every open tab, also one a plugin took over; a task's needs tasks:read, an event's calendar:read"), ...REMINDER },
+  onCalendarAlertAcknowledge: { ...H('calendar', 'observer', 'calendar:read', '{ alertId, eventId } or { alertId, taskId }', "when the user closes a reminder's toast, in that tab only; a task's needs tasks:read, an event's calendar:read"), ...REMINDER },
 
   // ─── Contacts ──────────────────────────────────────────────
   onContactOpen: H('contacts', 'observer', 'contacts:read', 'ContactView', 'when a contact is opened'),
