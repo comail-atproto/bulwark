@@ -63,6 +63,7 @@ describe('relay SSO opaque-code redemption', () => {
         did: 'did:plc:abcdefghijklmnopqrstuvwxyz'.slice(0, 32),
         mailbox: 'alice@example.test',
         app_password: 'durable-secret-from-backchannel',
+        credential_id: 'browser-credential',
         groupware_enabled: true,
         builders_enabled: false,
       }), { status: 200, headers: { 'Content-Type': 'application/json' } });
@@ -76,6 +77,7 @@ describe('relay SSO opaque-code redemption', () => {
       did: 'did:plc:abcdefghijklmnopqrstuvwxyz'.slice(0, 32),
       mailbox: 'alice@example.test',
       appPassword: 'durable-secret-from-backchannel',
+      credentialId: 'browser-credential',
       groupwareEnabled: true,
       buildersEnabled: false,
     });

@@ -6,7 +6,7 @@ import { sessionCookieName } from '@/lib/auth/session-cookie';
 
 vi.mock('@/lib/auth/session-secret', () => ({ getSessionSecret: () => 's'.repeat(64) }));
 vi.mock('@/lib/logger', () => ({ logger: { warn: vi.fn(), error: vi.fn() } }));
-vi.mock('@/lib/access-approval/relay-bridge', () => ({
+vi.mock('@/lib/auth/mailbox-session', () => ({
   backfillSessionIdentity: async (credentials: object) => ({ ...credentials, did: 'did:web:alice.example' }),
 }));
 vi.mock('@/lib/stalwart/auth-context', () => ({
@@ -24,6 +24,7 @@ it.each(['app-password', { token: 'access-token' }])('keeps account credentials 
   const name = sessionCookieName(2);
   jar.set(name, encryptSession('https://mail.example', 'alice@example', secret, {
     groupwareEnabled: false, buildersEnabled: true,
+    credentialId: 'owned-session',
   }));
   const { PUT } = await import('@/app/api/auth/session/route');
   const response = await PUT(new NextRequest('https://inbox.example/api/auth/session?slot=2', {
@@ -34,6 +35,7 @@ it.each(['app-password', { token: 'access-token' }])('keeps account credentials 
   expect(response.status).toBe(200);
   expect(decryptSession(jar.get(name)!)).toMatchObject({
     did: 'did:web:alice.example', groupwareEnabled: false, buildersEnabled: true,
+    credentialId: 'owned-session',
     ...(typeof secret === 'string' ? { password: secret } : secret),
   });
 });

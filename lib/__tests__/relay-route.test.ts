@@ -85,6 +85,7 @@ describe('/api/auth/relay opaque-code route', () => {
     process.env.RELAY_SSO_REDEEM_URL = REDEEM_URL;
     process.env.RELAY_SSO_PUBLIC_ORIGIN = 'https://inbox.example';
     process.env.JMAP_SERVER_URL = 'https://inbox.example';
+    process.env.RELAY_APP_PASSWORD_BRIDGE_URL = 'https://relay.internal.example/webmail/app-passwords';
     vi.clearAllMocks();
     mocks.cookieGet.mockReset();
     mocks.decryptSession.mockReset();
@@ -95,7 +96,46 @@ describe('/api/auth/relay opaque-code route', () => {
     delete process.env.RELAY_SSO_REDEEM_URL;
     delete process.env.RELAY_SSO_PUBLIC_ORIGIN;
     delete process.env.JMAP_SERVER_URL;
+    delete process.env.RELAY_APP_PASSWORD_BRIDGE_URL;
     vi.unstubAllGlobals();
+  });
+
+  it.each([401, 409, 410, 429, 502])('reports backchannel status %s without logging its response body', async (status) => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('private synthetic response', { status })));
+    const response = await POST(postRequest('https://inbox.example'));
+    expect(response.status).toBe(401);
+    expect(mocks.loggerWarn).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+      event: 'relay_sso_redeem_failed', stage: 'redemption', status,
+    }));
+    expect(JSON.stringify(mocks.loggerWarn.mock.calls)).not.toContain('private synthetic response');
+  });
+
+  it('explains exhausted credential capacity without exposing the upstream body', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('credential capacity reached\n', { status: 429 })));
+    const response = await POST(postRequest('https://inbox.example'));
+    expect(response.status).toBe(429);
+    expect(await response.json()).toEqual({ error: 'Your account has reached its sign-in and mail-client limit. In an existing session, open Settings → Connect mail client and revoke a credential you no longer use, then start sign-in again.' });
+    expect(mocks.cookieSet).not.toHaveBeenCalled();
+    expect(JSON.stringify(mocks.loggerWarn.mock.calls)).not.toContain('private synthetic quota response');
+  });
+
+  it('distinguishes a backchannel timeout from a session-grant failure', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new DOMException('timeout', 'TimeoutError'); }));
+    expect((await POST(postRequest('https://inbox.example'))).status).toBe(401);
+    expect(mocks.loggerWarn).toHaveBeenLastCalledWith(expect.any(String), expect.objectContaining({
+      event: 'relay_sso_redeem_failed', stage: 'redemption', reason: 'timeout',
+    }));
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({
+      did: 'did:plc:abcdefghijklmnopqrstuvwx', mailbox: 'bob@example.test', app_password: 'synthetic-password',
+      groupware_enabled: false, builders_enabled: false,
+    })));
+    mocks.encryptSession.mockImplementationOnce(() => { throw new Error('sensitive synthetic detail'); });
+    expect((await POST(postRequest('https://inbox.example'))).status).toBe(401);
+    expect(mocks.loggerWarn).toHaveBeenLastCalledWith(expect.any(String), expect.objectContaining({
+      event: 'relay_sso_redeem_failed', stage: 'session',
+    }));
+    expect(JSON.stringify(mocks.loggerWarn.mock.calls)).not.toContain('sensitive synthetic detail');
+    expect(JSON.stringify(mocks.loggerWarn.mock.calls)).not.toContain('synthetic-password');
   });
 
   it('keeps an existing mailbox session when signing into a second account', async () => {
@@ -154,6 +194,31 @@ describe('/api/auth/relay opaque-code route', () => {
     })));
     expect((await POST(postRequest('https://inbox.example'))).status).toBe(409);
     expect(mocks.cookieSet).not.toHaveBeenCalled();
+  });
+
+  it.each(['full', 'encryption', 'context'])('releases the freshly minted credential when session creation fails: %s', async (failure) => {
+    if (failure === 'full') mocks.cookieGet.mockReturnValue({ value: 'occupied' });
+    if (failure === 'encryption') mocks.encryptSession.mockImplementationOnce(() => { throw new Error('failed'); });
+    if (failure === 'context') mocks.setAuthContext.mockImplementationOnce(() => { throw new Error('failed'); });
+    const fetcher = vi.fn(async (_url: unknown, init?: RequestInit) => init?.method === 'DELETE'
+      ? new Response(null, { status: 204 })
+      : Response.json({ did: 'did:plc:abcdefghijklmnopqrstuvwx', mailbox: 'bob@example.test', app_password: 'bob-password', credential_id: 'new-credential', groupware_enabled: false, builders_enabled: false }));
+    vi.stubGlobal('fetch', fetcher);
+    expect((await POST(postRequest('https://inbox.example'))).status).toBe(failure === 'full' ? 409 : 401);
+    expect(fetcher).toHaveBeenLastCalledWith('https://relay.internal.example/webmail/app-passwords/new-credential', expect.objectContaining({ method: 'DELETE' }));
+  });
+
+  it('retains the new credential ID and releases only the replaced browser credential after granting the new session', async () => {
+    mocks.cookieGet.mockImplementation((name: string) => name === 'jmap_session_2' ? { value: 'alice-session' } : undefined);
+    mocks.decryptSession.mockReturnValue({ serverUrl: 'https://inbox.example', username: 'alice@example.test', password: 'old-password', credentialId: 'old-credential' });
+    const fetcher = vi.fn(async (_url: unknown, init?: RequestInit) => init?.method === 'DELETE'
+      ? new Response(null, { status: 204 })
+      : Response.json({ did: 'did:plc:abcdefghijklmnopqrstuvwx', mailbox: 'alice@example.test', app_password: 'new-password', credential_id: 'new-credential', groupware_enabled: false, builders_enabled: false }));
+    vi.stubGlobal('fetch', fetcher);
+    expect((await POST(postRequest('https://inbox.example'))).status).toBe(303);
+    expect(mocks.encryptSession).toHaveBeenCalledWith('https://inbox.example', 'alice@example.test', 'new-password', expect.objectContaining({ credentialId: 'new-credential' }));
+    expect(fetcher).toHaveBeenLastCalledWith('https://relay.internal.example/webmail/app-passwords/old-credential', expect.objectContaining({ method: 'DELETE' }));
+    expect(mocks.cookieSet.mock.invocationCallOrder[0]).toBeLessThan(fetcher.mock.invocationCallOrder[1]);
   });
 
   it('serves only a no-store CSP bootstrap and never reflects a credential or code', async () => {
