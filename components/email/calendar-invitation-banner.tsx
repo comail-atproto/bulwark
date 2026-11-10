@@ -22,6 +22,7 @@ import { useTranslations, useFormatter } from 'next-intl';
 import { useRouter } from '@/i18n/navigation';
 import { isDocumentRTL } from '@/i18n/direction';
 import { useAuthStore } from '@/stores/auth-store';
+import { useShallow } from "zustand/react/shallow";
 import { useEmailStore } from '@/stores/email-store';
 import { useCalendarStore } from '@/stores/calendar-store';
 import { useSettingsStore } from '@/stores/settings-store';
@@ -32,14 +33,20 @@ import {
   getInvitationActorSummary,
   getInvitationTrustAssessment,
   formatEventSummary,
-  findParticipantByEmail,
+  formatInvitationSchedule,
+  findParticipantByEmails,
   extractMethodFromRawIcs,
+  type EventSummary,
   type InvitationMethod,
   type InvitationTrustAssessment,
 } from '@/lib/calendar-invitation';
+import { participantsAskedAgain } from '@/lib/calendar-participants';
+import { planCancellationRemoval, sameRecurrenceId, type CancellationRemoval } from '@/lib/calendar-cancellation';
 import { cn } from '@/lib/utils';
+import { getEventStartDate } from '@/lib/calendar-utils';
 import { sanitizeColor } from '@/components/calendar/event-card';
 import { RecipientPopover } from './recipient-popover';
+import { useCalendarErrorMessage } from '@/hooks/use-calendar-error-message';
 
 interface InvitationChangeItem {
   label: string;
@@ -148,6 +155,16 @@ function getTrustMessage(
         sender: trustAssessment.senderEmail ?? '',
         organizer: trustAssessment.organizerEmail ?? '',
       });
+    case 'attendee_mismatch':
+      return t('attendee_mismatch_info', {
+        sender: trustAssessment.senderEmail ?? '',
+        attendee: trustAssessment.attendeeEmail ?? '',
+      });
+    case 'attendee_mismatch_unverified':
+      return t('attendee_mismatch_unverified_info', {
+        sender: trustAssessment.senderEmail ?? '',
+        attendee: trustAssessment.attendeeEmail ?? '',
+      });
     default:
       return null;
   }
@@ -206,6 +223,20 @@ function getViewActionLabel(
   return t('view_in_calendar');
 }
 
+/**
+ * The event in the calendar a counter proposal is about. An attendee's
+ * proposal for one occurrence of a recurring meeting names that occurrence
+ * by its recurrence id, one for the whole meeting names none. Matched on the
+ * uid alone, the first event with it got the proposal - any occurrence in
+ * view. A proposal for a whole series of which only occurrences are in view
+ * has no event here, and is not applied to one of them.
+ */
+function counterTarget(events: CalendarEvent[], proposal: Partial<CalendarEvent>): CalendarEvent | null {
+  const sameUid = events.filter((event) => event.uid === proposal.uid);
+  if (!proposal.recurrenceId) return sameUid.find((event) => !event.recurrenceId) ?? null;
+  return sameUid.find((event) => sameRecurrenceId(event, proposal)) ?? null;
+}
+
 function buildProposalPatch(
   currentEvent: Partial<CalendarEvent> | null,
   proposedEvent: Partial<CalendarEvent> | null,
@@ -259,7 +290,7 @@ function buildInvitationChangeItems(
   t: ReturnType<typeof useTranslations>,
   currentEvent: Partial<CalendarEvent> | null,
   proposedEvent: Partial<CalendarEvent> | null,
-  formatDateTime: (dateStr: string | null) => string,
+  formatSchedule: (summary: EventSummary) => string,
 ): InvitationChangeItem[] {
   if (!currentEvent || !proposedEvent) {
     return [];
@@ -278,10 +309,10 @@ function buildInvitationChangeItems(
   }
 
   const currentSchedule = currentSummary.start
-    ? `${formatDateTime(currentSummary.start)}${currentSummary.end ? ` - ${formatDateTime(currentSummary.end)}` : ''}`
+    ? formatSchedule(currentSummary)
     : t('change_empty');
   const proposedSchedule = proposedSummary.start
-    ? `${formatDateTime(proposedSummary.start)}${proposedSummary.end ? ` - ${formatDateTime(proposedSummary.end)}` : ''}`
+    ? formatSchedule(proposedSummary)
     : t('change_empty');
   if (currentSchedule !== proposedSchedule && proposedSummary.start) {
     changes.push({
@@ -361,6 +392,7 @@ type BannerState = 'loading' | 'parsed' | 'rsvp-sent' | 'imported' | 'error';
 
 export function CalendarInvitationBanner({ email }: CalendarInvitationBannerProps) {
   const t = useTranslations('email_viewer.calendar_invitation');
+  const describeError = useCalendarErrorMessage();
   const format = useFormatter();
   const router = useRouter();
   const client = useAuthStore((s) => s.client);
@@ -386,10 +418,26 @@ export function CalendarInvitationBanner({ email }: CalendarInvitationBannerProp
   const viewedMailbox = viewMailboxes.find((m) => m.id === selectedMailboxId);
   const sharedOwnerAccountId = viewedMailbox?.isShared ? viewedMailbox.accountId : undefined;
   const blobAccountId = email.sourceAccountId ?? sharedOwnerAccountId ?? parseClient?.getAccountId();
-  const currentUserEmail = useAuthStore((s) => s.primaryIdentity?.email);
+  // Every address the user sends as, primary first: an invite may be
+  // addressed to an alias identity (#1283).
+  const identityEmails = useAuthStore(useShallow((s) => {
+    const emails = [s.primaryIdentity?.email, ...s.identities.map((identity) => identity.email)]
+      .filter((address): address is string => Boolean(address))
+      .map((address) => address.toLowerCase());
+    return Array.from(new Set(emails));
+  }));
   const calendarInvitationParsingEnabled = useSettingsStore((s) => s.calendarInvitationParsingEnabled);
   const timeFormat = useSettingsStore((s) => s.timeFormat);
-  const { calendars, supportsCalendar, importEvents, rsvpEvent, updateEvent, events: storeEvents, setSelectedDate } = useCalendarStore();
+  const { calendars, supportsCalendar, importEvents, rsvpEvent, updateEvent, deleteEvent, events: storeEvents, setSelectedDate } = useCalendarStore(useShallow((state) => ({
+    calendars: state.calendars,
+    supportsCalendar: state.supportsCalendar,
+    importEvents: state.importEvents,
+    rsvpEvent: state.rsvpEvent,
+    updateEvent: state.updateEvent,
+    deleteEvent: state.deleteEvent,
+    events: state.events,
+    setSelectedDate: state.setSelectedDate,
+  })));
 
   const [state, setState] = useState<BannerState>('loading');
   const [parsedEvent, setParsedEvent] = useState<Partial<CalendarEvent> | null>(null);
@@ -406,6 +454,9 @@ export function CalendarInvitationBanner({ email }: CalendarInvitationBannerProp
   // Underlying failure shown under the generic parse error, so "wrong account"
   // or a network failure is distinguishable from an unparsable file.
   const [parseError, setParseError] = useState<string | null>(null);
+  // What removing a cancelled meeting from the calendar takes, read from the
+  // events stored with its uid; null until known.
+  const [cancelRemoval, setCancelRemoval] = useState<CancellationRemoval | null>(null);
 
   const attachment = findCalendarAttachment(email);
 
@@ -497,12 +548,25 @@ export function CalendarInvitationBanner({ email }: CalendarInvitationBannerProp
     };
   }, [showCalendarPicker]);
 
+  const detectedMethod = parsedEvent && attachment ? getInvitationMethod(parsedEvent, { email, attachment }) : 'unknown';
+  const method = detectedMethod !== 'unknown' ? detectedMethod : rawIcsMethod;
+  const isCancellation = method === 'cancel';
+
+  useEffect(() => {
+    setCancelRemoval(null);
+    if (!client || !supportsCalendar || !isCancellation || !parsedEvent?.uid) return;
+    let current = true;
+    client.queryCalendarEvents({ uid: parsedEvent.uid })
+      .then((stored) => {
+        if (current) setCancelRemoval(planCancellationRemoval(stored, parsedEvent));
+      })
+      .catch(() => { /* no remove action then */ });
+    return () => { current = false; };
+  }, [client, supportsCalendar, isCancellation, parsedEvent]);
+
   if (!attachment || !calendarInvitationParsingEnabled) return null;
 
-  const detectedMethod = parsedEvent ? getInvitationMethod(parsedEvent, { email, attachment }) : 'unknown';
-  const method = detectedMethod !== 'unknown' ? detectedMethod : rawIcsMethod;
   const summary = parsedEvent ? formatEventSummary(parsedEvent) : null;
-  const isCancellation = method === 'cancel';
   const isResponseOnly = method === 'reply' || method === 'refresh' || method === 'counter' || method === 'declinecounter';
   const showDetails = !isCollapsed;
   const allowsRsvp = method === 'request';
@@ -512,12 +576,12 @@ export function CalendarInvitationBanner({ email }: CalendarInvitationBannerProp
     ? storeEvents.find((e) => e.uid === parsedEvent.uid)
     : null;
 
-  const currentUserParticipant = existingEvent && currentUserEmail
-    ? findParticipantByEmail(existingEvent, currentUserEmail)
+  const currentUserParticipant = existingEvent
+    ? findParticipantByEmails(existingEvent, identityEmails)
     : null;
 
-  const fallbackParsedParticipant = !currentUserParticipant && parsedEvent && currentUserEmail
-    ? findParticipantByEmail(parsedEvent, currentUserEmail)
+  const fallbackParsedParticipant = !currentUserParticipant && parsedEvent
+    ? findParticipantByEmails(parsedEvent, identityEmails)
     : null;
 
   const participantForUser = currentUserParticipant || fallbackParsedParticipant;
@@ -533,12 +597,11 @@ export function CalendarInvitationBanner({ email }: CalendarInvitationBannerProp
     || myParticipant?.participant.participationStatus
     || null;
   const userIsOrganizer = Boolean(isOnlyOrganizer);
-  const userIsSender = Boolean(
-    currentUserEmail && email.from?.[0]?.email?.toLowerCase() === currentUserEmail.toLowerCase()
-  );
+  const senderAddress = email.from?.[0]?.email?.toLowerCase();
+  const userIsSender = Boolean(senderAddress && identityEmails.includes(senderAddress));
   const bannerTitle = getBannerTitle(t, method);
   const bannerInfo = getBannerInfo(t, method, userIsOrganizer, supportsCalendar);
-  const trustAssessment = parsedEvent && !userIsSender ? getInvitationTrustAssessment(parsedEvent, email, method) : null;
+  const trustAssessment = parsedEvent && !userIsSender ? getInvitationTrustAssessment(parsedEvent, email, method, identityEmails) : null;
   const trustMessage = trustAssessment ? getTrustMessage(t, trustAssessment) : null;
   const participationLabel = getParticipationLabel(t, currentRsvp);
   const actorSummary = parsedEvent ? getInvitationActorSummary(parsedEvent, method) : null;
@@ -550,7 +613,26 @@ export function CalendarInvitationBanner({ email }: CalendarInvitationBannerProp
   // the import-then-find-participant flow for this case.
   const canRespond = supportsCalendar && allowsRsvp && !isResponseOnly && !userIsOrganizer
     && (Boolean(myParticipant) || method === 'request');
-  const proposalPatch = existingEvent && parsedEvent ? buildProposalPatch(existingEvent, parsedEvent) : null;
+  // A counter proposal applies to the occurrence it names, or to the meeting itself.
+  const proposalTarget = method === 'counter' && parsedEvent ? counterTarget(storeEvents, parsedEvent) : existingEvent;
+  const proposalPatch = proposalTarget && parsedEvent ? buildProposalPatch(proposalTarget, parsedEvent) : null;
+  // Applying a proposal sends it to every attendee. It has to come from one
+  // of the meeting's participants: anyone who learned the uid can write one,
+  // naming any attendee as the one proposing.
+  const proposalFromParticipant = Boolean(
+    proposalTarget && senderAddress && findParticipantByEmails(proposalTarget, [senderAddress]),
+  );
+  // A cancellation that fails authentication, or comes from someone other
+  // than the organizer without passing it, does not get to remove anything.
+  const canRemoveCancelled = Boolean(
+    client
+    && supportsCalendar
+    && isCancellation
+    && !userIsSender
+    && trustAssessment?.level !== 'warning'
+    && (cancelRemoval?.kind === 'delete' || cancelRemoval?.kind === 'exclude')
+  );
+  const cancellationOutdated = isCancellation && cancelRemoval?.kind === 'outdated';
 
   const resolveExistingEventForRsvp = async () => {
     if (!client || !existingEvent) {
@@ -590,8 +672,8 @@ export function CalendarInvitationBanner({ email }: CalendarInvitationBannerProp
       const eventForRsvp = existingEvent
         ? await resolveExistingEventForRsvp()
         : null;
-      const existingEventParticipant = eventForRsvp && currentUserEmail
-        ? findParticipantByEmail(eventForRsvp, currentUserEmail)
+      const existingEventParticipant = eventForRsvp
+        ? findParticipantByEmails(eventForRsvp, identityEmails)
         : null;
       const canFallbackToParsedParticipant = Boolean(
         existingEvent
@@ -599,7 +681,8 @@ export function CalendarInvitationBanner({ email }: CalendarInvitationBannerProp
         && (!eventForRsvp?.participants || Object.keys(eventForRsvp.participants).length === 0)
       );
       if (eventForRsvp && existingEventParticipant) {
-        await rsvpEvent(client, eventForRsvp.id, existingEventParticipant.id, status, replyToForRsvp);
+        // false: a plugin stopped it and said why; keep the old answer.
+        if (!(await rsvpEvent(client, eventForRsvp.id, existingEventParticipant.id, status, replyToForRsvp))) return;
         setRsvpStatus(status);
         setActionNotice(t('rsvp_sent'));
         setState('parsed');
@@ -609,7 +692,7 @@ export function CalendarInvitationBanner({ email }: CalendarInvitationBannerProp
         if (!repairedParticipants) {
           setActionError(t('action_failed'));
         } else {
-          await updateEvent(client, eventForRsvp.id, {
+          const updated = await updateEvent(client, eventForRsvp.id, {
             participants: repairedParticipants,
             // Stalwart routes the iTIP REPLY via the stored ORGANIZER
             // (organizerCalendarAddress; the RFC 8984 replyTo is retired).
@@ -618,6 +701,7 @@ export function CalendarInvitationBanner({ email }: CalendarInvitationBannerProp
               ? { organizerCalendarAddress: replyToForRsvp.imip }
               : {}),
           }, true);
+          if (!updated) return;
           setRsvpStatus(status);
           setActionNotice(t('rsvp_sent'));
           setState('parsed');
@@ -625,15 +709,18 @@ export function CalendarInvitationBanner({ email }: CalendarInvitationBannerProp
       } else if (eventForRsvp) {
         setActionError(t('action_failed'));
       } else if (calId) {
-        const imported = await importEvents(client, [parsedEvent], calId);
+        // A refusal (Stalwart 1.0's participant limit, say) lands in the
+        // catch below and is said as it is.
+        const imported = await importEvents(client, [parsedEvent], calId, { throwIfNoneImported: true });
+        if (imported === null) return;
         if (imported > 0) {
           const newEvent = useCalendarStore.getState().events.find(
             (e) => e.uid === parsedEvent.uid
           );
           const participant = myParticipant
-            || (newEvent && currentUserEmail ? findParticipantByEmail(newEvent, currentUserEmail) : null);
+            || (newEvent ? findParticipantByEmails(newEvent, identityEmails) : null);
           if (newEvent && participant) {
-            await rsvpEvent(client, newEvent.id, participant.id, status, replyToForRsvp);
+            if (!(await rsvpEvent(client, newEvent.id, participant.id, status, replyToForRsvp))) return;
             setRsvpStatus(status);
             setActionNotice(t('rsvp_sent'));
           } else {
@@ -648,20 +735,21 @@ export function CalendarInvitationBanner({ email }: CalendarInvitationBannerProp
       }
     } catch (err) {
       console.error('[CalendarInvitation] RSVP failed:', err);
-      setActionError(t('action_failed'));
+      setActionError(describeError(err, t('action_failed')));
     } finally {
       setIsProcessing(false);
     }
   };
 
   const handleViewInCalendar = () => {
-    const targetDate = existingEvent?.utcStart
-      || existingEvent?.start
-      || parsedEvent?.utcStart
-      || parsedEvent?.start;
-
-    if (targetDate) {
-      const parsedDate = new Date(targetDate);
+    const target = existingEvent?.start ? existingEvent : parsedEvent;
+    if (target?.start) {
+      const parsedDate = getEventStartDate({
+        start: target.start,
+        utcStart: target.utcStart ?? null,
+        showWithoutTime: target.showWithoutTime ?? false,
+        timeZone: target.timeZone,
+      });
       if (!Number.isNaN(parsedDate.getTime())) {
         setSelectedDate(parsedDate);
       }
@@ -681,57 +769,42 @@ export function CalendarInvitationBanner({ email }: CalendarInvitationBannerProp
     setActionError(null);
     setIsProcessing(true);
     try {
-      const count = await importEvents(client, [parsedEvent], calId);
+      const count = await importEvents(client, [parsedEvent], calId, { throwIfNoneImported: true });
+      if (count === null) return;
       if (count > 0) {
         setActionNotice(t('added'));
         setState('parsed');
       } else {
         setActionError(t('action_failed'));
       }
-    } catch {
-      setActionError(t('action_failed'));
+    } catch (err) {
+      setActionError(describeError(err, t('action_failed')));
     } finally {
       setIsProcessing(false);
     }
   };
 
-  const isAllDayEvent = parsedEvent?.showWithoutTime ?? false;
+  const formatSchedule = (eventSummary: EventSummary) => formatInvitationSchedule(
+    eventSummary,
+    (date, options) => format.dateTime(date, options),
+    timeFormat === '12h',
+  );
 
-  const formatDateTime = (dateStr: string | null) => {
-    if (!dateStr) return '';
-    const date = new Date(dateStr);
-    if (isNaN(date.getTime())) return dateStr;
-    if (isAllDayEvent) {
-      return format.dateTime(date, {
-        weekday: 'short',
-        month: 'short',
-        day: 'numeric',
-      });
-    }
-    return format.dateTime(date, {
-      weekday: 'short',
-      month: 'short',
-      day: 'numeric',
-      hour: 'numeric',
-      minute: '2-digit',
-      hour12: timeFormat === '12h',
-    });
-  };
-
-  const proposedChanges = method === 'counter' && existingEvent && parsedEvent
-    ? buildInvitationChangeItems(t, existingEvent, parsedEvent, formatDateTime)
+  const proposedChanges = method === 'counter' && proposalTarget && parsedEvent
+    ? buildInvitationChangeItems(t, proposalTarget, parsedEvent, formatSchedule)
     : [];
   const canApplyProposal = Boolean(
     client
-    && existingEvent?.id
+    && proposalTarget?.id
     && userIsOrganizer
     && method === 'counter'
     && proposalPatch
+    && proposalFromParticipant
   );
   const viewActionLabel = getViewActionLabel(t, method, userIsOrganizer);
 
   const handleApplyProposal = async () => {
-    if (!client || !existingEvent?.id || !proposalPatch || isProcessing) {
+    if (!client || !proposalTarget?.id || !proposalPatch || isProcessing) {
       return;
     }
 
@@ -740,12 +813,52 @@ export function CalendarInvitationBanner({ email }: CalendarInvitationBannerProp
     setIsProcessing(true);
 
     try {
-      await updateEvent(client, existingEvent.id, proposalPatch, true);
+      // A proposal for another time moves the event: its attendees are asked
+      // again, as the editor and a drag ask them (participantsAskedAgain).
+      const moves = (['start', 'duration', 'timeZone', 'showWithoutTime'] as const).some((key) => key in proposalPatch);
+      const participants = moves ? participantsAskedAgain(proposalTarget) : null;
+      if (!(await updateEvent(client, proposalTarget.id, participants ? { ...proposalPatch, participants } : proposalPatch, true))) return;
       setActionNotice(t('proposal_applied'));
       setState('parsed');
       setRsvpStatus(null);
-    } catch {
-      setActionError(t('action_failed'));
+    } catch (err) {
+      setActionError(describeError(err, t('action_failed')));
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const handleRemoveCancelled = async () => {
+    const cancel = parsedEvent;
+    if (!client || !cancel?.uid || isProcessing) return;
+    setActionNotice(null);
+    setActionError(null);
+    setIsProcessing(true);
+    try {
+      // Planned again on the events as they are now: the calendar may have
+      // changed since the mail was opened.
+      const removal = planCancellationRemoval(await client.queryCalendarEvents({ uid: cancel.uid }), cancel);
+      setCancelRemoval(removal);
+      // No scheduling messages: the organizer cancelled it, there is no one
+      // to tell.
+      if (removal.kind === 'delete') {
+        for (const id of removal.ids) {
+          if (!(await deleteEvent(client, id, false))) return;
+        }
+      } else if (removal.kind === 'exclude') {
+        if (!(await updateEvent(client, removal.id, removal.patch, false))) return;
+      } else {
+        return;
+      }
+      // Occurrences of it in view go as well.
+      useCalendarStore.setState((s) => ({
+        events: s.events.filter((event) => event.uid !== cancel.uid
+          || (Boolean(cancel.recurrenceId) && !sameRecurrenceId(event, cancel))),
+      }));
+      setCancelRemoval({ kind: 'none' });
+      setActionNotice(t('removed_from_calendar'));
+    } catch (err) {
+      setActionError(describeError(err, t('action_failed')));
     } finally {
       setIsProcessing(false);
     }
@@ -833,7 +946,7 @@ export function CalendarInvitationBanner({ email }: CalendarInvitationBannerProp
         {/* Eyebrow + title + collapse */}
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0 flex-1">
-            <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            <div className="text-[0.6875rem] font-semibold text-muted-foreground">
               {bannerTitle}
             </div>
             {summary?.title && (
@@ -848,7 +961,7 @@ export function CalendarInvitationBanner({ email }: CalendarInvitationBannerProp
 
           <div className="flex items-center gap-1.5 flex-shrink-0">
             {parsedEvent?.sequence != null && parsedEvent.sequence > 0 && (
-              <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground whitespace-nowrap">
+              <span className="rounded-full bg-muted px-2 py-0.5 text-[0.625rem] font-medium text-muted-foreground whitespace-nowrap">
                 {t('event_updated', { sequence: parsedEvent.sequence })}
               </span>
             )}
@@ -874,8 +987,7 @@ export function CalendarInvitationBanner({ email }: CalendarInvitationBannerProp
               <span className="flex items-center gap-1.5 min-w-0">
                 <Clock className="w-3.5 h-3.5 flex-shrink-0" />
                 <span className="truncate">
-                  {formatDateTime(summary.start)}
-                  {summary.end && ` – ${formatDateTime(summary.end)}`}
+                  {formatSchedule(summary)}
                 </span>
               </span>
             )}
@@ -886,7 +998,7 @@ export function CalendarInvitationBanner({ email }: CalendarInvitationBannerProp
               </span>
             )}
             {summary.attendeeCount > 0 && (
-              <span className="text-muted-foreground/80">{t('attendees', { count: summary.attendeeCount })}</span>
+              <span className="text-muted-foreground">{t('attendees', { count: summary.attendeeCount })}</span>
             )}
           </div>
         )}
@@ -913,7 +1025,7 @@ export function CalendarInvitationBanner({ email }: CalendarInvitationBannerProp
           <div className="flex flex-wrap items-center gap-1.5">
             {parsedEvent?.status && parsedEvent.status !== 'confirmed' && (
               <span className={cn(
-                "rounded-full px-2 py-0.5 text-[11px] font-medium",
+                "rounded-full px-2 py-0.5 text-[0.6875rem] font-medium",
                 parsedEvent.status === 'cancelled'
                   ? "bg-destructive/15 text-destructive"
                   : "bg-warning/15 text-warning",
@@ -922,25 +1034,25 @@ export function CalendarInvitationBanner({ email }: CalendarInvitationBannerProp
               </span>
             )}
             {existingEvent && (
-              <span className="rounded-full bg-success/15 px-2 py-0.5 text-[11px] font-medium text-success">
+              <span className="rounded-full bg-success/15 px-2 py-0.5 text-[0.6875rem] font-medium text-success">
                 {t('already_in_calendar')}
               </span>
             )}
             {userIsOrganizer && (
-              <span className="rounded-full bg-info/15 px-2 py-0.5 text-[11px] font-medium text-info">
+              <span className="rounded-full bg-info/15 px-2 py-0.5 text-[0.6875rem] font-medium text-info">
                 {t('organizer_role')}
               </span>
             )}
             {participationLabel && myParticipant && (
               <span className={cn(
-                'rounded-full px-2 py-0.5 text-[11px] font-medium',
+                'rounded-full px-2 py-0.5 text-[0.6875rem] font-medium',
                 getParticipationTone(currentRsvp),
               )}>
                 {t('your_response', { status: participationLabel })}
               </span>
             )}
             {actionNotice && (
-              <span className="rounded-full bg-success/15 px-2 py-0.5 text-[11px] font-medium text-success">
+              <span className="rounded-full bg-success/15 px-2 py-0.5 text-[0.6875rem] font-medium text-success">
                 {actionNotice}
               </span>
             )}
@@ -951,6 +1063,7 @@ export function CalendarInvitationBanner({ email }: CalendarInvitationBannerProp
         {showDetails && (bannerInfo || actorMessage || actorSummary?.participationComment) && (
           <div className="space-y-0.5 text-xs text-muted-foreground">
             {bannerInfo && <p className="leading-relaxed">{bannerInfo}</p>}
+            {cancellationOutdated && <p className="leading-relaxed">{t('cancel_outdated')}</p>}
             {actorMessage && <p>{actorMessage}</p>}
             {actorSummary?.participationComment && (
               <p className="italic">{t('actor_note', { comment: actorSummary.participationComment })}</p>
@@ -1104,6 +1217,17 @@ export function CalendarInvitationBanner({ email }: CalendarInvitationBannerProp
                 document.body,
               )}
             </>
+          )}
+
+          {canRemoveCancelled && (
+            <button
+              onClick={handleRemoveCancelled}
+              disabled={isProcessing}
+              className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-destructive px-3 py-1.5 rounded-md border border-border hover:border-destructive/30 hover:bg-destructive/10 transition-colors min-h-[36px] disabled:opacity-50"
+            >
+              <CalendarX className="w-3.5 h-3.5" />
+              {t('remove_from_calendar')}
+            </button>
           )}
 
           {canApplyProposal && (

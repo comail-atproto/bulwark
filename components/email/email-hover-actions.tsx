@@ -1,16 +1,19 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Email } from "@/lib/jmap/types";
 import { useSettingsStore } from "@/stores/settings-store";
 import type { HoverAction } from "@/stores/settings-store";
 import { cn } from "@/lib/utils";
 import { Trash2, Star, Mail, MailOpen, Archive, Tag, ShieldAlert, ShieldCheck } from "@/components/icons";
+import { useArchiveActionEnabled, withoutArchiveIfOff } from "@/lib/archive-gate";
 import { useTranslations } from "next-intl";
 import { useIsMobile } from "@/hooks/use-media-query";
 import { TagPicker } from "@/components/email/tag-picker";
+import { useEmailTagScope } from "@/hooks/use-account-tags";
 import { getEmailTagIds } from "@/lib/thread-utils";
+import { PluginActions, useMessageActionTarget, usePluginActions } from "@/components/plugins/plugin-actions";
 
 interface EmailHoverActionsProps {
   email: Email;
@@ -27,6 +30,13 @@ interface EmailHoverActionsProps {
   onUndoSpam?: () => void;
   // Hidden where marking spam is meaningless for self-authored mail (Drafts, Sent).
   spamApplicable?: boolean;
+  /** Role of the folder the row is listed in; plugin buttons can be limited to some. */
+  mailboxRole?: string | null;
+  /**
+   * Keep the actions on the row's first 40px line rather than centred on the
+   * whole row, as Gmail does when attachment chips make the row taller.
+   */
+  pinToFirstLine?: boolean;
 }
 
 const ACTION_CONFIG: Record<HoverAction, {
@@ -37,34 +47,50 @@ const ACTION_CONFIG: Record<HoverAction, {
   delete: {
     icon: Trash2,
     titleKey: "delete",
-    className: "hover:text-red-600 dark:hover:text-red-400",
+    className: "hover:text-destructive",
   },
   star: {
     icon: Star,
     titleKey: "star",
-    className: "hover:text-amber-500 dark:hover:text-amber-400",
+    className: "hover:text-foreground",
   },
   markRead: {
     icon: Mail,
     titleKey: "mark_read",
-    className: "hover:text-blue-600 dark:hover:text-blue-400",
+    className: "hover:text-foreground",
   },
   archive: {
     icon: Archive,
     titleKey: "archive",
-    className: "hover:text-green-600 dark:hover:text-green-400",
+    className: "hover:text-foreground",
   },
   tag: {
     icon: Tag,
     titleKey: "tag",
-    className: "hover:text-purple-600 dark:hover:text-purple-400",
+    className: "hover:text-foreground",
   },
   spam: {
     icon: ShieldAlert,
     titleKey: "spam",
-    className: "hover:text-orange-600 dark:hover:text-orange-400",
+    className: "hover:text-foreground",
   },
 };
+
+/** The quick actions as shipped, before the user reorders them. */
+const DEFAULT_HOVER_ACTIONS: readonly HoverAction[] = ['delete', 'star', 'markRead', 'archive'];
+/** Gmail's row actions, in Gmail's order. */
+const MOUNTAIN_VIEW_HOVER_ACTIONS: readonly HoverAction[] = ['archive', 'delete', 'markRead'];
+
+/**
+ * The actions a Mountain View row shows on hover: Gmail's set while the user
+ * has not chosen their own, and never the star, which the row already leads
+ * with.
+ */
+export function mountainViewHoverActions(configured: readonly HoverAction[]): HoverAction[] {
+  const isDefault = configured.length === DEFAULT_HOVER_ACTIONS.length
+    && configured.every((action, i) => action === DEFAULT_HOVER_ACTIONS[i]);
+  return (isDefault ? MOUNTAIN_VIEW_HOVER_ACTIONS : configured).filter((action) => action !== 'star');
+}
 
 const CORNER_CLASSES = {
   'top-right': 'top-1 right-1',
@@ -89,12 +115,28 @@ export function EmailHoverActions({
   isInJunk = false,
   onUndoSpam,
   spamApplicable = true,
+  mailboxRole = null,
+  pinToFirstLine = false,
 }: EmailHoverActionsProps) {
-  const hoverActions = useSettingsStore((state) => state.hoverActions);
+  const tagScope = useEmailTagScope(email);
+  const configuredHoverActions = useSettingsStore((state) => state.hoverActions);
+  const mountainView = useSettingsStore((state) => state.interfaceLayout === 'mountain-view');
+  const archiveActionEnabled = useArchiveActionEnabled();
+  const hoverActions = withoutArchiveIfOff(
+    mountainView ? mountainViewHoverActions(configuredHoverActions) : configuredHoverActions,
+    archiveActionEnabled,
+  );
   const hoverActionsMode = useSettingsStore((state) => state.hoverActionsMode);
   const hoverActionsCorner = useSettingsStore((state) => state.hoverActionsCorner);
-  const t = useTranslations("settings.email_behavior.hover_actions");
+  // The words the row's menu uses for the same actions (R10).
+  const t = useTranslations("context_menu");
   const isMobile = useIsMobile();
+  // Buttons plugins add to the row (message-row-actions), after the app's own.
+  const pluginTarget = useMessageActionTarget(email);
+  const pluginActionCount = usePluginActions("message-row-actions", {
+    mailboxRole, accountKind: pluginTarget.accountKind, keywords: pluginTarget.keywords,
+  }).length;
+  const pluginContext = useMemo(() => ({ emailId: email.id }), [email.id]);
 
   // The tag quick-action opens the same picker the context menu and the reading
   // pane use. It is portalled to the body because every row sits inside a
@@ -141,7 +183,7 @@ export function EmailHoverActions({
   const hoverBackgroundClassName = backgroundClassName;
 
   if (isMobile) return null;
-  if (hoverActions.length === 0) return null;
+  if (hoverActions.length === 0 && pluginActionCount === 0) return null;
 
   const handleAction = (e: React.MouseEvent, action: HoverAction) => {
     e.stopPropagation();
@@ -203,9 +245,13 @@ export function EmailHoverActions({
         : isNotSpam
           ? ShieldCheck
           : Icon;
-    const title = isNotSpam ? t("not_spam") : t(config.titleKey);
+    const title = isNotSpam ? t("not_spam")
+      : actionId === "markRead" ? t(isUnread ? "mark_read" : "mark_unread")
+      : actionId === "star" ? t(isStarred ? "unstar" : "star")
+      : actionId === "spam" ? t("mark_as_spam")
+      : t(config.titleKey);
     const className = isNotSpam
-      ? "hover:text-green-600 dark:hover:text-green-400"
+      ? "hover:text-foreground"
       : config.className;
 
     return (
@@ -216,22 +262,37 @@ export function EmailHoverActions({
         onClick={(e) => handleAction(e, actionId)}
         onDoubleClick={(e) => { e.stopPropagation(); e.preventDefault(); }}
         title={title}
+        aria-label={title}
         aria-haspopup={actionId === "tag" ? "menu" : undefined}
         aria-expanded={actionId === "tag" ? tagPickerPos !== null : undefined}
         className={cn(
-          "p-1.5 rounded-md transition-colors duration-100 text-muted-foreground hover:bg-black/5 dark:hover:bg-white/10",
-          className,
+          "transition-colors duration-100 text-muted-foreground hover:bg-black/5 dark:hover:bg-white/10",
+          // Gmail's are round 40px targets that darken rather than change hue.
+          mountainView ? "p-2 rounded-full hover:text-foreground" : cn("p-1.5 rounded-md", className),
         )}
       >
         <DisplayIcon
           className={cn(
-            "w-4 h-4",
+            mountainView ? "w-5 h-5" : "w-4 h-4",
             actionId === "star" && isStarred && "fill-amber-400 text-amber-400",
           )}
         />
       </button>
     );
   });
+  if (pluginActionCount > 0) {
+    actionButtons.push(
+      <PluginActions
+        key="plugin-actions"
+        surface="message-row-actions"
+        context={pluginContext}
+        target={pluginTarget}
+        mailboxRole={mailboxRole}
+        compact
+        className="flex-nowrap gap-0.5"
+      />,
+    );
+  }
 
   const tagPicker =
     tagPickerPos && onSetTag
@@ -247,6 +308,7 @@ export function EmailHoverActions({
           >
             <TagPicker
               selectedIds={currentTagIds}
+              scope={tagScope}
               onToggle={(tagId) => onSetTag(tagId)}
             />
           </div>,
@@ -256,7 +318,10 @@ export function EmailHoverActions({
 
   // While the picker is open the row is no longer hovered, so the toolbar has to
   // stay mounted and visible or the picker would close under its own anchor.
-  const visibilityClass = tagPickerPos ? "flex" : "hidden group-hover:flex";
+  // Shown on keyboard focus too (R7), not only on hover. Only a control inside
+  // the row counts, and only from the keyboard: a click focuses the row itself
+  // (or the button clicked), and focus-within kept the toolbar on the open row.
+  const visibilityClass = tagPickerPos ? "flex" : "hidden group-hover:flex group-has-[:focus-visible]:flex";
 
   if (hoverActionsMode === 'floating') {
     return (
@@ -280,7 +345,7 @@ export function EmailHoverActions({
 
   return (
     <div
-      className={cn("absolute end-0 top-0 bottom-0 z-10 items-center", visibilityClass)}
+      className={cn("absolute end-0 top-0 z-10 items-center", pinToFirstLine ? "h-10" : "bottom-0", visibilityClass)}
     >
       <div
         className={cn(
