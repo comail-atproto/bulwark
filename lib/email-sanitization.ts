@@ -57,6 +57,25 @@ export function sanitizeEmailHtml(html: string): string {
   return sanitizeWithDataUriGuard(html, EMAIL_SANITIZE_CONFIG);
 }
 
+const COMPOSER_ISLAND_SANITIZE_CONFIG = {
+  ...EMAIL_SANITIZE_CONFIG,
+  // The composer's own markers (data-cid on inline images, the signature's
+  // data-signature-block brackets) must survive; data-* is inert.
+  ALLOW_DATA_ATTR: true,
+};
+
+/**
+ * Sanitize the verbatim HTML a composer island (quoted original, signature)
+ * picks up when the editor parses its wrapper. The islands render into the
+ * app document, not the sandboxed viewer frame, and their wrapper reaches
+ * the editor from places that never ran a sanitizer: a re-opened draft
+ * written by another client or another member of a shared mailbox, a paste.
+ */
+export function sanitizeComposerIslandHtml(html: string): string {
+  if (!html) return '';
+  return sanitizeWithDataUriGuard(html, COMPOSER_ISLAND_SANITIZE_CONFIG);
+}
+
 /**
  * Sanitize config for emails rendered inside a sandboxed iframe.
  * Allows <style> tags because CSS is scoped to the iframe document and
@@ -87,10 +106,15 @@ export function sanitizeEmailHtmlForIframe(html: string): string {
  * `@font-face`). cid: parts are rewritten to blob: URLs beforehand, so they
  * survive the strict variant.
  */
-export function emailIframeCsp(externalBlocked: boolean): string {
+export function emailIframeCsp(externalBlocked: boolean, appFontSources: readonly string[] = []): string {
+  // The folders of the app's own bundled fonts (Settings > Accessibility, mail
+  // in the app's font). A path, never the whole origin: a mail must not be able
+  // to make requests to the app's other URLs.
+  const appFonts = appFontSources.filter((src) => /^https?:\/\/[^\s;,'"]+\/$/.test(src));
+  const fontSrc = ['data:', ...appFonts].join(' ');
   return externalBlocked
-    ? "default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:; media-src data: blob:; base-uri 'none'; form-action 'none'; frame-src 'none'"
-    : "default-src 'none'; img-src data: blob: http: https:; style-src 'unsafe-inline'; font-src data: http: https:; media-src data: blob: http: https:; base-uri 'none'; form-action 'none'; frame-src 'none'";
+    ? `default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; font-src ${fontSrc}; media-src data: blob:; base-uri 'none'; form-action 'none'; frame-src 'none'`
+    : `default-src 'none'; img-src data: blob: http: https:; style-src 'unsafe-inline'; font-src ${fontSrc} http: https:; media-src data: blob: http: https:; base-uri 'none'; form-action 'none'; frame-src 'none'`;
 }
 
 /** Outcome of {@link sanitizeEmailBodyForIframe}. */
@@ -252,11 +276,40 @@ export function sanitizeSignatureHtmlForDisplay(html: string): string {
  *
  * An untrusted plugin runs in a null-origin iframe, but whatever it returns
  * here lands in the host document and in the message the user then sends, so
- * it gets the same allowlist as a user-authored signature: formatting, links,
+ * it gets the allowlist of a user-authored signature: formatting, links,
  * images and tables, no script, no event handlers, no external URI schemes.
+ * Plus the structure the composer itself can write (lists, quotes, headings,
+ * code), so a plugin's list of links or rewritten paragraph keeps its shape.
  */
+const PLUGIN_BODY_SANITIZE_CONFIG = {
+  ...SIGNATURE_SANITIZE_CONFIG,
+  ALLOWED_TAGS: [...SIGNATURE_SANITIZE_CONFIG.ALLOWED_TAGS, 'ul', 'ol', 'li', 'blockquote', 'h1', 'h2', 'h3', 'pre', 'code', 's', 'hr'],
+};
+
+/**
+ * Drop images in plugin-authored HTML unless they are embedded. A plugin's
+ * network reach is its manifest's `httpOrigins`, enforced by the sandbox
+ * CSP; an `https:` image the host page then loads for it is a request to
+ * any origin, carrying whatever the plugin put in the URL. A user's own
+ * signature may keep remote images (restrictSignatureImages); a plugin's
+ * text may not.
+ */
+function restrictPluginImages(node: Element): void {
+  if (node.tagName !== 'IMG') return;
+  const src = node.getAttribute('src');
+  if (!src || !/^(?:cid:|data:image\/(?:png|jpe?g|gif|webp);base64,)/i.test(src)) {
+    node.remove();
+  }
+}
+
 export function sanitizePluginBodyHtml(html: string): string {
-  return sanitizeSignatureHtml(html);
+  if (!html?.trim()) return '';
+  DOMPurify.addHook('afterSanitizeAttributes', restrictPluginImages);
+  try {
+    return DOMPurify.sanitize(html, PLUGIN_BODY_SANITIZE_CONFIG);
+  } finally {
+    DOMPurify.removeAllHooks();
+  }
 }
 
 /**
@@ -807,7 +860,9 @@ export function plainTextToSafeHtml(text: string, linkClass = ''): string {
  * and hides it if it contains no meaningful visible content.
  */
 export function collapseBlockedImageContainers(html: string): string {
-  const doc = parseHtmlSafely(html);
+  // Wrapped in <body> so a leading <style> stays in the body instead of being
+  // hoisted into <head>, where body.innerHTML below would drop it.
+  const doc = parseHtmlSafely(`<body>${html}</body>`);
   const blockedImages = doc.querySelectorAll('img[data-blocked-src]');
 
   blockedImages.forEach((img) => {

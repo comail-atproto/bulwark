@@ -41,6 +41,47 @@ function hasDkimPass(auth: AuthenticationResults): boolean {
   return auth.dkim?.result === 'pass' || !!auth.dkim?.all?.some((entry) => entry.result === 'pass');
 }
 
+/**
+ * Whether `candidate` is the From domain or a parent/child of it: the
+ * relaxed alignment DMARC applies, without a public-suffix list.
+ */
+function alignedWith(fromDomain: string, candidate: string | undefined): boolean {
+  const other = candidate ? domainOf(`@${candidate}`) : undefined;
+  if (!other) return false;
+  return other === fromDomain || other.endsWith(`.${fromDomain}`) || fromDomain.endsWith(`.${other}`);
+}
+
+/**
+ * An SPF pass for the MAIL FROM identity whose domain aligns with the From
+ * domain. Any sender can pass SPF for a domain of their own and still write
+ * someone else's address in From; only an aligned pass says anything about
+ * the visible sender. A HELO pass never does.
+ */
+function hasAlignedSpfPass(auth: AuthenticationResults, fromDomain: string): boolean {
+  if (auth.spf?.all) {
+    return auth.spf.all.some((entry) => entry.identity !== 'helo' && entry.result === 'pass' && alignedWith(fromDomain, entry.domain));
+  }
+  return auth.spf?.result === 'pass' && alignedWith(fromDomain, auth.spf.domain);
+}
+
+/** A DKIM pass for a signing domain that aligns with the From domain. */
+function hasAlignedDkimPass(auth: AuthenticationResults, fromDomain: string): boolean {
+  const entries = auth.dkim?.all ?? (auth.dkim ? [auth.dkim] : []);
+  return entries.some((entry) => entry.result === 'pass' && alignedWith(fromDomain, entry.domain));
+}
+
+/**
+ * Whether the receiving server's checks tie the message to the visible From
+ * domain: an aligned DMARC, SPF or DKIM pass. Shared by the sender
+ * verification notice and the calendar invitation trust assessment.
+ */
+export function hasAlignedAuthenticationPass(auth: AuthenticationResults | undefined, fromEmail: string | undefined): boolean {
+  if (!auth || !fromEmail) return false;
+  const domain = domainOf(fromEmail);
+  if (!domain) return false;
+  return auth.dmarc?.result === 'pass' || hasAlignedSpfPass(auth, domain) || hasAlignedDkimPass(auth, domain);
+}
+
 function domainOf(address: string): string | undefined {
   const domain = address.slice(address.lastIndexOf('@') + 1).trim().toLowerCase().replace(/\.$/, '');
   return /^[^\s<>@]+\.[^\s<>@]+$/.test(domain) ? domain : undefined;
@@ -79,14 +120,68 @@ export function getSenderVerification(
   // DMARC only counts the MAIL FROM identity; a HELO pass proves nothing
   // about who wrote the message.
   const mailFrom = auth.spf?.all?.find((entry) => entry.identity === 'mailfrom');
-  const spfPass = auth.spf?.all ? mailFrom?.result === 'pass' : auth.spf?.result === 'pass';
   const envelope = mailFrom?.domain ?? auth.spf?.domain;
   const envelopeDomain = envelope ? domainOf(envelope) : undefined;
   const sentFrom = envelopeDomain && envelopeDomain !== domain ? envelopeDomain : undefined;
 
   if (isAuthenticationSpoofed(auth)) return { status: 'failed', domain, sentFrom };
-  if (auth.dmarc?.result === 'pass' || spfPass || hasDkimPass(auth)) return null;
+  // Only a pass that aligns with the From domain counts: `spf=pass` for the
+  // sender's own envelope domain under someone else's From is the forgery
+  // this notice exists for, and a DKIM signature by a third domain is no
+  // better. The DMARC verdict is `none` in both cases (no policy published).
+  if (hasAlignedAuthenticationPass(auth, fromEmail)) return null;
   return { status: 'unverified', domain, sentFrom };
+}
+
+/**
+ * `with` protocols (RFC 3848) that record an authenticated submission: the
+ * client handed the message in after logging in, so whatever
+ * Authentication-Results it carries below that hop are the client's own text.
+ */
+const SUBMISSION_PROTOCOL_RE = /\bwith\s+(?:UTF8)?(?:E?SMTP|LMTP)S?A\b/i;
+
+/**
+ * Whether the topmost Authentication-Results header looks like it was
+ * written by a server that received the message, rather than by whoever
+ * composed it. A receiving server writes its Received line first and its
+ * Authentication-Results below it (Stalwart and Gmail both do), so: a
+ * Received header must sit above the topmost Authentication-Results, and the
+ * nearest one must not record an authenticated submission. Takes the headers
+ * in message order.
+ *
+ * This only catches a forged header on its own. Stalwart (0.16 and 1.0)
+ * keeps both headers when a signed-in user writes them into a mail they
+ * submit over JMAP, and adds nothing above them, so a forged Received line
+ * followed by a forged "dkim=pass" arrives exactly like mail from outside.
+ * Only the server can tell them apart.
+ */
+export function authenticationResultsOnReceipt(headers: readonly { name: string; value: string }[]): boolean {
+  const index = headers.findIndex((header) => header.name.toLowerCase() === 'authentication-results');
+  if (index < 0) return false;
+  for (let i = index - 1; i >= 0; i--) {
+    if (headers[i].name.toLowerCase() !== 'received') continue;
+    return !SUBMISSION_PROTOCOL_RE.test(headers[i].value);
+  }
+  return false;
+}
+
+/**
+ * The From domain whose BIMI logo this message may show, or undefined. BIMI
+ * needs a DMARC pass for the very domain in From: an aligned SPF or DKIM
+ * pass without a DMARC verdict isn't enough, and neither is a pass that the
+ * receiving server recorded for another header.from. Whether the domain
+ * enforces DMARC and publishes a logo is /api/bimi's to find out.
+ */
+export function brandIndicatorDomain(
+  email: { from?: { email?: string | null }[] | null; authenticationResults?: AuthenticationResults } | undefined,
+): string | undefined {
+  const auth = email?.authenticationResults;
+  const fromEmail = email?.from?.[0]?.email ?? undefined;
+  if (!auth?.dmarc || auth.dmarc.result !== 'pass' || !fromEmail) return undefined;
+  const domain = domainOf(fromEmail);
+  if (!domain || isAuthenticationSpoofed(auth)) return undefined;
+  const checked = auth.dmarc.domain ? domainOf(`@${auth.dmarc.domain}`) : domain;
+  return checked === domain ? domain : undefined;
 }
 
 interface ResInfo {
@@ -184,6 +279,11 @@ const DMARC_SEVERITY: Record<string, number> = {
  * DKIM, DMARC and iprev come from the topmost header only, and the others
  * can only escalate SPF to a failure, never supply a pass.
  */
+function identityDomain(identity: string | undefined): string | undefined {
+  const at = identity?.lastIndexOf('@') ?? -1;
+  return identity && at >= 0 && at < identity.length - 1 ? identity.slice(at + 1) : undefined;
+}
+
 export function parseAuthenticationResults(headers: string | readonly string[]): AuthenticationResults {
   const results: AuthenticationResults = {};
   const list = typeof headers === 'string' ? [headers] : headers;
@@ -241,7 +341,9 @@ export function parseAuthenticationResults(headers: string | readonly string[]):
     .filter((info) => info.method === 'dkim')
     .map((info) => ({
       result: info.result as DkimResult,
-      domain: info.props['header.d'],
+      // Some receivers name the signature only by its identity (`header.i`,
+      // `@domain` or `user@domain`, RFC 8601 2.7.1); its domain is the signer's.
+      domain: info.props['header.d'] ?? identityDomain(info.props['header.i']),
       selector: info.props['header.s'],
     }));
   if (dkimResults.length > 0) {
