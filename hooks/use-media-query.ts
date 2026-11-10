@@ -2,9 +2,10 @@
 
 import { useCallback, useEffect, useSyncExternalStore } from "react";
 import { useUIStore } from "@/stores/ui-store";
+import { useShallow } from "zustand/react/shallow";
 import { usePaneSize } from "@/hooks/use-pane-size";
 
-// Tailwind v4 breakpoints
+// Tailwind v4 breakpoints, in px at the default 16px text size.
 const BREAKPOINTS = {
   sm: 640,
   md: 768,
@@ -14,6 +15,23 @@ const BREAKPOINTS = {
 } as const;
 
 const getMediaQueryServerSnapshot = () => false;
+
+/**
+ * The media query for "narrower than `px`" in rem, as Tailwind writes its own
+ * breakpoints (`max-md:` is `width < 48rem`). A rem in a media query is the
+ * browser's default text size, so someone who sets a larger default (say
+ * 32px) gets the layout the CSS draws at that size: a 1440px window then
+ * counts as a phone in both, instead of the scripts choosing the desktop
+ * panes while the CSS hides them.
+ */
+export function narrowerThan(px: number): string {
+  return `(width < ${px / 16}rem)`;
+}
+
+/** The media query for "at least `px` wide", in rem (see narrowerThan). */
+export function atLeast(px: number): string {
+  return `(width >= ${px / 16}rem)`;
+}
 
 /**
  * SSR-safe media query hook. On SSR and the first hydration pass we report
@@ -68,15 +86,13 @@ function classifyPane(paneWidth: number | null) {
  * it directly (mobile navigation helpers etc.).
  */
 export function useDeviceDetection() {
-  const { setDeviceType, isMobile, isTablet, isDesktop } = useUIStore();
+  const { setDeviceType, isMobile, isTablet, isDesktop } = useUIStore(useShallow((state) => ({ setDeviceType: state.setDeviceType, isMobile: state.isMobile, isTablet: state.isTablet, isDesktop: state.isDesktop })));
   const paneWidth = usePaneSize();
   const paneClassification = classifyPane(paneWidth);
 
-  const isMobileQuery = useMediaQuery(`(max-width: ${BREAKPOINTS.md - 1}px)`);
-  const isTabletQuery = useMediaQuery(
-    `(min-width: ${BREAKPOINTS.md}px) and (max-width: ${BREAKPOINTS.lg - 1}px)`
-  );
-  const isDesktopQuery = useMediaQuery(`(min-width: ${BREAKPOINTS.lg}px)`);
+  const isMobileQuery = useMediaQuery(narrowerThan(BREAKPOINTS.md));
+  const isTabletQuery = useMediaQuery(`${atLeast(BREAKPOINTS.md)} and ${narrowerThan(BREAKPOINTS.lg)}`);
+  const isDesktopQuery = useMediaQuery(atLeast(BREAKPOINTS.lg));
 
   useEffect(() => {
     if (paneClassification) return;
@@ -92,28 +108,12 @@ export function useDeviceDetection() {
  */
 export function useIsMobile() {
   const paneWidth = usePaneSize();
-  const viewport = useMediaQuery(`(max-width: ${BREAKPOINTS.md - 1}px)`);
+  const viewport = useMediaQuery(narrowerThan(BREAKPOINTS.md));
   return paneWidth !== null ? paneWidth < BREAKPOINTS.md : viewport;
-}
-
-export function useIsTablet() {
-  const paneWidth = usePaneSize();
-  const viewport = useMediaQuery(
-    `(min-width: ${BREAKPOINTS.md}px) and (max-width: ${BREAKPOINTS.lg - 1}px)`
-  );
-  return paneWidth !== null
-    ? paneWidth >= BREAKPOINTS.md && paneWidth < BREAKPOINTS.lg
-    : viewport;
 }
 
 export function useIsDesktop() {
   const paneWidth = usePaneSize();
-  const viewport = useMediaQuery(`(min-width: ${BREAKPOINTS.lg}px)`);
+  const viewport = useMediaQuery(atLeast(BREAKPOINTS.lg));
   return paneWidth !== null ? paneWidth >= BREAKPOINTS.lg : viewport;
-}
-
-export function useBreakpoint(breakpoint: keyof typeof BREAKPOINTS) {
-  const paneWidth = usePaneSize();
-  const viewport = useMediaQuery(`(min-width: ${BREAKPOINTS[breakpoint]}px)`);
-  return paneWidth !== null ? paneWidth >= BREAKPOINTS[breakpoint] : viewport;
 }

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
+import { scrollBehavior } from "@/lib/reduced-motion";
 
 export type ScrollAxis = "vertical" | "horizontal";
 export type ScrollWindowSide = "start" | "end";
@@ -19,13 +20,13 @@ export function setScrollStart(el: HTMLElement, axis: ScrollAxis, value: number)
   el.scrollLeft = getComputedStyle(el).direction === "rtl" ? -value : value;
 }
 
-/** Smoothly scrolls to a logical start offset (RTL-aware). */
+/** Smoothly scrolls to a logical start offset (RTL-aware), at once when motion is reduced. */
 export function scrollToStart(el: HTMLElement, axis: ScrollAxis, value: number): void {
   if (axis === "vertical") {
-    el.scrollTo({ top: value, behavior: "smooth" });
+    el.scrollTo({ top: value, behavior: scrollBehavior() });
     return;
   }
-  el.scrollTo({ left: getComputedStyle(el).direction === "rtl" ? -value : value, behavior: "smooth" });
+  el.scrollTo({ left: getComputedStyle(el).direction === "rtl" ? -value : value, behavior: scrollBehavior() });
 }
 
 function scrollSize(el: HTMLElement, axis: ScrollAxis): number {
