@@ -3,8 +3,10 @@ import { configManager } from '@/lib/admin/config-manager';
 import { requireAdminAuth, getClientIP } from '@/lib/admin/session';
 import { auditLog } from '@/lib/admin/audit';
 import { logger } from '@/lib/logger';
-import { POLICY_SCOPE_HEADER, type SettingsPolicy } from '@/lib/admin/types';
-import { canSeeInstanceDetails } from '@/lib/auth/instance-details';
+import { POLICY_DOMAINS_HEADER, POLICY_SCOPE_HEADER, type SettingsPolicy } from '@/lib/admin/types';
+import { canSeeInstanceDetails, signedInIdentity } from '@/lib/auth/instance-details';
+import { scopesVisibleTo } from '@/lib/admin/policy-scopes';
+import { configReadOnlyResponse } from '@/lib/admin/config-read-only-response';
 
 /**
  * GET /api/admin/policy - Get settings policy (NOT admin-protected - users read this;
@@ -27,12 +29,30 @@ export async function GET(request: NextRequest) {
           pushRelayUrl: '',
           pushRelayUrlLocked: false,
           defaultSidebarApps: [],
+          // Signatures, domain lists and scopes describe the organisation
+          // and only apply once someone is signed in.
+          organisation: undefined,
+          scopes: [],
         },
         { headers: { 'Cache-Control': 'no-store', [POLICY_SCOPE_HEADER]: 'public' } },
       );
     }
-    return NextResponse.json(policy, {
-      headers: { 'Cache-Control': 'no-store' },
+    // Users get only the scopes for their own domains, so on an instance
+    // shared by several organisations one doesn't see another's settings.
+    // Without a session secret the server can't tell who is asking and
+    // answers with all of them (documented).
+    const identity = await signedInIdentity();
+    const filtered = identity !== null && !identity.admin;
+    const scopes = filtered
+      ? scopesVisibleTo(policy.scopes ?? [], identity.addresses)
+      : policy.scopes ?? [];
+    // Which domains the scopes were picked for, so a browser that signs in
+    // to an account of another domain knows to fetch again.
+    const domains = filtered
+      ? [...new Set(identity.addresses.map((a) => a.slice(a.lastIndexOf('@') + 1)).filter(Boolean))].join(',')
+      : null;
+    return NextResponse.json({ ...policy, scopes }, {
+      headers: { 'Cache-Control': 'no-store', ...(domains !== null ? { [POLICY_DOMAINS_HEADER]: domains } : {}) },
     });
   } catch (error) {
     logger.error('Policy read error', { error: error instanceof Error ? error.message : 'Unknown error' });
@@ -62,11 +82,20 @@ export async function PUT(request: NextRequest) {
     if (policy.features && typeof policy.features !== 'object') {
       return NextResponse.json({ error: 'features must be an object' }, { status: 400 });
     }
+    if (policy.defaults !== undefined && (typeof policy.defaults !== 'object' || policy.defaults === null || Array.isArray(policy.defaults))) {
+      return NextResponse.json({ error: 'defaults must be an object' }, { status: 400 });
+    }
     if (policy.themePolicy && typeof policy.themePolicy !== 'object') {
       return NextResponse.json({ error: 'themePolicy must be an object' }, { status: 400 });
     }
     if (policy.defaultSidebarApps !== undefined && !Array.isArray(policy.defaultSidebarApps)) {
       return NextResponse.json({ error: 'defaultSidebarApps must be an array' }, { status: 400 });
+    }
+    if (policy.scopes !== undefined && !Array.isArray(policy.scopes)) {
+      return NextResponse.json({ error: 'scopes must be an array' }, { status: 400 });
+    }
+    if (policy.organisation !== undefined && (typeof policy.organisation !== 'object' || policy.organisation === null || Array.isArray(policy.organisation))) {
+      return NextResponse.json({ error: 'organisation must be an object' }, { status: 400 });
     }
 
     await configManager.setPolicy(policy);
@@ -78,6 +107,8 @@ export async function PUT(request: NextRequest) {
 
     return NextResponse.json({ ok: true });
   } catch (error) {
+    const readOnly = configReadOnlyResponse(error);
+    if (readOnly) return readOnly;
     logger.error('Policy update error', { error: error instanceof Error ? error.message : 'Unknown error' });
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }

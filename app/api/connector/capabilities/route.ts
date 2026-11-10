@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { configManager } from '@/lib/admin/config-manager';
+import { isNoThirdPartyTrafficOn } from '@/lib/admin/third-party-mode';
 import { TARGET_NAMES } from '@/lib/connector/registry';
 
 /**
@@ -15,7 +16,8 @@ import { TARGET_NAMES } from '@/lib/connector/registry';
  * here, and the answer is narrower than the login page it sits next to. It
  * says nothing about accounts, domains or the mail server - only the product,
  * its version, the branded app name, and the target names, which are a
- * compile-time constant.
+ * compile-time constant. The version follows loginShowVersion, like the login
+ * page (#896); the connector only needs the target names to warn.
  *
  * `appName` can be a customer's own branding, so the whole endpoint is gated
  * on `connectorEnabled` for deployments that would rather disclose nothing.
@@ -27,7 +29,7 @@ import { TARGET_NAMES } from '@/lib/connector/registry';
 export async function GET() {
   await configManager.ensureLoaded();
 
-  if (!configManager.get<boolean>('connectorEnabled', true)) {
+  if (!configManager.get<boolean>('connectorEnabled', true) || await isNoThirdPartyTrafficOn()) {
     return new NextResponse(null, { status: 404 });
   }
 
@@ -36,7 +38,9 @@ export async function GET() {
       product: 'bulwark-webmail',
       appName:
         configManager.get<string>('appName', '') || process.env.NEXT_PUBLIC_APP_NAME || 'Bulwark',
-      version: process.env.NEXT_PUBLIC_APP_VERSION || null,
+      version: configManager.get<boolean>('loginShowVersion', true)
+        ? process.env.NEXT_PUBLIC_APP_VERSION || null
+        : null,
       connectorPath: '/connector',
       targets: TARGET_NAMES,
     },

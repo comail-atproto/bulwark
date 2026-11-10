@@ -3,10 +3,14 @@ import { configManager } from '@/lib/admin/config-manager';
 import { requireAdminAuth, getClientIP } from '@/lib/admin/session';
 import { auditLog } from '@/lib/admin/audit';
 import { CONFIG_ENV_MAP, SENSITIVE_CONFIG_KEYS } from '@/lib/admin/types';
-import { parseJmapServers } from '@/lib/admin/jmap-servers';
+import { parseJmapServers, redactJmapServersForAdmin, withStoredClientSecrets } from '@/lib/admin/jmap-servers';
 import { parseDomainBranding } from '@/lib/admin/domain-branding';
 import { initAdminPassword, isAdminEnabled } from '@/lib/admin/password';
 import { logger } from '@/lib/logger';
+import { hasSessionSecret } from '@/lib/auth/session-secret';
+import { configReadOnlyResponse } from '@/lib/admin/config-read-only-response';
+import { checkExtensionDirectoryUrl } from '@/lib/admin/directory-url';
+import { parseNoThirdPartyEnv } from '@/lib/third-party-mode';
 
 // Strings that count as "no real secret configured" - used so the dashboard
 // can warn about a placeholder session secret without us ever returning the
@@ -35,8 +39,13 @@ export async function GET(request: NextRequest) {
       if (SENSITIVE_CONFIG_KEYS.has(key)) {
         const v = entry.value;
         const hasValue =
-          typeof v === 'string' && v.length > 0 && !SENSITIVE_PLACEHOLDERS.has(v);
+          (typeof v === 'string' && v.length > 0 && !SENSITIVE_PLACEHOLDERS.has(v)) ||
+          // Nothing configured, but the secret generated on first start is there.
+          (key === 'sessionSecret' && entry.source === 'default' && hasSessionSecret());
         safe[key] = { source: entry.source, hasValue };
+      } else if (key === 'jmapServers') {
+        // Per-server OAuth client secrets are secrets like the global one.
+        safe[key] = { source: entry.source, value: redactJmapServersForAdmin(parseJmapServers(entry.value)) };
       } else {
         safe[key] = entry;
       }
@@ -73,6 +82,35 @@ export async function PATCH(request: NextRequest) {
       return NextResponse.json({ error: `Unknown config keys: ${invalidKeys.join(', ')}` }, { status: 400 });
     }
 
+    // The session secret is the key behind every session cookie and the
+    // synced-settings encryption. The dashboard hides its value for a reason;
+    // letting an admin session replace it with a value of its choosing would
+    // hand that session the key (and sign everyone else out). Only the setup
+    // wizard writes it, before any session exists.
+    if ('sessionSecret' in updates) {
+      return NextResponse.json({
+        error: 'sessionSecret cannot be changed from the dashboard. Set SESSION_SECRET in the environment instead.',
+      }, { status: 400 });
+    }
+
+    // The directory is fetched server-side on the admin's behalf and its JSON
+    // handed back, so it must not name an internal host (lib/admin/directory-url.ts).
+    if ('extensionDirectoryUrl' in updates) {
+      const problem = await checkExtensionDirectoryUrl(updates.extensionDirectoryUrl);
+      if (problem) return NextResponse.json({ error: problem }, { status: 400 });
+    }
+
+    // The no-third-party switch is fail-closed: an "on" from the environment
+    // can't be undone from the panel (lib/admin/third-party-mode.ts).
+    if ('noThirdPartyTraffic' in updates) {
+      if (typeof updates.noThirdPartyTraffic !== 'boolean') {
+        return NextResponse.json({ error: 'noThirdPartyTraffic must be true or false' }, { status: 400 });
+      }
+      if (!updates.noThirdPartyTraffic && parseNoThirdPartyEnv(process.env.NO_THIRD_PARTY_TRAFFIC)) {
+        return NextResponse.json({ error: 'NO_THIRD_PARTY_TRAFFIC is set in the environment; change it there.' }, { status: 409 });
+      }
+    }
+
     // Enum keys only accept their declared values; a stray string would
     // otherwise be persisted and fail closed (or open) at the read site.
     for (const [key, value] of Object.entries(updates)) {
@@ -102,7 +140,11 @@ export async function PATCH(request: NextRequest) {
       if (incoming != null && !Array.isArray(incoming)) {
         return NextResponse.json({ error: 'jmapServers must be an array' }, { status: 400 });
       }
-      const sanitized = parseJmapServers(incoming);
+      // The dashboard never sees the stored client secrets (GET redacts
+      // them), so an entry that omits one keeps it.
+      const sanitized = parseJmapServers(
+        withStoredClientSecrets(incoming, parseJmapServers(configManager.get<unknown>('jmapServers', []))),
+      );
       const incomingCount = Array.isArray(incoming) ? incoming.length : 0;
       if (sanitized.length !== incomingCount) {
         return NextResponse.json({
@@ -142,6 +184,8 @@ export async function PATCH(request: NextRequest) {
 
     return NextResponse.json({ ok: true });
   } catch (error) {
+    const readOnly = configReadOnlyResponse(error);
+    if (readOnly) return readOnly;
     logger.error('Admin config update error', { error: error instanceof Error ? error.message : 'Unknown error' });
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
@@ -172,6 +216,8 @@ export async function DELETE(request: NextRequest) {
 
     return NextResponse.json({ ok: true });
   } catch (error) {
+    const readOnly = configReadOnlyResponse(error);
+    if (readOnly) return readOnly;
     logger.error('Admin config revert error', { error: error instanceof Error ? error.message : 'Unknown error' });
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
