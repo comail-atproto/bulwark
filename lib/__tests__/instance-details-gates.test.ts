@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest } from 'next/server';
 
 // Endpoints answering anyone used to hand out what fingerprints an instance:
@@ -10,6 +10,7 @@ import { NextRequest } from 'next/server';
 const gate = vi.hoisted(() => ({ signedIn: false }));
 vi.mock('@/lib/auth/instance-details', () => ({
   canSeeInstanceDetails: async () => gate.signedIn,
+  signedInIdentity: async () => null,
 }));
 
 const config = vi.hoisted(() => ({ values: {} as Record<string, unknown> }));
@@ -56,12 +57,17 @@ import { GET as health } from '@/app/api/health/route';
 import { GET as updateStatus } from '@/app/api/system/update-status/route';
 import { GET as plugins } from '@/app/api/plugins/route';
 import { GET as policy } from '@/app/api/admin/policy/route';
+import { GET as connectorCapabilities } from '@/app/api/connector/capabilities/route';
 
 const req = (path: string) => new NextRequest(`https://mail.example${path}`);
 
 beforeEach(() => {
   gate.signedIn = false;
   config.values = {};
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
 });
 
 describe('endpoints for visitors who are not signed in', () => {
@@ -87,6 +93,17 @@ describe('endpoints for visitors who are not signed in', () => {
     expect((await (await updateStatus(req('/api/system/update-status'))).json()).status).toEqual(STATUS);
   });
 
+  it('the connector probe follows loginShowVersion and still lists its targets', async () => {
+    vi.stubEnv('NEXT_PUBLIC_APP_VERSION', '1.9.0');
+    expect((await (await connectorCapabilities()).json()).version).toBe('1.9.0');
+
+    config.values.loginShowVersion = false;
+    const hidden = await (await connectorCapabilities()).json();
+    expect(hidden.version).toBeNull();
+    expect(hidden.product).toBe('bulwark-webmail');
+    expect(hidden.targets.length).toBeGreaterThan(0);
+  });
+
   it('the plugin list needs a session', async () => {
     expect((await plugins(req('/api/plugins'))).status).toBe(401);
     gate.signedIn = true;
@@ -105,6 +122,6 @@ describe('endpoints for visitors who are not signed in', () => {
     gate.signedIn = true;
     const full = await policy(req('/api/admin/policy'));
     expect(full.headers.get('x-bulwark-policy-scope')).toBeNull();
-    expect(await full.json()).toEqual(POLICY);
+    expect(await full.json()).toEqual({ ...POLICY, scopes: [] });
   });
 });

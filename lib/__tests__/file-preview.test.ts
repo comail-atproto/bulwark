@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { getFilePreviewKind, imageBlobUrl, inertBlobType, isFilePreviewable, previewBlobType, toInertBlob } from '../file-preview';
+import { getFilePreviewKind, imageBlobUrl, inertBlobType, isFilePreviewable, isMimeTypeSafeForInlinePreview, previewBlobType, toInertBlob } from '../file-preview';
 
 describe('file preview detection', () => {
   it('detects browser-renderable image attachments', () => {
@@ -45,6 +45,17 @@ describe('inert blob typing for cid: parts (GHSA-xvjh-v9c6-qcvc)', () => {
     }
     expect(inertBlobType(undefined)).toBe('application/octet-stream');
     expect(inertBlobType('')).toBe('application/octet-stream');
+  });
+
+  it('refuses a type the Blob constructor would drop to an empty, sniffed type', () => {
+    // A TNEF/winmail.dat MIME tag is free text. new Blob() empties any type
+    // with a character outside U+0020-U+007E, and Firefox sniffs an untyped
+    // blob: document, so such a type must not count as inert.
+    for (const type of ['image/png\u0000', 'image/pngé', 'video/mp4\t', 'application/pdf\u0085']) {
+      expect(new Blob([], { type }).type).toBe('');
+      expect(isMimeTypeSafeForInlinePreview(type)).toBe(false);
+      expect(inertBlobType(type)).toBe('application/octet-stream');
+    }
   });
 
   it('re-types a fetched Blob without touching its bytes', async () => {
@@ -133,8 +144,18 @@ describe('previewBlobType', () => {
     expect(previewBlobType('drawing.svg', 'application/x-as400attachment', '')).toBe('application/x-as400attachment');
   });
 
+  it('types a document attachment so that a blob: URL of it would never render as the webmail', () => {
+    // HTML, .eml, text and markdown are previewed from their text in a srcdoc
+    // frame; a text/html blob: URL of the sender's bytes was a document of
+    // the webmail origin (GHSA-xvjh-v9c6-qcvc, on the attachment preview).
+    expect(previewBlobType('invoice.html', 'text/html', 'text/html')).toBe('application/octet-stream');
+    expect(previewBlobType('page.htm', 'application/octet-stream', '')).toBe('application/octet-stream');
+    expect(previewBlobType('page', 'application/xhtml+xml', '')).toBe('application/octet-stream');
+    expect(previewBlobType('bounce.eml', 'message/rfc822', '')).toBe('application/octet-stream');
+    expect(previewBlobType('notes.txt', 'text/plain', '')).toBe('application/octet-stream');
+  });
+
   it('leaves previews that do not render a blob by type as before', () => {
-    expect(previewBlobType('page.html', 'text/html; charset=utf-8', '')).toBe('text/html; charset=utf-8');
     expect(previewBlobType('archive.zip', 'application/zip', '')).toBe('application/zip');
     expect(previewBlobType('archive.zip', 'application/octet-stream', 'application/octet-stream')).toBe('application/octet-stream');
   });

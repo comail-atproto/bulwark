@@ -1,10 +1,40 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { JMAPClient } from '../jmap/client';
-import { jmapSession } from './fixtures/jmap-session';
 
 // #434: batchDeleteCalendarEvents ignored a method-level error and dropped the
 // notDestroyed details, so "Clear events" reported "0 events cleared" with no
 // error. The same for batchCreateCalendarEvents' notCreated on import.
+
+function makeSession() {
+  return {
+    capabilities: {
+      'urn:ietf:params:jmap:core': {},
+      'urn:ietf:params:jmap:calendars': {},
+    },
+    accounts: {
+      'acct-1': {
+        name: 'test',
+        isPersonal: true,
+        accountCapabilities: { 'urn:ietf:params:jmap:calendars': {} },
+      },
+    },
+    primaryAccounts: {
+      'urn:ietf:params:jmap:mail': 'acct-1',
+      'urn:ietf:params:jmap:calendars': 'acct-1',
+    },
+    apiUrl: 'https://mail.example.com/jmap/api',
+    downloadUrl: 'https://mail.example.com/jmap/download/{accountId}/{blobId}/{name}',
+    uploadUrl: 'https://mail.example.com/jmap/upload/{accountId}/',
+    eventSourceUrl: 'https://mail.example.com/jmap/eventsource',
+  };
+}
+
+function jsonResponse(body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
 
 describe('calendar batch failures surface (#434)', () => {
   let fetchSpy: ReturnType<typeof vi.spyOn>;
@@ -18,16 +48,7 @@ describe('calendar batch failures surface (#434)', () => {
   });
 
   async function connectedClient(): Promise<JMAPClient> {
-    fetchSpy.mockResolvedValueOnce(Response.json(jmapSession({
-      accountCapabilities: { 'urn:ietf:params:jmap:calendars': {} },
-      serverCapabilities: { 'urn:ietf:params:jmap:calendars': {} },
-      overrides: {
-        primaryAccounts: {
-          'urn:ietf:params:jmap:mail': 'acct-1',
-          'urn:ietf:params:jmap:calendars': 'acct-1',
-        },
-      },
-    })));
+    fetchSpy.mockResolvedValueOnce(jsonResponse(makeSession()));
     const client = JMAPClient.withBearer('https://mail.example.com', 'token123', 'user@test.com');
     await client.connect();
     fetchSpy.mockReset();
@@ -37,7 +58,7 @@ describe('calendar batch failures surface (#434)', () => {
   it('batchDeleteCalendarEvents rejects with the server reason when nothing was destroyed', async () => {
     const client = await connectedClient();
     fetchSpy.mockResolvedValueOnce(
-      Response.json({
+      jsonResponse({
         methodResponses: [
           ['CalendarEvent/set', {
             destroyed: null,
@@ -53,7 +74,7 @@ describe('calendar batch failures surface (#434)', () => {
   it('batchDeleteCalendarEvents rejects on a method-level error', async () => {
     const client = await connectedClient();
     fetchSpy.mockResolvedValueOnce(
-      Response.json({
+      jsonResponse({
         methodResponses: [['error', { type: 'accountNotFound', description: 'Account not found' }, '0']],
       }),
     );
@@ -64,7 +85,7 @@ describe('calendar batch failures surface (#434)', () => {
   it('batchDeleteCalendarEvents returns the notDestroyed map for partial failures', async () => {
     const client = await connectedClient();
     fetchSpy.mockResolvedValueOnce(
-      Response.json({
+      jsonResponse({
         methodResponses: [
           ['CalendarEvent/set', {
             destroyed: ['ev1'],
@@ -82,14 +103,14 @@ describe('calendar batch failures surface (#434)', () => {
   it('batchCreateCalendarEvents rejects on a method-level error and reports notCreated otherwise', async () => {
     const client = await connectedClient();
     fetchSpy.mockResolvedValueOnce(
-      Response.json({
+      jsonResponse({
         methodResponses: [['error', { type: 'invalidArguments', description: 'Unknown calendar' }, '0']],
       }),
     );
     await expect(client.batchCreateCalendarEvents([{ title: 'A' }])).rejects.toThrow(/Unknown calendar/);
 
     fetchSpy.mockResolvedValueOnce(
-      Response.json({
+      jsonResponse({
         methodResponses: [
           ['CalendarEvent/set', {
             created: null,
@@ -102,5 +123,48 @@ describe('calendar batch failures surface (#434)', () => {
     expect(result.created).toEqual([]);
     expect(result.failed).toEqual(['new-0']);
     expect(result.notCreated['new-0']).toMatchObject({ description: 'Missing start' });
+  });
+
+  it('batchCreateCalendarEvents reads the events back without their overrides', async () => {
+    const client = await connectedClient();
+    fetchSpy
+      .mockResolvedValueOnce(jsonResponse({
+        methodResponses: [['CalendarEvent/set', { created: { 'new-0': { id: 'ev1' } } }, '0']],
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        methodResponses: [['CalendarEvent/get', { list: [{ id: 'ev1', title: 'A', start: '2026-09-22T10:00:00' }] }, '0']],
+      }));
+
+    const result = await client.batchCreateCalendarEvents([{ title: 'A', start: '2026-09-22T10:00:00' }]);
+
+    expect(result.created).toMatchObject([{ id: 'ev1', title: 'A' }]);
+    const readBack = JSON.parse(String((fetchSpy.mock.calls[1][1] as RequestInit).body));
+    expect(readBack.methodCalls).toHaveLength(1);
+    expect(readBack.methodCalls[0][1].properties).toContain('utcStart');
+    expect(readBack.methodCalls[0][1].properties).not.toContain('recurrenceOverrides');
+  });
+
+  it('batchCreateCalendarEvents still counts the created events when Stalwart 1.0 refuses the read-back', async () => {
+    const client = await connectedClient();
+    fetchSpy
+      .mockResolvedValueOnce(jsonResponse({
+        methodResponses: [['CalendarEvent/set', {
+          created: { 'new-0': { id: 'ev1' }, 'new-1': { id: 'ev2' } },
+        }, '0']],
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        methodResponses: [['error', {
+          type: 'invalidArguments',
+          description: 'recurrenceOverrides cannot be requested together with utcStart or utcEnd',
+        }, '0']],
+      }));
+
+    const result = await client.batchCreateCalendarEvents([
+      { title: 'A', start: '2026-09-22T10:00:00' },
+      { title: 'B', start: '2026-09-23T10:00:00' },
+    ]);
+
+    expect(result.created).toMatchObject([{ id: 'ev1', title: 'A' }, { id: 'ev2', title: 'B' }]);
+    expect(result.failed).toEqual([]);
   });
 });

@@ -110,7 +110,7 @@ describe('impersonation handoff', () => {
     const put = await readSession();
     expect(put.status).toBe(200);
     const body = await put.json();
-    expect(body).toEqual({ serverUrl: 'https://mail.example.org', username: 'alice@example.org', password: APP_SECRET });
+    expect(body).toEqual({ serverUrl: 'https://mail.example.org', username: 'alice@example.org', password: APP_SECRET, signedInAt: expect.any(Number) });
     expect(JSON.stringify(body)).not.toContain(MASTER_PASSWORD);
     expect([...jar.values()].join()).not.toContain(MASTER_PASSWORD);
   });
@@ -128,9 +128,12 @@ describe('impersonation handoff', () => {
     expect(method).toBe('x:AppPassword/set');
     expect(args.accountId).toBe('acc-alice');
     expect(args.create.imp.expiresAt).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/);
-    const ttl = Date.parse(args.create.imp.expiresAt) - before;
-    expect(ttl).toBeGreaterThan(7 * 3600_000);
-    expect(ttl).toBeLessThanOrEqual(8 * 3600_000);
+    // The handoff reads the clock after `before` was taken, so bound the
+    // expiry by both ends instead of measuring from `before` alone.
+    const after = Date.now();
+    const expires = Date.parse(args.create.imp.expiresAt);
+    expect(expires - before).toBeGreaterThan(7 * 3600_000);
+    expect(expires).toBeLessThanOrEqual(after + 8 * 3600_000);
   });
 
   it('refuses the handoff when Stalwart does not create the app password', async () => {
@@ -153,7 +156,14 @@ describe('impersonation handoff', () => {
       methodCalls: [string, { destroy: string[] }, string][];
     };
     expect(destroy.methodCalls[0][1].destroy).toEqual(['cred-1']);
-    expect(jar.size).toBe(0);
+    // The reconcile marker is no credential and expires within a minute.
+    expect([...jar.keys()].filter((name) => name !== 'jmap_impersonated')).toEqual([]);
+  });
+
+  it('sets the marker cookie that lets the client reconcile its account list', async () => {
+    const res = await impersonate();
+    expect(res.headers.get('location')).toBe('/?impersonated=1');
+    expect(jar.get('jmap_impersonated')).toBe('1');
   });
 
   it('will not return a session that still holds the master password', async () => {
