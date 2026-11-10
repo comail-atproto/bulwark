@@ -52,6 +52,58 @@ describe('task-store', () => {
     };
   });
 
+  describe('fetchTasks', () => {
+    // A fetch answered after a later one started (or after the store was
+    // cleared for another account) must not put its list back.
+    function heldClient() {
+      const answers: { resolve: (tasks: CalendarTask[]) => void; reject: (error: Error) => void }[] = [];
+      const client = {
+        ...mockClient,
+        getCalendarTasks: vi.fn().mockImplementation(() => new Promise<CalendarTask[]>((resolve, reject) => {
+          answers.push({ resolve, reject });
+        })),
+      } as IJMAPClient;
+      return { client, answers };
+    }
+
+    it('drops the answer of a fetch that a later one overtook', async () => {
+      const { client, answers } = heldClient();
+      const first = useTaskStore.getState().fetchTasks(client);
+      const second = useTaskStore.getState().fetchTasks(client);
+      answers[1].resolve([makeTask({ id: 'new' })]);
+      await second;
+      answers[0].resolve([makeTask({ id: 'old' })]);
+      await first;
+
+      expect(useTaskStore.getState().tasks.map((t) => t.id)).toEqual(['new']);
+      expect(useTaskStore.getState().isLoading).toBe(false);
+    });
+
+    it('drops the error of a fetch that a later one overtook', async () => {
+      const { client, answers } = heldClient();
+      const first = useTaskStore.getState().fetchTasks(client);
+      const second = useTaskStore.getState().fetchTasks(client);
+      answers[1].resolve([makeTask({ id: 'new' })]);
+      await second;
+      answers[0].reject(new Error('late'));
+      await first;
+
+      expect(useTaskStore.getState().error).toBeNull();
+      expect(useTaskStore.getState().tasks.map((t) => t.id)).toEqual(['new']);
+    });
+
+    it('drops the answer of a fetch still under way when the store is cleared', async () => {
+      const { client, answers } = heldClient();
+      const pending = useTaskStore.getState().fetchTasks(client);
+      useTaskStore.getState().clearTasks();
+      answers[0].resolve([makeTask({ id: 'other-account' })]);
+      await pending;
+
+      expect(useTaskStore.getState().tasks).toEqual([]);
+      expect(useTaskStore.getState().isLoading).toBe(false);
+    });
+  });
+
   describe('toggleTaskComplete', () => {
     it('toggles needs-action to completed without sending progressUpdated in payload (#958)', async () => {
       const task = makeTask({ id: 't1', progress: 'needs-action' });
@@ -105,7 +157,7 @@ describe('task-store', () => {
       const created = await useTaskStore.getState().createTask(mockClient as IJMAPClient, { title: 'New Task' });
 
       expect(mockClient.createCalendarTask).toHaveBeenCalledWith({ title: 'New Task' });
-      expect(created.id).toBe('task-created');
+      expect(created?.id).toBe('task-created');
       expect(useTaskStore.getState().tasks).toContainEqual(created);
     });
 
@@ -119,6 +171,17 @@ describe('task-store', () => {
       const updated = useTaskStore.getState().tasks.find((t) => t.id === 't3');
       expect(updated?.title).toBe('Updated Title');
       expect(updated?.progress).toBe('needs-action');
+    });
+
+    it('reloads the list when a move to a shared calendar gives the task a new id (#1204)', async () => {
+      useTaskStore.setState({ tasks: [makeTask({ id: 't5' })], selectedTaskId: 't5' });
+      (mockClient.updateCalendarTask as ReturnType<typeof vi.fn>).mockResolvedValue('acct-2:new');
+      (mockClient.getCalendarTasks as ReturnType<typeof vi.fn>).mockResolvedValue([makeTask({ id: 'acct-2:new' })]);
+
+      await useTaskStore.getState().updateTask(mockClient as IJMAPClient, 't5', { calendarIds: { 'acct-2:cal-s': true } });
+
+      expect(useTaskStore.getState().tasks.map((t) => t.id)).toEqual(['acct-2:new']);
+      expect(useTaskStore.getState().selectedTaskId).toBe('acct-2:new');
     });
 
     it('deletes a task and resets selectedTaskId if selected', async () => {
