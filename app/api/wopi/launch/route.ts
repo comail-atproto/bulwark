@@ -145,10 +145,16 @@ export async function POST(request: NextRequest) {
       slot: creds.slot,
     };
     const wopiSrc = `${hostBase}/api/wopi/files/${wopiDocumentId(tokenPayload)}`;
+    let url: string;
+    try {
+      url = buildWopiActionUrl(urlsrc, wopiSrc, str('lang'));
+    } catch {
+      return NextResponse.json({ error: 'Document editor is unavailable' }, { status: 503 });
+    }
     const { token, expiresAt } = mintWopiToken(tokenPayload);
 
     return NextResponse.json({
-      url: buildWopiActionUrl(urlsrc, wopiSrc, str('lang')),
+      url,
       accessToken: token,
       accessTokenTtl: expiresAt,
       readOnly: !editable,

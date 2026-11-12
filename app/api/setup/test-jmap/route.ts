@@ -77,6 +77,9 @@ export async function POST(request: NextRequest) {
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     return NextResponse.json({ status: 'invalid_url', message: 'URL must use http or https' });
   }
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+    return NextResponse.json({ status: 'invalid_url', message: 'URL must not contain credentials, a query or a fragment' });
+  }
 
   const base = trimTrailingSlashes(raw);
 

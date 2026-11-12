@@ -378,11 +378,9 @@ self.addEventListener("message", (event) => {
   if (data.type === "mailto-client-gone") {
     if (event.source && event.source.id) {
       const current = MAILTO_CLIENTS.get(event.source.id);
-      if (
-        !current ||
-        (typeof data.clientId === "string" && current.clientId === data.clientId) ||
-        (typeof data.clientId !== "string" && typeof data.path === "string" && current.path === data.path)
-      ) {
+      if (!current
+        || (typeof data.clientId === "string" && current.clientId === data.clientId)
+        || (typeof data.clientId !== "string" && typeof data.path === "string" && current.path === data.path)) {
         MAILTO_CLIENTS.delete(event.source.id);
       }
     }
@@ -415,7 +413,9 @@ async function handlePush(event) {
   // Queued wakeups from older Inbox releases must not become mail alerts.
   if (payload && payload.kind === "access-approval") return;
 
-  const accountLabel = payload && typeof payload.accountLabel === "string" ? payload.accountLabel : "";
+  const accountLabel = (payload && typeof payload.accountLabel === "string")
+    ? payload.accountLabel
+    : "";
 
   // Two payload shapes reach us from the relay:
   //   - "jmap-email-push": the server evaluated our per-account delivery
@@ -829,12 +829,7 @@ async function handleOpenMailtoInClient(event) {
   }
 
   try {
-    client.postMessage({
-      type: "mailto-request",
-      id: data.id,
-      clientId: state.clientId,
-      value: data.value,
-    });
+    client.postMessage({ type: "mailto-request", id: data.id, clientId: state.clientId, value: data.value });
   } catch (_) {
     responsePort && responsePort.postMessage({ delivered: false });
     return;

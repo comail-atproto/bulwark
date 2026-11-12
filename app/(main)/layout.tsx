@@ -1,11 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { getLocaleDirection } from "@/i18n/direction";
-import {
-  Atkinson_Hyperlegible,
-  Geist,
-  Geist_Mono,
-  Young_Serif,
-} from "next/font/google";
+import { Geist, Geist_Mono } from "next/font/google";
+import { atkinsonHyperlegible, youngSerif } from "@/app/comail-fonts";
 import { headers } from "next/headers";
 import { getLocale, getTranslations } from "next-intl/server";
 import { ServiceWorkerRegistration } from "@/components/service-worker-registration";
@@ -48,22 +44,6 @@ const geistSans = Geist({
 const geistMono = Geist_Mono({
   variable: "--font-geist-mono",
   subsets: ["latin"],
-});
-
-// Match Comail's public-site typography without loading fonts from a third party.
-const youngSerif = Young_Serif({
-  variable: "--comail-font-display",
-  subsets: ["latin"],
-  weight: "400",
-  display: "swap",
-});
-
-const atkinsonHyperlegible = Atkinson_Hyperlegible({
-  variable: "--comail-font-body",
-  subsets: ["latin"],
-  weight: ["400", "700"],
-  style: ["normal", "italic"],
-  display: "swap",
 });
 
 // Resolve a branding value for the requesting host: per-domain override first,

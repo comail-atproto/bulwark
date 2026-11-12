@@ -17,6 +17,22 @@ function probe(url: string) {
 afterEach(() => vi.restoreAllMocks());
 
 describe('setup JMAP redirects', () => {
+  it('rejects base URLs containing credentials, a query or a fragment before probing', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 404 }));
+    for (const url of ['https://user:password@mail.example.invalid', 'https://mail.example.invalid/?key=value', 'https://mail.example.invalid/#section']) {
+      const response = await probe(url);
+      expect(await response.json()).toMatchObject({ status: 'invalid_url' });
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('allows a private configured server with a path', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"capabilities":{}}', { status: 200 }));
+    const response = await probe('http://10.0.0.8:8080/mail');
+    expect(await response.json()).toMatchObject({ status: 'jmap_detected' });
+    expect(String(fetchSpy.mock.calls[0][0])).toBe('http://10.0.0.8:8080/mail/.well-known/jmap');
+  });
+
   it('does not follow an HTTPS upgrade to a different port', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       if (new URL(String(input)).port === '8443') throw new Error('Unexpected fetch');

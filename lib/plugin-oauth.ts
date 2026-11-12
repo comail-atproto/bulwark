@@ -45,7 +45,7 @@ function readStates(): StateTable {
     const parsed = raw ? JSON.parse(raw) as StateTable : {};
     const now = Date.now();
     for (const [state, entry] of Object.entries(parsed)) {
-      if (!entry || typeof entry.pluginId !== "string" || now - entry.created > STATE_TTL_MS) delete parsed[state];
+      if (!entry || typeof entry.pluginId !== "string" || !Number.isFinite(entry.created) || now - entry.created > STATE_TTL_MS) delete parsed[state];
     }
     return parsed;
   } catch {

@@ -149,7 +149,7 @@ async function fetchWopiActions(discoveryUrl: string): Promise<WopiActions | nul
 
 function httpOrigin(url: string): string {
   try {
-    const parsed = new URL(url.replace(/<[^>]*>/g, ''));
+    const parsed = new URL(url);
     return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.origin : '';
   } catch {
     return '';
@@ -209,10 +209,15 @@ function languageTag(lang: string | undefined): string {
  * instead, so that is added when the urlsrc names no language itself (#1130).
  */
 export function buildWopiActionUrl(urlsrc: string, wopiSrc: string, lang?: string): string {
+  const editor = new URL(urlsrc);
+  if ((editor.protocol !== 'http:' && editor.protocol !== 'https:') || editor.username || editor.password) {
+    throw new Error('Invalid WOPI editor URL');
+  }
   const tag = languageTag(lang);
   const base = urlsrc.replace(/<([^=<>]+)=([^&<>]*)&?>/g, (_group, name: string, placeholder: string) =>
     tag && (placeholder === 'UI_LLCC' || placeholder === 'DC_LLCC') ? `${name}=${tag}&` : '',
   ).replace(/<[^>]*>/g, '');
+  if (new URL(base).origin !== editor.origin) throw new Error('Invalid WOPI editor URL');
   const sep = base.includes('?')
     ? (base.endsWith('?') || base.endsWith('&') ? '' : '&')
     : '?';

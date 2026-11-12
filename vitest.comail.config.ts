@@ -16,6 +16,7 @@ const nativeRoutes = [
 const nativeComponents = [
   "components/contacts/__tests__/contacts-side-panel.test.tsx",
   "components/settings/__tests__/settings-side-panel.test.tsx",
+  "components/settings/__tests__/settings-palette-commands.test.tsx",
   "components/calendar/__tests__/calendar-app.test.tsx",
   "components/calendar/__tests__/calendar-side-panel.test.tsx",
   "components/calendar/__tests__/calendar-app-boot-skeleton.test.tsx",

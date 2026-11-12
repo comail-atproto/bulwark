@@ -39,6 +39,7 @@ import { apiFetch } from '@/lib/browser-navigation';
 import { explainServerAuthError } from '@/lib/server-auth-status';
 import { BIRTHDAY_CALENDAR_ID } from '@/lib/birthday-calendar';
 import { sortCalendars, sortOrderUpdates } from '@/lib/calendar-sort';
+import { resolveAccountClient } from '@/lib/groupware/client';
 import { getClientByLocalAccountId } from './client-registry';
 import { calendarHooks } from '@/lib/plugin-hooks';
 import { eventToView } from '@/lib/plugin-projection';
@@ -52,23 +53,6 @@ import { registerCalendarSubscriptionSyncBridge } from './settings-store';
 import { currentStoreEpoch } from '@/lib/store-epoch';
 import { sentByPatchValue } from '@/lib/calendar-delegate';
 
-/**
- * When the Pro shell aggregates calendars/events from every connected
- * account, the entity carries a `localAccountId` pointing back to the
- * owning JMAP client. Mutations need to use *that* client - the active
- * client (passed in by the page) could be on a different server entirely.
- * Falls back to the active client when `localAccountId` is unset or no
- * matching client is registered.
- *
- * Lookup goes through `client-registry` (not a direct auth-store import)
- * to avoid a top-level cycle: auth-store already imports this module to
- * bootstrap feature stores after login.
- */
-function resolveAccountClient<T extends IJMAPClient>(active: T, localAccountId?: string): T {
-  if (!localAccountId) return active;
-  const lookup = getClientByLocalAccountId(localAccountId) as T | undefined;
-  return lookup ?? active;
-}
 
 /**
  * A new calendar without a sortOrder gets 0 and, once the user has reordered
@@ -78,7 +62,7 @@ function resolveAccountClient<T extends IJMAPClient>(active: T, localAccountId?:
 function withNextSortOrder<T extends Partial<Calendar>>(client: IJMAPClient, calendars: Calendar[], calendar: T): T {
   if (calendar.sortOrder !== undefined) return calendar;
   const highest = Math.max(0, ...calendars
-    .filter((c) => !c.isShared && resolveAccountClient(client, c.localAccountId) === client)
+    .filter((c) => !c.isShared && (!c.localAccountId || getClientByLocalAccountId(c.localAccountId) === client))
     .map((c) => c.sortOrder ?? 0));
   return highest > 0 ? { ...calendar, sortOrder: highest + 1 } : calendar;
 }

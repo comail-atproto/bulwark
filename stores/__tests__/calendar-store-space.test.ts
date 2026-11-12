@@ -212,6 +212,7 @@ describe('calendar store Space mutations', () => {
     useCalendarStore.setState({ events: [scopedEvent] });
     const canonical = { ...event, title: 'Scoped edit', spaceRevisionId: 'rev2' };
     const api = client({ updateAtprotoSpaceCalendarEvent: vi.fn().mockResolvedValue(canonical) });
+    setClientLookup(id => id === 'local-2' ? api : undefined);
 
     await useCalendarStore.getState().updateEvent(api, scopedEvent.id, { title: 'Scoped edit' });
 

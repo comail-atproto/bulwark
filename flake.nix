@@ -1,6 +1,6 @@
 # Comail Bulwark builds the standalone webmail bundle with pinned npm dependencies
 # and Google Fonts. Refresh npmDepsHash when package-lock.json changes; refresh
-# the font hash only when the layout's font declarations change.
+# the font hash only when the font declarations change.
 {
   description = "comail-themed Bulwark webmail (Next.js JMAP client)";
 
@@ -27,15 +27,15 @@
         lib = nixpkgs.lib;
 
         # --- (1) Hermetic Google-Fonts FOD -------------------------------------
-        # next/font/google (app/(main)/layout.tsx: Geist, Geist Mono, Young
-        # Serif, Atkinson Hyperlegible) fetches CSS + woff2 at build time, which
+        # next/font/google (Geist, Geist Mono, Young Serif, Atkinson
+        # Hyperlegible) fetches CSS + woff2 at build time, which
         # the Nix sandbox forbids. NEXT_FONT_GOOGLE_MOCKED_RESPONSES points
         # next/font at a JS module that returns the pre-fetched CSS instead.
         # The fetcher script (nix/bulwark-google-fonts-fetcher.js) reads
         # $OUT_DIR and writes mock-responses.js + the woff2 binaries. Fixed
         # output → network is allowed; the recursive hash pins every byte.
         # Hash pinned from the monorepo: identical font declarations → identical
-        # bytes. Do NOT regenerate unless layout.tsx's font declarations change.
+        # bytes. Do NOT regenerate unless the font declarations change.
         bulwarkGoogleFontMocks = pkgs.runCommand "bulwark-google-font-mocks" {
           outputHashAlgo = "sha256";
           outputHashMode = "recursive";

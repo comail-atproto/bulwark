@@ -9,7 +9,7 @@ import { debug } from '@/lib/debug';
 import { calendarHooks, contactHooks, settingsHooks } from '@/lib/plugin-hooks';
 import { BIRTHDAY_CALENDAR_ID } from '@/lib/birthday-calendar';
 import { useSettingsStore } from './settings-store';
-import { getClientByLocalAccountId } from './client-registry';
+import { resolveAccountClient } from '@/lib/groupware/client';
 import { sanitizeDisplayName, splitMailbox } from '@/lib/rfc5322-mailbox';
 import { inlineContactMedia, writeContactWithNewPhoto, type ContactSaveOptions } from '@/lib/contact-media';
 import { contactToView } from '@/lib/plugin-projection';
@@ -137,19 +137,6 @@ function prefixContactsWithLocalAccount(
   }));
 }
 
-/**
- * Route mutations back through the client that owns the target entity
- * when in multi-account Pro mode. See [[useProMultiAccountContacts]].
- *
- * Lookup goes through `client-registry` (not a direct auth-store import)
- * to avoid a top-level cycle: auth-store already imports this module to
- * bootstrap feature stores after login.
- */
-function resolveAccountClient<T extends IJMAPClient>(active: T, localAccountId?: string): T {
-  if (!localAccountId) return active;
-  const lookup = getClientByLocalAccountId(localAccountId) as T | undefined;
-  return lookup ?? active;
-}
 
 function stripLocalAccountPrefix(id: string, localAccountId?: string): string {
   if (!localAccountId) return id;

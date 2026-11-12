@@ -52,6 +52,7 @@ const defaultState = {
 describe('contact-store', () => {
   beforeEach(() => {
     useContactStore.setState(defaultState);
+    setClientLookup(() => undefined);
   });
 
   describe('addLocalContact', () => {
@@ -217,6 +218,7 @@ describe('contact-store', () => {
         ],
       });
       const client = makeClient();
+      setClientLookup(id => id === 'local-2' ? client as unknown as IJMAPClient : undefined);
 
       await useContactStore.getState().setDefaultAddressBook(client as unknown as IJMAPClient, book);
 
@@ -1191,6 +1193,7 @@ describe('contact-store', () => {
         })],
       });
       const client = makeClient();
+      setClientLookup(id => id === 'me@host' ? client as unknown as IJMAPClient : undefined);
 
       await useContactStore.getState().updateContact(
         client as unknown as IJMAPClient,
@@ -1222,6 +1225,7 @@ describe('contact-store', () => {
         })],
       });
       const client = makeClient();
+      setClientLookup(id => id === 'me@host' ? client as unknown as IJMAPClient : undefined);
 
       await useContactStore.getState().updateContact(
         client as unknown as IJMAPClient,
@@ -1244,6 +1248,7 @@ describe('contact-store', () => {
         })],
       });
       const client = makeClient();
+      setClientLookup(id => id === 'me@host' ? client as unknown as IJMAPClient : undefined);
 
       await useContactStore.getState().updateContact(
         client as unknown as IJMAPClient,
@@ -1277,6 +1282,7 @@ describe('contact-store', () => {
         ],
       });
       const client = makeClient();
+      setClientLookup(id => id === 'me@host' ? client as unknown as IJMAPClient : undefined);
 
       await useContactStore.getState().createContact(
         client as unknown as IJMAPClient,
@@ -1329,6 +1335,7 @@ describe('contact-store', () => {
         ],
       });
       const client = makeClient();
+      setClientLookup(id => id === 'me@host' ? client as unknown as IJMAPClient : undefined);
 
       await useContactStore.getState().createContact(
         client as unknown as IJMAPClient,
@@ -1356,6 +1363,7 @@ describe('contact-store', () => {
         })],
       });
       const client = makeClient();
+      setClientLookup(id => id === 'me@host' ? client as unknown as IJMAPClient : undefined);
 
       await useContactStore.getState().moveContactToAddressBook(
         client as unknown as IJMAPClient,
