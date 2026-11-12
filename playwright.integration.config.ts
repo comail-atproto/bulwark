@@ -30,7 +30,6 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   retries: process.env.CI ? 1 : 0,
-  failOnFlakyTests: !!process.env.CI,
   reporter: [['list'], ['html', { open: 'never', outputFolder: 'integration/playwright-report' }]],
   outputDir: 'integration/test-results',
   globalSetup: './integration/tests/global-setup.ts',

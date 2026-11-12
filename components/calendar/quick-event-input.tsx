@@ -54,7 +54,7 @@ export function QuickEventInput({ top, onSubmit, onCancel }: QuickEventInputProp
         placeholder={t("quick_create.placeholder")}
         aria-label={t("quick_create.aria_label")}
         maxLength={500}
-        className="w-full px-2 py-1 text-xs rounded border border-primary bg-primary/10 text-foreground shadow-sm focus:outline-none focus:ring-2 focus:ring-primary"
+        className="w-full px-2 py-1 text-xs rounded border border-primary bg-primary/10 text-foreground shadow-sm focus:outline-hidden"
       />
     </div>
   );

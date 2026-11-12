@@ -8,9 +8,12 @@ import {
   liteTokenLogin,
   probeLiteTokenLogin,
   readLiteAccessToken,
+  revokeAllLiteSessions,
+  revokeLiteSlot,
   readLiteBasicSession,
   readLiteRefreshToken,
   resetLiteProbeCache,
+  resetLiteRegisteredClients,
   saveLiteAccessToken,
   saveLiteBasicSession,
   saveLiteRefreshToken,
@@ -130,6 +133,7 @@ describe('liteTokenLogin', () => {
   beforeEach(() => {
     localStorage.clear();
     sessionStorage.clear();
+    resetLiteRegisteredClients();
     fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
   });
@@ -175,7 +179,7 @@ describe('liteTokenLogin', () => {
       redirectUri: 'https://lite.example/en/auth/callback',
     });
 
-    expect(tokens).toEqual({ accessToken: 'AT', expiresIn: 1200, refreshToken: 'RT' });
+    expect(tokens).toEqual({ accessToken: 'AT', expiresIn: 1200, refreshToken: 'RT', clientId: 'bulwark-webmail' });
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
@@ -188,7 +192,7 @@ describe('liteTokenLogin', () => {
       return jsonResponse({ access_token: 'AT' });
     });
     const tokens = await liteTokenLogin({ serverUrl: SERVER, username: 'a', password: 'p', redirectUri: 'https://x/cb' });
-    expect(tokens).toEqual({ accessToken: 'AT', expiresIn: 3600, refreshToken: null });
+    expect(tokens).toEqual({ accessToken: 'AT', expiresIn: 3600, refreshToken: null, clientId: 'bulwark-webmail' });
   });
 
   it.each([
@@ -214,6 +218,41 @@ describe('liteTokenLogin', () => {
       .mockResolvedValueOnce(jsonResponse({ error: 'invalid_grant' }, 400));
     await expect(liteTokenLogin({ serverUrl: SERVER, username: 'a', password: 'p', redirectUri: 'https://x/cb' }))
       .rejects.toMatchObject({ code: 'token_exchange_failed', status: 400 });
+  });
+
+  // Stalwart 1.0 (answers as seen live on 1.0.0): the request needs `query`,
+  // the code comes in the redirect location, and only known clients sign in.
+  function stalwart10(known: string[]) {
+    return async (input: FetchInput, init?: FetchInit) => {
+      const url = String(input);
+      if (url === `${SERVER}/api/auth`) {
+        const body = JSON.parse(String(init?.body));
+        if (typeof body.query !== 'string') return jsonResponse({ title: 'Invalid parameters', detail: 'JSON deserialization failed' }, 400);
+        const q = new URLSearchParams(body.query);
+        if (!known.includes(q.get('client_id') ?? '')) return jsonResponse({ type: 'invalid', error: 'invalid_client', description: 'Unknown client id' });
+        return jsonResponse({ type: 'authenticated', location: `${q.get('redirect_uri')}?code=V1&state=${q.get('state')}` });
+      }
+      if (url === `${SERVER}/auth/register`) return jsonResponse({ client_id: 'swc1.lite' }, 201);
+      if (url === `${SERVER}/auth/token`) {
+        const params = new URLSearchParams(String(init?.body));
+        return params.get('code') === 'V1' ? jsonResponse({ access_token: 'AT', refresh_token: 'RT' }) : jsonResponse({ error: 'invalid_grant' }, 400);
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    };
+  }
+
+  it('signs in at Stalwart 1.0 with a client it knows', async () => {
+    fetchMock.mockImplementation(stalwart10(['bulwark-webmail']));
+    const tokens = await liteTokenLogin({ serverUrl: SERVER, username: 'a', password: 'p', redirectUri: 'https://x/cb' });
+    expect(tokens).toEqual({ accessToken: 'AT', expiresIn: 3600, refreshToken: 'RT', clientId: 'bulwark-webmail' });
+  });
+
+  it('registers a client at Stalwart 1.0 when it knows none by the default name', async () => {
+    fetchMock.mockImplementation(stalwart10(['swc1.lite']));
+    const tokens = await liteTokenLogin({ serverUrl: SERVER, username: 'a', password: 'p', redirectUri: 'https://x/cb' });
+    expect(tokens).toMatchObject({ accessToken: 'AT', clientId: 'swc1.lite' });
+    const token = fetchMock.mock.calls.find(([url]) => String(url) === `${SERVER}/auth/token`)!;
+    expect(new URLSearchParams(String(token[1]?.body)).get('redirect_uri')).toBe('http://127.0.0.1/bulwark-webmail/callback');
   });
 
   it('lets network failures propagate untouched', async () => {
@@ -343,5 +382,39 @@ describe('probeLiteTokenLogin', () => {
     const err = new LiteLoginError('endpoint_missing', 404, 'nope');
     expect(err.message).toBe('endpoint_missing: nope');
     expect(err.status).toBe(404);
+  });
+});
+
+describe('lite sign-out revocation (#1388)', () => {
+  const REVOKE = `${SERVER}/auth/revoke`;
+  const fetchMock = vi.fn(async () => new Response(null, { status: 200 }));
+
+  beforeEach(() => {
+    localStorage.clear();
+    sessionStorage.clear();
+    fetchMock.mockClear();
+    vi.stubGlobal('fetch', fetchMock);
+    saveLiteRefreshToken(0, { serverUrl: SERVER, username: 'a', refreshToken: 'r0', revocationEndpoint: REVOKE }, true);
+    saveLiteRefreshToken(1, { serverUrl: SERVER, username: 'b', refreshToken: 'r1', revocationEndpoint: REVOKE }, false);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('revokes the refresh token by default', async () => {
+    await revokeLiteSlot(0);
+
+    expect(fetchMock).toHaveBeenCalledWith(REVOKE, expect.objectContaining({ method: 'POST' }));
+    expect(readLiteRefreshToken(0)).toBeNull();
+  });
+
+  it('only forgets the tokens when revocation is turned off', async () => {
+    await revokeLiteSlot(0, false);
+    await revokeAllLiteSessions(false);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(readLiteRefreshToken(0)).toBeNull();
+    expect(readLiteRefreshToken(1)).toBeNull();
   });
 });

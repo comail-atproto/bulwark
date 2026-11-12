@@ -1,19 +1,36 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { JMAPClient } from '../jmap/client';
-import { jmapSession } from './fixtures/jmap-session';
 
 // The server advertises Contacts globally while the per-account
 // accountCapabilities independently includes or omits it.
-async function connect(accountCapabilities: Record<string, unknown>, isPersonal = true, serverAdvertises = true, sessionCapabilities: Record<string, unknown> = {}): Promise<JMAPClient> {
-  const fetchSpy = vi.spyOn(globalThis, 'fetch');
-  fetchSpy.mockResolvedValueOnce(Response.json(jmapSession({
-    accountCapabilities,
-    isPersonal,
-    serverCapabilities: {
+function makeSession(accountCapabilities: Record<string, unknown>, isPersonal = true, serverAdvertises = true, sessionCapabilities: Record<string, unknown> = {}) {
+  return {
+    capabilities: {
+      'urn:ietf:params:jmap:core': {},
       ...(serverAdvertises ? { 'urn:ietf:params:jmap:contacts': {} } : {}),
       ...sessionCapabilities,
     },
-  })));
+    accounts: {
+      'acct-1': { name: 'test', isPersonal, accountCapabilities },
+    },
+    primaryAccounts: { 'urn:ietf:params:jmap:mail': 'acct-1' },
+    apiUrl: 'https://mail.example.com/jmap/api',
+    downloadUrl: 'https://mail.example.com/jmap/download/{accountId}/{blobId}/{name}',
+    uploadUrl: 'https://mail.example.com/jmap/upload/{accountId}/',
+    eventSourceUrl: 'https://mail.example.com/jmap/eventsource',
+  };
+}
+
+function mockFetchResponse(status: number, body?: unknown): Response {
+  return new Response(body ? JSON.stringify(body) : null, {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+async function connect(accountCapabilities: Record<string, unknown>, isPersonal = true, serverAdvertises = true, sessionCapabilities: Record<string, unknown> = {}): Promise<JMAPClient> {
+  const fetchSpy = vi.spyOn(globalThis, 'fetch');
+  fetchSpy.mockResolvedValueOnce(mockFetchResponse(200, makeSession(accountCapabilities, isPersonal, serverAdvertises, sessionCapabilities)));
   const client = new JMAPClient('https://mail.example.com', 'user@test.com', 'pass123');
   await client.connect();
   fetchSpy.mockReset();
@@ -31,14 +48,24 @@ describe('JMAPClient.supportsContacts (account-scoped capability)', () => {
     fetchSpy.mockRestore();
   });
 
-  it.each([
-    { name: 'returns true when the account advertises the contacts capability', accountCapabilities: { 'urn:ietf:params:jmap:contacts': {} }, isPersonal: true, serverAdvertises: true, supported: true },
-    { name: 'returns false when the server advertises contacts but the account does not', accountCapabilities: { 'urn:ietf:params:jmap:mail': {} }, isPersonal: true, serverAdvertises: true, supported: false },
-    { name: 'treats non-personal (shared/group) accounts as capable even without per-account advertisement', accountCapabilities: {}, isPersonal: false, serverAdvertises: true, supported: true },
-    { name: 'returns false for a shared account when the server does not advertise contacts', accountCapabilities: {}, isPersonal: false, serverAdvertises: false, supported: false },
-  ].map(({ name, ...permissions }) => [name, permissions] as const))('%s', async (_name, { accountCapabilities, isPersonal, serverAdvertises, supported }) => {
-    const client = await connect(accountCapabilities, isPersonal, serverAdvertises);
-    expect(client.supportsContacts()).toBe(supported);
+  it('returns true when the account advertises the contacts capability', async () => {
+    const client = await connect({ 'urn:ietf:params:jmap:contacts': {} });
+    expect(client.supportsContacts()).toBe(true);
+  });
+
+  it('returns false when the server advertises contacts but the account does not', async () => {
+    const client = await connect({ 'urn:ietf:params:jmap:mail': {} });
+    expect(client.supportsContacts()).toBe(false);
+  });
+
+  it('treats non-personal (shared/group) accounts as capable even without per-account advertisement', async () => {
+    const client = await connect({}, /* isPersonal */ false);
+    expect(client.supportsContacts()).toBe(true);
+  });
+
+  it('returns false for a shared account when the server does not advertise contacts', async () => {
+    const client = await connect({}, /* isPersonal */ false, /* serverAdvertises */ false);
+    expect(client.supportsContacts()).toBe(false);
   });
 });
 
@@ -50,7 +77,7 @@ describe('contactUsing (principals:owner declaration)', () => {
   async function addressBooksUsing(sessionCapabilities: Record<string, unknown>): Promise<string[]> {
     const client = await connect({ 'urn:ietf:params:jmap:contacts': {} }, true, true, sessionCapabilities);
     const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      Response.json({ methodResponses: [['AddressBook/get', { list: [] }, '0']] }),
+      mockFetchResponse(200, { methodResponses: [['AddressBook/get', { list: [] }, '0']] }),
     );
     await client.getAddressBooks();
     return JSON.parse((spy.mock.calls[0][1] as RequestInit).body as string).using;

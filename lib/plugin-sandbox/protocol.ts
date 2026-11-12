@@ -8,12 +8,22 @@
 // the boundary must be structured-cloneable: no functions, no DOM nodes, no
 // class instances.
 
-import type { SlotName } from '../plugin-types';
+import type { SlotName, HostFeaturesView } from '../plugin-types';
 import type { ThemeSnapshot } from './host-theme';
 
-// ─── Sandbox mode ────────────────────────────────────────────
-
-export type SandboxMode = 'background' | 'slot';
+/** Resolved presentation/regional settings mirrored into plugin runtimes. */
+export interface RegionalSnapshot {
+  /** The effective UI language, e.g. 'en', 'de', 'fr'. */
+  locale: string;
+  /** Resolved BCP-47 tag for date rendering (respects dateLocale override, e.g. 'en-CA' for iso). */
+  dateLocale: string;
+  /** True for 12-hour clock (AM/PM), false for 24-hour clock. */
+  hour12: boolean;
+  /** The user's effective time zone, e.g. 'Europe/Berlin'. */
+  timeZone: string;
+  /** First day of week (0 = Sunday, 1 = Monday, 6 = Saturday). */
+  firstDayOfWeek: 0 | 1 | 6;
+}
 
 /** Initialisation payload for a background-instance iframe (one per plugin). */
 export interface BackgroundInit {
@@ -32,6 +42,10 @@ export interface BackgroundInit {
   code: string;
   /** Initial app locale; host pushes updates via 'locale-change'. */
   locale: string;
+  /** Resolved presentation/regional preferences (time format, date locale, time zone). */
+  regional?: RegionalSnapshot;
+  /** Bulwark features that replace plugins (api.host.features); host pushes updates via 'host-change'. */
+  hostFeatures?: HostFeaturesView;
 }
 
 /** Initialisation payload for a slot-instance iframe (one per slot mount). */
@@ -40,6 +54,12 @@ export interface SlotInit {
   pluginId: string;
   /** Slot name the iframe should render a component for. */
   slot: SlotName;
+  /**
+   * The frame fills its panel instead of growing with its content: the
+   * plugin's root is as tall as the panel and scrolls inside, so it can pin
+   * controls at the bottom (a chat input). Only for panel slots.
+   */
+  fill?: boolean;
   /** Same bundle code as the background instance. */
   code: string;
   /**
@@ -63,26 +83,36 @@ export interface SlotInit {
    */
   extraProps: Record<string, unknown>;
   locale: string;
+  /** Resolved presentation/regional preferences (time format, date locale, time zone). */
+  regional?: RegionalSnapshot;
   /**
    * Resolved host theme (colour tokens, font stack, dark flag). The sandbox
    * can't load globals.css/fonts cross-origin, so the runtime replays this as
    * injected CSS + a `.dark` class. Host pushes updates via 'theme-change'.
    */
   theme: ThemeSnapshot;
+  /** Mirrors `BackgroundInit.hostFeatures`. */
+  hostFeatures?: HostFeaturesView;
 }
 
 export type InitPayload = BackgroundInit | SlotInit;
 
 // ─── Sandbox → Host messages ─────────────────────────────────
 
+/**
+ * The runtime is listening. Carries in `event.ports[0]` the port the runtime
+ * reports user input in the frame through, for the host's idle timeout; a
+ * message on it means "the user did something here just now". `event.ports[1]`
+ * carries the RPC channel bound to this runtime document.
+ */
 export interface ReadyMsg { type: 'sandbox-ready'; }
 
 export interface InitDoneMsg {
   type: 'init-done';
   /** Hook names the plugin registered. The host installs proxy handlers. */
   hooks: string[];
-  /** Slots the plugin claims. Used by the host to know when a slot is offered. */
-  slots: Array<{ name: SlotName; hasShouldShow: boolean; order: number }>;
+  /** Slots the plugin claims. Used by the host to know when a slot is offered. `fill`: a panel slot that fills its panel (see slot-layout.ts). */
+  slots: Array<{ name: SlotName; hasShouldShow: boolean; order: number; fill?: boolean; startFolded?: boolean }>;
   /**
    * Keyboard shortcuts the plugin declares. The host installs a global
    * keydown listener that dispatches to the `shortcut:<id>` hook when the
@@ -128,15 +158,66 @@ export interface HookResultMsg {
   error?: string;
 }
 
+/**
+ * A slot frame has applied a theme-change. The host sets the iframe element's
+ * color-scheme only now, so element and document never disagree (see
+ * SandboxInstance.setTheme).
+ */
+export interface ThemeAppliedMsg { type: 'theme-applied'; dark: boolean; }
+
 export interface SlotResizeMsg {
   type: 'slot-resize';
   height: number;
+  /** Natural content width, sent by inline slots (see slot-layout.ts). */
+  width?: number;
 }
 
 export interface SlotShouldShowResultMsg {
   type: 'slot-should-show-result';
   id: string;
   show: boolean;
+}
+
+export interface FloatingDropdownRect {
+  left: number;
+  top: number;
+  bottom: number;
+  width: number;
+  height: number;
+}
+
+export interface FloatingDropdownOption {
+  value: string;
+  label: string;
+  disabled?: boolean;
+}
+
+export interface FloatingDropdownOpenMsg {
+  type: 'floating-dropdown-open';
+  id: string;
+  rect: FloatingDropdownRect;
+  options: FloatingDropdownOption[];
+  multiple?: boolean;
+  selectedValues: string[];
+  singleValue?: string;
+  highlightedIndex: number;
+  ariaLabel?: string;
+}
+
+export interface FloatingDropdownUpdateMsg {
+  type: 'floating-dropdown-update';
+  id: string;
+  rect?: FloatingDropdownRect;
+  options?: FloatingDropdownOption[];
+  multiple?: boolean;
+  selectedValues?: string[];
+  singleValue?: string;
+  highlightedIndex?: number;
+}
+
+export interface FloatingDropdownCloseMsg {
+  type: 'floating-dropdown-close';
+  id: string;
 }
 
 export type SandboxToHost =
@@ -147,7 +228,11 @@ export type SandboxToHost =
   | CallbackInvokeMsg
   | HookResultMsg
   | SlotResizeMsg
-  | SlotShouldShowResultMsg;
+  | ThemeAppliedMsg
+  | SlotShouldShowResultMsg
+  | FloatingDropdownOpenMsg
+  | FloatingDropdownUpdateMsg
+  | FloatingDropdownCloseMsg;
 
 // ─── Host → Sandbox messages ─────────────────────────────────
 
@@ -168,10 +253,22 @@ export interface HookInvokeMsg {
   args: unknown[];
 }
 
-export interface LocaleChangeMsg { type: 'locale-change'; locale: string; }
+export interface LocaleChangeMsg {
+  type: 'locale-change';
+  locale: string;
+  regional?: RegionalSnapshot;
+  /** The plugin's tables for the new locale (init carries only the current ones). */
+  locales?: Record<string, Record<string, string>>;
+}
 
 /** Host → sandbox: the resolved theme changed; re-inject the slot's theme CSS. */
 export interface ThemeChangeMsg { type: 'theme-change'; theme: ThemeSnapshot; }
+
+/** Host → sandbox: the user changed this plugin's settings. */
+export interface SettingsChangeMsg { type: 'settings-change'; settings: Record<string, unknown>; }
+
+/** Host → sandbox: a Bulwark feature that replaces plugins was turned on or off. */
+export interface HostChangeMsg { type: 'host-change'; features: HostFeaturesView; }
 
 export interface PropsUpdateMsg { type: 'props-update'; props: Record<string, unknown>; }
 
@@ -182,66 +279,49 @@ export interface SlotShouldShowMsg {
   context: unknown;
 }
 
+/** Host → sandbox: a piece of a streamed api.proxy.fetch response. */
+export interface StreamChunkMsg { type: 'stream-chunk'; streamId: string; chunk: ArrayBuffer; }
+/** Host → sandbox: a streamed response ended (error set when it broke off). */
+export interface StreamEndMsg { type: 'stream-end'; streamId: string; error?: string; }
+/** Host → sandbox: upload progress of an api.proxy.fetch request. */
+export interface StreamProgressMsg { type: 'stream-progress'; streamId: string; loaded: number; total: number; }
+
+export interface FloatingDropdownSelectMsg {
+  type: 'floating-dropdown-select';
+  id: string;
+  option: FloatingDropdownOption;
+}
+
+export interface FloatingDropdownHighlightMsg {
+  type: 'floating-dropdown-highlight';
+  id: string;
+  index: number;
+}
+
+export interface FloatingDropdownDismissMsg {
+  type: 'floating-dropdown-dismiss';
+  id: string;
+}
+
 export type HostToSandbox =
   | InitMsg
+  | StreamChunkMsg
+  | StreamEndMsg
+  | StreamProgressMsg
   | ApiResponseMsg
   | CallbackResponseMsg
   | HookInvokeMsg
   | LocaleChangeMsg
   | ThemeChangeMsg
+  | SettingsChangeMsg
+  | HostChangeMsg
   | PropsUpdateMsg
-  | SlotShouldShowMsg;
-
-/** Marker used in extraProps for function values that the host owns. */
-export interface PluginCallbackMarker {
-  __pluginCallback: string;
-}
-
-export function isCallbackMarker(value: unknown): value is PluginCallbackMarker {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    typeof (value as { __pluginCallback?: unknown }).__pluginCallback === 'string'
-  );
-}
-
-// ─── Type guards ─────────────────────────────────────────────
-
-export function isSandboxMessage(value: unknown): value is SandboxToHost {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    typeof (value as { type?: unknown }).type === 'string'
-  );
-}
+  | SlotShouldShowMsg
+  | FloatingDropdownSelectMsg
+  | FloatingDropdownHighlightMsg
+  | FloatingDropdownDismissMsg;
 
 // ─── Constants ───────────────────────────────────────────────
 
 /** Path used for the sandbox iframe `src`. Matched in `proxy.ts` for CSP. */
 export const SANDBOX_PATH = '/plugin-sandbox';
-
-/** Methods callable by a plugin via api-request. Host enforces permissions. */
-export const API_METHODS = [
-  'storage.get', 'storage.set', 'storage.remove', 'storage.keys',
-  'http.post', 'http.fetch',
-  'crypto.createWebAuthn', 'crypto.getWebAuthn', 'crypto.getPublicKeys', 'crypto.createPublicKey', 'crypto.removePublicKey', 'crypto.getEncryptionAtRest', 'crypto.setEncryptionAtRest', 'crypto.getPublicKeyFromWKD',
-  'jmap.fetchBlob', 'jmap.uploadBlob', 'jmap.sendRaw',
-  // Narrow keyword helpers. Unlike the raw-blob methods, these are available
-  // to untrusted plugins with email:read/email:write as appropriate.
-  'jmap.getKeywords', 'jmap.setKeywords', 'jmap.setKeyword', 'jmap.removeKeyword',
-  'upfiles.get', 'upfiles.save',
-  'contact.get', 'contact.update', 'contact.create', 'contact.search',
-  'admin.getConfig', 'admin.getAllConfig', 'admin.setConfig', 'admin.deleteConfig',
-  'toast.success', 'toast.error', 'toast.info', 'toast.warning',
-  'ui.confirm', 'ui.alert', 'ui.prompt', 'ui.rerenderEmail', 'ui.rerenderFetchedEmails', 'ui.openExternalUrl', 'ui.downloadFile',
-  // Email keyword mutations (JMAP Email/set keyword patches).
-  'email.setKeyword', 'email.removeKeyword',
-  // Native tag definitions, discovery, and sidebar counts.
-  'keywords.list', 'keywords.add', 'keywords.reorder', 'keywords.discover', 'keywords.getCounts', 'keywords.refreshCounts',
-  // Message-list category tabs (Gmail-style inbox tabs).
-  'tabs.set', 'tabs.clear', 'tabs.getState', 'tabs.categorize', 'tabs.refreshCounts',
-  // Sieve integration for delivery-time classification plugins.
-  'sieve.isSupported', 'sieve.getActiveScript', 'sieve.validateScript', 'sieve.regenerate',
-] as const;
-
-export type ApiMethod = (typeof API_METHODS)[number];

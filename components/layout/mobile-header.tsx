@@ -1,26 +1,24 @@
 "use client";
 
+import type { ReactNode } from "react";
 import { Menu, ArrowLeft, Plus, Search, X } from "@/components/icons";
 import { Button } from "@/components/ui/button";
+import { IconButton } from "@/components/ui/icon-button";
 import { useUIStore } from "@/stores/ui-store";
+import { useShallow } from "zustand/react/shallow";
+import { useSettingsStore } from "@/stores/settings-store";
 import { useIsDesktop } from "@/hooks/use-media-query";
 import { useConfig } from "@/hooks/use-config";
 import { useThemeStore } from "@/stores/theme-store";
 import { withBasePath } from "@/lib/browser-navigation";
+import { ComailWordmark } from "@/components/atproto/comail-wordmark";
 import { cn } from "@/lib/utils";
 import { useTranslations } from "next-intl";
 import { AccountSwitcher } from "@/components/layout/account-switcher";
+import { PhoneHeaderMenu } from "@/components/layout/phone-header-actions";
 
-// comail brand masthead for the mobile list pane. Mirrors the mock: a deep-teal
-// bar carrying cammie + the cream "comail" wordmark (cyan "c") + the account
-// avatar. Only rendered for the comail theme; every other theme keeps the plain
-// bg-background MobileHeader, and this component is never rendered on desktop
-// (useIsDesktop short-circuits above).
-//
-// AA: cream #ecefcf on teal #02413c = 9.77:1 (AAA). The cyan "c" uses a lifted
-// cyan #8fd2e8 (6.88:1) rather than brand cyan #3fa1c0, which is only 3.88:1
-// on the teal bar. Cammie's mark is transparent, so it sits directly on the
-// teal bar — matching the desktop rail (see comail-brand-aa-insufficiency memory).
+// The mobile Comail masthead stays teal in both mailbox modes, so its
+// canonical wordmark uses the approved Dark palette.
 function ComailMasthead({ title, onMenu, onCompose }: { title: string; onMenu: () => void; onCompose?: () => void }) {
   const t = useTranslations('sidebar');
   const { appLogoDarkUrl } = useConfig();
@@ -56,17 +54,10 @@ function ComailMasthead({ title, onMenu, onCompose }: { title: string; onMenu: (
         )}
       </span>
 
-      {/* Wordmark: cream "comail" with lifted-cyan "c" */}
-      <span
-        className="font-bold text-[21px] leading-none whitespace-nowrap"
-        style={{ fontFamily: 'var(--comail-font-display), "Young Serif", serif' }}
-      >
-        <span className="text-[#8fd2e8]">c</span>
-        <span className="text-[#ecefcf]">omail</span>
-      </span>
+      <ComailWordmark theme="dark" className="text-[1.3125rem]" />
 
       {/* Active mailbox name as a muted cream subtitle, truncated */}
-      <span className="ml-1 min-w-0 flex-1 truncate text-[13px] text-[#a8b3a0] font-medium">{title}</span>
+      <span className="ml-1 min-w-0 flex-1 truncate text-[0.8125rem] text-[#a8b3a0] font-medium">{title}</span>
 
       {onCompose && (
         <Button
@@ -104,6 +95,11 @@ interface MobileHeaderProps {
   onClearSearch?: () => void;
   /** Whether a query is currently applied, which reveals the clear button. */
   searchActive?: boolean;
+  /** Mountain View: opens the merged across-accounts inbox from the avatar's popover. */
+  onSelectAllInboxes?: () => void;
+  allInboxesSelected?: boolean;
+  /** The app's entries at the top of the ⋮ menu; `close` shuts the menu. */
+  menuItems?: (close: () => void) => ReactNode;
 }
 
 export function MobileHeader({
@@ -118,10 +114,14 @@ export function MobileHeader({
   searchPlaceholder,
   onClearSearch,
   searchActive = false,
+  onSelectAllInboxes,
+  allInboxesSelected = false,
+  menuItems,
 }: MobileHeaderProps) {
   const t = useTranslations('sidebar');
-  const { toggleSidebar, goBack, sidebarOpen } = useUIStore();
+  const { toggleSidebar, goBack, sidebarOpen } = useUIStore(useShallow((state) => ({ toggleSidebar: state.toggleSidebar, goBack: state.goBack, sidebarOpen: state.sidebarOpen })));
   const activeThemeId = useThemeStore((s) => s.activeThemeId);
+  const mountainView = useSettingsStore((state) => state.interfaceLayout === 'mountain-view');
   // Pane-aware: in Pro split mode the viewport is desktop-wide while the
   // pane is narrow. The Tailwind `lg:hidden` variant alone would never fire
   // there, so we additionally hide via JS when the surrounding pane is
@@ -148,8 +148,12 @@ export function MobileHeader({
 
   return (
     <header
+      data-mobile-mail-header=""
       className={cn(
-        "flex items-center justify-between px-4 h-14 border-b border-border bg-background shrink-0",
+        "flex items-center justify-between h-14 shrink-0",
+        mountainView
+          ? "mx-2 mt-2 mb-1 rounded-full border-0 bg-muted px-2 shadow-sm"
+          : "border-b border-border bg-background px-4",
         className
       )}
     >
@@ -178,13 +182,21 @@ export function MobileHeader({
         </Button>
 
         {/* Title, unless the bar is in search-first mode */}
-        {!onOpenSearch && <h1 className="font-semibold text-lg truncate">{title}</h1>}
+        {/* Not a heading: the app's h1 already names the folder ("Inbox – Mail"). */}
+        {!onOpenSearch && <div className="font-semibold text-lg truncate">{title}</div>}
       </div>
 
       {onOpenSearch && (
         /* Not a single button: the clear control is a button of its own, and
            nesting one inside another is invalid markup. */
-        <div className="flex-1 min-w-0 h-10 mx-1 flex items-center rounded-full bg-muted ps-3 pe-1">
+        <div
+          data-mobile-mail-search=""
+          data-tour="search-input"
+          className={cn(
+            "flex-1 min-w-0 h-10 flex items-center rounded-full pe-1",
+            mountainView ? "mx-0 bg-transparent ps-2" : "mx-1 bg-muted ps-3"
+          )}
+        >
           <button
             type="button"
             onClick={onOpenSearch}
@@ -195,14 +207,13 @@ export function MobileHeader({
             <span className="truncate text-sm">{searchPlaceholder || title}</span>
           </button>
           {searchActive && onClearSearch && (
-            <button
-              type="button"
+            <IconButton
               onClick={onClearSearch}
-              className="h-8 w-8 flex-shrink-0 grid place-items-center rounded-full text-muted-foreground hover:bg-background/60"
-              aria-label={t('clear_search')}
+              className="flex-shrink-0 rounded-full text-muted-foreground hover:bg-background/60"
+              label={t('clear_search')}
             >
-              <X className="h-4 w-4" />
-            </button>
+              <X />
+            </IconButton>
           )}
         </div>
       )}
@@ -232,62 +243,17 @@ export function MobileHeader({
           </Button>
         )}
 
+        <PhoneHeaderMenu menuItems={menuItems} />
+
         {/* Which account you are reading is otherwise only visible after
             opening the drawer. Last in this group so it sits on the far
             edge — opposite the menu button, and mirrored under RTL because
             the header is laid out with flex rather than fixed sides. */}
-        <AccountSwitcher variant="header" />
-      </div>
-    </header>
-  );
-}
-
-/**
- * Viewer header for mobile - shows when viewing an email
- */
-interface MobileViewerHeaderProps {
-  subject?: string;
-  onBack: () => void;
-  onDelete?: () => void;
-  onArchive?: () => void;
-  className?: string;
-}
-
-export function MobileViewerHeader({
-  subject,
-  onBack,
-  onDelete: _onDelete,
-  onArchive: _onArchive,
-  className,
-}: MobileViewerHeaderProps) {
-  const t = useTranslations('sidebar');
-  const isPaneDesktop = useIsDesktop();
-  if (isPaneDesktop) return null;
-
-  return (
-    <header
-      className={cn(
-        "flex items-center justify-between px-2 h-14 border-b border-border bg-background shrink-0",
-        className
-      )}
-    >
-      <Button
-        variant="ghost"
-        size="icon"
-        onClick={onBack}
-        className="h-11 w-11"
-        aria-label={t('mobile.go_back')}
-      >
-        <ArrowLeft className="h-5 w-5" />
-      </Button>
-
-      <h1 className="flex-1 font-medium text-sm truncate px-2 text-center">
-        {subject || "(No Subject)"}
-      </h1>
-
-      <div className="flex items-center">
-        {/* Placeholder for additional actions - kept minimal */}
-        <div className="w-10" />
+        <AccountSwitcher
+          variant="header"
+          onSelectAllInboxes={onSelectAllInboxes}
+          allInboxesSelected={allInboxesSelected}
+        />
       </div>
     </header>
   );

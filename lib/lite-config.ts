@@ -1,48 +1,10 @@
 import type { ConfigData } from '@/hooks/use-config';
 import type { SettingsPolicy } from '@/lib/admin/types';
 import { DEFAULT_POLICY } from '@/lib/admin/types';
-import { httpUrlOrEmpty } from '@/lib/config-validation';
-
-/**
- * Runtime configuration for the static Lite build.
- *
- * `/api/config` used to merge env vars, the admin dashboard and per-host
- * branding on the server. Lite reads `config.json` instead: a deployer edits a
- * handful of keys (server URL, app name, logos) and everything else falls
- * back to the same defaults `useConfig` already assumes. Whatever the file
- * says, the flags that only work with a Next.js server behind them are forced
- * off so no surface ever calls an endpoint that does not exist.
- */
-
-/** Keys a deployer may set in config.json. Everything else is ignored. */
-export const LITE_CONFIG_KEYS = [
-  'appName',
-  'jmapServerUrl',
-  'allowCustomJmapEndpoint',
-  'jmapServers',
-  'jmapServerAutoPickByDomain',
-  'demoMode',
-  'rememberMeEnabled',
-  'faviconUrl',
-  'appLogoLightUrl',
-  'appLogoDarkUrl',
-  'loginLogoLightUrl',
-  'loginLogoDarkUrl',
-  'loginCompanyName',
-  'loginImprintUrl',
-  'loginPrivacyPolicyUrl',
-  'loginWebsiteUrl',
-  'loginLogoMaxHeight',
-  'loginLogoMaxWidth',
-  'loginShowHeading',
-  'loginShowSubtitle',
-  'loginShowTotp',
-  'loginShowTokenLogin',
-  'loginShowVersion',
-  'embeddedMode',
-  'parentOrigin',
-  'sourceCodeUrl',
-] as const;
+import { httpOrMailtoOrEmpty, httpUrlOrEmpty } from '@/lib/config-validation';
+import { parseNoThirdPartyValue } from '@/lib/third-party-mode';
+import { sanitizeOrganisationPolicy } from '@/lib/admin/organisation-policy';
+import { sanitizeRestrictions, sanitizeScopes } from '@/lib/admin/policy-scopes';
 
 /**
  * Flags that need the Next.js server (cookies, filesystem, OAuth relay). They
@@ -79,8 +41,9 @@ function trimUrl(value: string): string {
  * - `jmapServerUrl` is trimmed of trailing slashes.
  * - `allowCustomJmapEndpoint` defaults to *on* when no server is configured,
  *   so an unedited download still lets people type their server.
- * - `rememberMeEnabled` defaults to on; the login page still hides the box for
- *   servers without Stalwart's token login (see lib/auth/lite-tokens.ts).
+ * - `rememberMeEnabled` defaults to on, and sign-ins are remembered without
+ *   asking unless `loginShowRememberMe` shows the box. Servers without
+ *   Stalwart's token login are never remembered (see lib/auth/lite-tokens.ts).
  * - `defaults.jmapServerUrl` (the Stalwart build passes the page origin) fills
  *   an empty server URL, and the server field then stays hidden unless
  *   config.json explicitly allows it.
@@ -121,6 +84,7 @@ export function applyLiteConfig(raw: unknown, defaults?: { jmapServerUrl?: strin
     oauthClientId: '',
     oauthIssuerUrl: '',
     oauthScopes: '',
+    oauthResource: '',
     rememberMeEnabled: bool(input.rememberMeEnabled, true),
     faviconUrl: str(input.faviconUrl, '') || '/branding/Bulwark_Favicon.svg',
     appLogoLightUrl: str(input.appLogoLightUrl, ''),
@@ -131,12 +95,14 @@ export function applyLiteConfig(raw: unknown, defaults?: { jmapServerUrl?: strin
     loginImprintUrl: str(input.loginImprintUrl, ''),
     loginPrivacyPolicyUrl: str(input.loginPrivacyPolicyUrl, ''),
     loginWebsiteUrl: str(input.loginWebsiteUrl, ''),
+    loginUsernamePlaceholder: str(input.loginUsernamePlaceholder, ''),
     loginLogoMaxHeight: str(input.loginLogoMaxHeight, ''),
     loginLogoMaxWidth: str(input.loginLogoMaxWidth, ''),
     loginShowHeading: bool(input.loginShowHeading, true),
     loginShowSubtitle: bool(input.loginShowSubtitle, true),
     loginShowTotp: bool(input.loginShowTotp, true),
     loginShowTokenLogin: bool(input.loginShowTokenLogin, false),
+    loginShowRememberMe: bool(input.loginShowRememberMe, false),
     loginShowVersion: bool(input.loginShowVersion, true),
     demoMode: bool(input.demoMode, false),
     allowCustomJmapEndpoint: bool(input.allowCustomJmapEndpoint, jmapServerUrl === '' && jmapServers.length === 0),
@@ -145,6 +111,14 @@ export function applyLiteConfig(raw: unknown, defaults?: { jmapServerUrl?: strin
     embeddedMode: bool(input.embeddedMode, false),
     parentOrigin: str(input.parentOrigin, ''),
     sourceCodeUrl: httpUrlOrEmpty(input.sourceCodeUrl),
+    accessibilityStatementUrl: httpUrlOrEmpty(input.accessibilityStatementUrl),
+    accessibilityFeedbackUrl: httpOrMailtoOrEmpty(input.accessibilityFeedbackUrl),
+    helpUrl: httpUrlOrEmpty(input.helpUrl),
+    easyReadUrl: httpUrlOrEmpty(input.easyReadUrl),
+    signLanguageUrl: httpUrlOrEmpty(input.signLanguageUrl),
+    // Same browser-side switches as the server build (lib/outgoing-hosts.ts).
+    noThirdPartyTraffic: parseNoThirdPartyValue(input.noThirdPartyTraffic),
+    oauthRevokeOnSignOut: bool(input.oauthRevokeOnSignOut, true),
     ...LITE_FORCED_FLAGS,
   };
 }
@@ -166,19 +140,32 @@ export function applyLitePolicy(raw: unknown): SettingsPolicy {
   return {
     ...DEFAULT_POLICY,
     ...input,
-    restrictions: { ...(input.restrictions ?? {}) },
+    restrictions: sanitizeRestrictions(input.restrictions),
     defaults: { ...(input.defaults ?? {}) },
     themePolicy: { ...DEFAULT_POLICY.themePolicy, ...(input.themePolicy ?? {}) },
     features: {
       ...DEFAULT_POLICY.features,
       ...(input.features ?? {}),
-      pluginsEnabled: false,
-      pluginsUploadEnabled: false,
-      sidebarAppsEnabled: false,
+      ...LITE_PINNED_FEATURES,
     },
     forceEnabledPlugins: [],
     approvedPlugins: [],
     forceEnabledThemes: [],
     defaultSidebarApps: [],
+    organisation: sanitizeOrganisationPolicy(input.organisation),
+    // A scope can't switch back on what Lite can't do.
+    scopes: sanitizeScopes(input.scopes).map((scope) => ({
+      ...scope,
+      policy: { ...scope.policy, features: { ...scope.policy.features, ...LITE_PINNED_FEATURES } },
+    })),
   };
 }
+
+const LITE_PINNED_FEATURES = {
+  pluginsEnabled: false,
+  pluginsUploadEnabled: false,
+  sidebarAppsEnabled: false,
+  // Kept by this app's server, which Lite does not have.
+  accountArchiveEnabled: false,
+  accountArchivePasswordsEnabled: false,
+} as const;

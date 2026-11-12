@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { observeUpstream } from '@/lib/metrics/upstream';
 import { rejectCrossOriginRequest } from '@/lib/security/same-origin';
 import { readFileEnv } from "@/lib/read-file-env";
 import { getStalwartCredentials } from '@/lib/stalwart/credentials';
+import { isNoThirdPartyTrafficOn, thirdPartyRefusal } from '@/lib/admin/third-party-mode';
 
 // Host-side proxy backing the "Translate" plugin (manifest apiPostPaths:
 // ["/api/translate"]). The plugin slot iframe POSTs { text, target, source,
@@ -173,10 +175,10 @@ async function mymemoryRequest(
   url.searchParams.set('q', q);
   url.searchParams.set('langpair', langpair);
 
-  const res = await fetch(url.toString(), {
+  const res = await observeUpstream('translate', () => fetch(url.toString(), {
     signal,
-    headers: { 'User-Agent': 'JMAP-Webmail/1.0 Translate-Plugin' },
-  });
+    headers: { 'User-Agent': 'Bulwark-Webmail-Translate (+https://bulwarkmail.org)' },
+  }));
   const data = (await res.json().catch(() => null)) as
     | { responseStatus?: number | string; responseData?: { translatedText?: string }; responseDetails?: string }
     | null;
@@ -231,7 +233,7 @@ async function translateLibre(
     process.env.LIBRETRANSLATE_API_KEY ||
     readFileEnv(process.env.LIBRETRANSLATE_API_KEY_FILE);
   const url = endpoint.replace(/\/+$/, '') + '/translate';
-  const res = await fetch(url, {
+  const res = await observeUpstream('translate', () => fetch(url, {
     method: 'POST',
     signal,
     headers: { 'Content-Type': 'application/json' },
@@ -242,7 +244,7 @@ async function translateLibre(
       format: 'text',
       ...(apiKey ? { api_key: apiKey } : {}),
     }),
-  });
+  }));
   const data = (await res.json().catch(() => null)) as
     | { translatedText?: string; detectedLanguage?: { language?: string }; error?: string }
     | null;
@@ -284,6 +286,10 @@ export async function POST(request: NextRequest) {
   const target = typeof body.target === 'string' && body.target.trim() ? body.target.trim() : 'en';
   const source = typeof body.source === 'string' && body.source.trim() ? body.source.trim() : 'auto';
   const provider: Provider = body.provider === 'libretranslate' ? 'libretranslate' : 'mymemory';
+  // MyMemory is a public service; the admin's own LibreTranslate is not (#903).
+  if (provider === 'mymemory' && await isNoThirdPartyTrafficOn()) {
+    return thirdPartyRefusal('Translation through MyMemory');
+  }
 
   if (!text) {
     return NextResponse.json({ error: 'No text to translate' }, { status: 400 });

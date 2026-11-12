@@ -4,13 +4,24 @@ import { requireAdminAuth, getClientIP } from '@/lib/admin/session';
 import { getStalwartCredentials, type StalwartCredentials } from '@/lib/stalwart/credentials';
 import { fetchJmapServer } from '@/lib/stalwart/server-fetch';
 import { configManager } from '@/lib/admin/config-manager';
+import { isConfigReadOnly, ConfigReadOnlyError } from '@/lib/admin/paths';
 import { auditLog } from '@/lib/admin/audit';
 import { logger } from '@/lib/logger';
+import { configWriteErrorResponse } from '@/lib/admin/config-read-only-response';
 import { locales as ALL_LOCALES } from '@/i18n/routing';
+import { trimTrailingSlashes } from '@/lib/url-normalization';
 
 const CLIENT_ID = 'bulwark-webmail';
-const CLIENT_DESCRIPTION = 'Comail (auto-configured)';
+const CLIENT_DESCRIPTION = 'Bulwark Webmail (auto-configured)';
+// Bulwark Mobile's own client (#1459). The webmail's can't serve the app: it
+// has a secret, which Stalwart wants at the token endpoint and the app
+// doesn't have. The redirect is the app's App Store and Play id as a
+// private-use scheme (RFC 8252), which the iOS and Android apps register.
+const MOBILE_CLIENT_ID = 'bulwark-mobile';
+const MOBILE_CLIENT_DESCRIPTION = 'Bulwark Mobile (auto-configured)';
+const MOBILE_REDIRECT_URI = 'org.bulwarkmail.mobile:/auth/callback';
 const JMAP_TIMEOUT_MS = 10_000;
+const STALWART_USING = ['urn:ietf:params:jmap:core', 'urn:stalwart:jmap'];
 
 interface JmapMethodCall {
   using: string[];
@@ -81,8 +92,87 @@ interface SetupRequestBody {
   oauthOnly?: boolean;
 }
 
+interface SetError {
+  type?: string;
+  properties?: unknown[];
+}
+
+/** A Stalwart that doesn't know the firstParty field (0.16) refused the set. */
+function refusedFirstParty(res: JmapMethodResponse): boolean {
+  const body = res.methodResponses?.[0]?.[1] as
+    | { notCreated?: Record<string, SetError>; notUpdated?: Record<string, SetError> }
+    | undefined;
+  return Object.values({ ...body?.notCreated, ...body?.notUpdated }).some((error) =>
+    error?.type === 'invalidPatch'
+    && Array.isArray(error.properties)
+    && error.properties.some((p) => String(p).replace(/^\//, '') === 'firstParty'));
+}
+
+/**
+ * A public first-party client for Bulwark Mobile, so the app's own sign-in
+ * on Stalwart 1.0 reaches the account's Stalwart settings too. The client
+ * the app registers for itself otherwise gets the data scopes only. An
+ * existing one is taken over as the webmail's is, its secret dropped.
+ */
+async function setUpMobileClient(
+  creds: ServerCreds,
+  accountId: string,
+  contact: string,
+): Promise<'created' | 'updated' | 'failed'> {
+  try {
+    const queryRes = await jmapCall(creds, {
+      using: STALWART_USING,
+      methodCalls: [['x:OAuthClient/query', { accountId, filter: { clientId: MOBILE_CLIENT_ID } }, '0']],
+    });
+    const queryEntry = queryRes.methodResponses?.[0];
+    if (!queryEntry || queryEntry[0] === 'error') return 'failed';
+    const existingId = ((queryEntry[1].ids as string[] | undefined) ?? [])[0];
+
+    const fields = {
+      description: MOBILE_CLIENT_DESCRIPTION,
+      redirectUris: { [MOBILE_REDIRECT_URI]: true },
+      firstParty: true,
+    };
+    const setRes = await jmapCall(creds, {
+      using: STALWART_USING,
+      methodCalls: [['x:OAuthClient/set', existingId
+        ? { accountId, update: { [existingId]: { ...fields, secret: null } } }
+        : { accountId, create: { mobile: { clientId: MOBILE_CLIENT_ID, contacts: { [contact]: true }, ...fields } } },
+      '0']],
+    });
+    const setEntry = setRes.methodResponses?.[0];
+    const setBody = setEntry?.[1] as { notCreated?: Record<string, unknown>; notUpdated?: Record<string, unknown> } | undefined;
+    if (!setEntry || setEntry[0] === 'error'
+      || Object.keys(setBody?.notCreated ?? {}).length > 0
+      || Object.keys(setBody?.notUpdated ?? {}).length > 0) {
+      logger.warn('Admin OAuth setup: mobile client refused', { detail: JSON.stringify(setEntry?.[1] ?? null).slice(0, 300) });
+      return 'failed';
+    }
+    return existingId ? 'updated' : 'created';
+  } catch (error) {
+    logger.warn('Admin OAuth setup: mobile client failed', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+    });
+    return 'failed';
+  }
+}
+
 function isValidOriginUrl(value: string): boolean {
   return /^https?:\/\/[^/]+$/.test(value);
+}
+
+// The setup acts as the mail account signed in to this webmail, not as the
+// admin: a login to the Stalwart web admin sets no cookie here.
+const NOT_SIGNED_IN =
+  'Sign in to this webmail with a Stalwart admin account in this browser, then retry. '
+  + 'A login to the Stalwart web admin does not count.';
+
+/** Which mail account the setup would run as, so the page can say before it starts. */
+export async function GET(request: NextRequest) {
+  const auth = await requireAdminAuth(request);
+  if ('error' in auth) return auth.error;
+  const creds = await getStalwartCredentials(request);
+  return NextResponse.json(creds ? { signedIn: true, username: creds.username } : { signedIn: false });
 }
 
 export async function POST(request: NextRequest) {
@@ -90,24 +180,31 @@ export async function POST(request: NextRequest) {
     const auth = await requireAdminAuth(request);
     if ('error' in auth) return auth.error;
 
-    const ip = getClientIP(request);
-    const creds = await getStalwartCredentials(request);
-    if (!creds) {
+    // The setup ends by saving the client secret here. Refuse before
+    // touching Stalwart, or a read-only config leaves an orphaned client
+    // (or a rotated secret nobody stored) on the server.
+    if (isConfigReadOnly()) {
       return NextResponse.json(
-        { error: 'No Stalwart session available. Sign in to your mail account in another tab and retry.' },
-        { status: 400 },
+        { error: new ConfigReadOnlyError('set up OAuth').message },
+        { status: 409 },
       );
     }
 
+    const ip = getClientIP(request);
+    const creds = await getStalwartCredentials(request);
+    if (!creds) {
+      return NextResponse.json({ error: NOT_SIGNED_IN }, { status: 400 });
+    }
+
     const body = await request.json() as SetupRequestBody;
-    const origin = (body.origin ?? '').trim().replace(/\/+$/, '');
+    const origin = trimTrailingSlashes((body.origin ?? '').trim());
     if (!isValidOriginUrl(origin)) {
       return NextResponse.json(
         { error: 'Webmail origin must be a URL like "https://webmail.example.com" with no path.' },
         { status: 400 },
       );
     }
-    const issuerUrl = (body.issuerUrl ?? origin).trim().replace(/\/+$/, '');
+    const issuerUrl = trimTrailingSlashes((body.issuerUrl ?? origin).trim());
     if (!isValidOriginUrl(issuerUrl)) {
       return NextResponse.json(
         { error: 'Stalwart issuer URL must be a URL like "https://mail.example.com" with no path.' },
@@ -131,7 +228,7 @@ export async function POST(request: NextRequest) {
     }
 
     const queryRes = await jmapCall(creds, {
-      using: ['urn:ietf:params:jmap:core', 'urn:stalwart:jmap'],
+      using: STALWART_USING,
       methodCalls: [[
         'x:OAuthClient/query',
         { accountId, filter: { clientId: CLIENT_ID } },
@@ -151,41 +248,51 @@ export async function POST(request: NextRequest) {
     const secret = randomBytes(32).toString('base64url');
     const redirectUris = buildRedirectUris(origin, localeList);
 
-    let setArgs: Record<string, unknown>;
-    let action: 'created' | 'updated';
-    if (existingIds.length > 0) {
-      const targetId = existingIds[0];
-      action = 'updated';
-      setArgs = {
-        accountId,
-        update: {
-          [targetId]: {
-            secret,
-            redirectUris,
-            description: CLIENT_DESCRIPTION,
+    const action: 'created' | 'updated' = existingIds.length > 0 ? 'updated' : 'created';
+    // Stalwart 1.0 gives a client full access to the account (its Stalwart
+    // settings too: password, TOTP, app passwords) only when it is first-party;
+    // any other client gets just the data scopes it was granted. 0.16 has no
+    // such field and refuses it as an invalid patch, so the setup retries
+    // without it there.
+    const buildSetArgs = (firstParty: boolean): Record<string, unknown> => {
+      const extra = firstParty ? { firstParty: true } : {};
+      return action === 'updated'
+        ? {
+          accountId,
+          update: {
+            [existingIds[0]]: {
+              secret,
+              redirectUris,
+              description: CLIENT_DESCRIPTION,
+              ...extra,
+            },
           },
-        },
-      };
-    } else {
-      action = 'created';
-      setArgs = {
-        accountId,
-        create: {
-          new: {
-            clientId: CLIENT_ID,
-            description: CLIENT_DESCRIPTION,
-            secret,
-            redirectUris,
-            contacts: { [creds.username]: true },
+        }
+        : {
+          accountId,
+          create: {
+            new: {
+              clientId: CLIENT_ID,
+              description: CLIENT_DESCRIPTION,
+              secret,
+              redirectUris,
+              contacts: { [creds.username]: true },
+              ...extra,
+            },
           },
-        },
-      };
-    }
-
-    const setRes = await jmapCall(creds, {
-      using: ['urn:ietf:params:jmap:core', 'urn:stalwart:jmap'],
-      methodCalls: [['x:OAuthClient/set', setArgs, '0']],
+        };
+    };
+    const callSet = (firstParty: boolean) => jmapCall(creds, {
+      using: STALWART_USING,
+      methodCalls: [['x:OAuthClient/set', buildSetArgs(firstParty), '0']],
     });
+
+    let firstParty = true;
+    let setRes = await callSet(true);
+    if (refusedFirstParty(setRes)) {
+      firstParty = false;
+      setRes = await callSet(false);
+    }
 
     const setEntry = setRes.methodResponses?.[0];
     if (!setEntry || setEntry[0] === 'error') {
@@ -195,6 +302,7 @@ export async function POST(request: NextRequest) {
       }, { status: 403 });
     }
     const setBody = setEntry[1] as {
+      created?: Record<string, { id?: string }>;
       notCreated?: Record<string, unknown>;
       notUpdated?: Record<string, unknown>;
     };
@@ -219,7 +327,33 @@ export async function POST(request: NextRequest) {
       oauthIssuerUrl: issuerUrl,
     };
     if (oauthOnly) updates.oauthOnly = true;
-    await configManager.setAdminConfig(updates);
+    try {
+      await configManager.setAdminConfig(updates);
+    } catch (error) {
+      // Don't leave a client behind that this install never stored. An
+      // updated client can't be restored: Stalwart doesn't hand back the
+      // old secret.
+      if (action === 'created') {
+        const createdId = setBody.created?.new?.id;
+        if (createdId) {
+          await jmapCall(creds, {
+            using: STALWART_USING,
+            methodCalls: [['x:OAuthClient/set', { accountId, destroy: [createdId] }, '0']],
+          }).catch((rollbackError) => {
+            logger.error('Admin OAuth setup rollback failed', {
+              error: rollbackError instanceof Error ? rollbackError.message : 'Unknown error',
+            });
+          });
+        }
+      }
+      throw error;
+    }
+
+    // Only Stalwart 1.0 has first-party clients. The webmail is set up by
+    // now, so a refused mobile client is reported, not an error.
+    const mobileClient = firstParty
+      ? await setUpMobileClient(creds, accountId, creds.username)
+      : 'skipped';
 
     await auditLog('admin.oauth_setup', {
       action,
@@ -228,6 +362,7 @@ export async function POST(request: NextRequest) {
       issuer: issuerUrl,
       redirectUriCount: localeList.length,
       oauthOnly,
+      mobileClient,
     }, ip);
 
     logger.info('Admin OAuth setup', {
@@ -236,6 +371,7 @@ export async function POST(request: NextRequest) {
       origin,
       issuer: issuerUrl,
       locales: localeList.length,
+      mobileClient,
     });
 
     return NextResponse.json({
@@ -245,8 +381,13 @@ export async function POST(request: NextRequest) {
       origin,
       issuerUrl,
       redirectUriCount: localeList.length,
+      mobileClient,
+      mobileClientId: MOBILE_CLIENT_ID,
+      mobileRedirectUri: MOBILE_REDIRECT_URI,
     });
   } catch (error) {
+    const refused = configWriteErrorResponse(error);
+    if (refused) return refused;
     logger.error('Admin OAuth setup error', { error: error instanceof Error ? error.message : 'Unknown error' });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal server error' },

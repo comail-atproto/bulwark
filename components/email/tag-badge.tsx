@@ -4,11 +4,14 @@ import { useTranslations } from "next-intl";
 import { X } from "@/components/icons";
 import { cn } from "@/lib/utils";
 import { useKeywordFormat } from "@/hooks/use-keyword-format";
+import type { TagScope } from "@/hooks/use-account-tags";
 import { useShortenedText } from "@/hooks/use-shortened-text";
+import { useSettingsStore } from "@/stores/settings-store";
 
 /**
  * How much room the surface has for a tag.
- * - `badge` names the tag; `dot` only identifies it by colour.
+ * - `badge` names the tag; `dot` shows its colour and first letter (and the
+ *   whole name with "Show colour names" on).
  */
 export type TagBadgeVariant = "badge" | "dot";
 
@@ -17,7 +20,7 @@ export type TagBadgeVariant = "badge" | "dot";
  * it rather than approximating its padding and text size.
  */
 export const TAG_LOZENGE_CLASS =
-  "inline-flex min-w-0 shrink-0 items-center rounded-full px-2 py-0.5 text-[11px] font-medium";
+  "inline-flex min-w-0 shrink-0 items-center rounded-full px-2 py-0.5 text-[0.6875rem] font-medium";
 
 /**
  * The row a group of tags sits in. Using it for neighbouring lozenges too keeps
@@ -42,6 +45,7 @@ export function TagBadge({
   variant,
   onRemove,
   className,
+  scope,
 }: {
   tagId: string;
   variant: TagBadgeVariant;
@@ -51,19 +55,35 @@ export function TagBadge({
    */
   onRemove?: () => void;
   className?: string;
+  /** The message's account (useEmailTagScope); undefined: TagScopeContext. */
+  scope?: TagScope | null;
 }) {
   const t = useTranslations("email_viewer");
-  const { tagName, tagNameCandidates, tagColor } = useKeywordFormat();
+  const { tagName, tagNameCandidates, tagColor } = useKeywordFormat(scope);
   const [labelRef, shortenedName] = useShortenedText(tagNameCandidates(tagId));
   const color = tagColor(tagId);
   const name = tagName(tagId);
+  const showColorNames = useSettingsStore((st) => st.showColorNames);
 
-  if (variant === "dot") {
+  // "Show colour names" (Settings > Accessibility): the named form even where
+  // only a dot fits, so no tag is told apart by its colour alone.
+  if (variant === "dot" && !showColorNames) {
+    // Not colour alone either way: the dot carries the tag's first letter,
+    // in the lozenge's own colours (WCAG 1.4.1).
+    const initial = [...name.trim()][0]?.toLocaleUpperCase() ?? "";
     return (
       <span
-        className={cn("h-2.5 w-2.5 shrink-0 rounded-full", color.dot, className)}
+        className={cn(
+          "inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full border px-0.5 text-[0.5625rem] font-bold leading-none",
+          color.fill,
+          color.border,
+          color.text,
+          className,
+        )}
         title={name}
+        data-tag-dot=""
       >
+        <span aria-hidden="true">{initial}</span>
         <span className="sr-only">{name}</span>
       </span>
     );
@@ -88,7 +108,8 @@ export function TagBadge({
         <button
           type="button"
           onClick={onRemove}
-          className="ms-0.5 shrink-0 rounded-full p-0.5 hover:bg-black/10 dark:hover:bg-white/10"
+          // 24px to hit, drawn as before: the margins give the padding back.
+          className="-my-1 -me-1 shrink-0 rounded-full p-1.5 hover:bg-black/10 dark:hover:bg-white/10"
           title={t("remove_tag")}
           aria-label={t("remove_tag")}
         >

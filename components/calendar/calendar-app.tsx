@@ -1,15 +1,16 @@
 "use client";
 
+import { hoverOpens } from "@/lib/open-on-hover";
 import { useState, useEffect, useCallback, useRef, useMemo, type TouchEvent as ReactTouchEvent } from "react";
 import { useRouter } from "@/i18n/navigation";
 import { useTranslations } from "next-intl";
-import { Plus } from "@/components/icons";
+import { Plus, ListTodo, CalendarDays, Upload, Globe, RefreshCw, Search } from "@/components/icons";
 import {
   addMonths, subMonths, addWeeks, subWeeks, addDays, subDays,
-  format, parseISO,
+  format, parseISO, startOfWeek,
 } from "date-fns";
 import { useCalendarStore } from "@/stores/calendar-store";
-import { isCalendarViewMode } from "@/stores/calendar-store";
+import { isCalendarViewMode, type CalendarViewMode } from "@/stores/calendar-store";
 import { useAuthStore, redirectToLogin, saveRedirectAfterLogin } from '@/stores/auth-store';
 import { useEmailStore } from "@/stores/email-store";
 import { useSettingsStore } from "@/stores/settings-store";
@@ -21,13 +22,19 @@ import { useIsDesktop, useIsMobile } from "@/hooks/use-media-query";
 import { useConfig } from "@/hooks/use-config";
 import { useAccountPrincipalEmails } from "@/hooks/use-account-principal-emails";
 import { Button } from "@/components/ui/button";
+import { CalendarSkeleton, CalendarSkeletonBody, CalendarViewSkeleton, calendarSkeletonText } from "@/components/boot-skeleton/calendar-skeleton";
+import { SkeletonRegion } from "@/components/boot-skeleton/kit";
+import { useSkeletonLabels } from "@/components/boot-skeleton/use-skeleton-labels";
 import { CalendarToolbar } from "@/components/calendar/calendar-toolbar";
 import { CalendarMonthView } from "@/components/calendar/calendar-month-view";
 import { CalendarWeekView } from "@/components/calendar/calendar-week-view";
 import { CalendarDayView } from "@/components/calendar/calendar-day-view";
 import { CalendarAgendaView } from "@/components/calendar/calendar-agenda-view";
-import { TaskListView } from "@/components/calendar/task-list-view";
+import { TaskListView, filterTasksForList } from "@/components/calendar/task-list-view";
+import { CalendarLoadErrorNotice } from "@/components/calendar/calendar-load-error-notice";
 import { TaskToolbar } from "@/components/calendar/task-toolbar";
+import { PluginTaskView, usePluginTaskView } from "@/components/plugins/plugin-task-view";
+import { onOpenTask } from "@/lib/plugin-sandbox/open-task";
 import { TaskModal } from "@/components/calendar/task-modal";
 import { MiniCalendar } from "@/components/calendar/mini-calendar";
 import { CalendarSidebarPanel } from "@/components/calendar/calendar-sidebar-panel";
@@ -35,9 +42,11 @@ import { EventModal, type PendingEventPreview } from "@/components/calendar/even
 import { EventDetailPopover } from "@/components/calendar/event-detail-popover";
 import { EventContextMenu } from "@/components/calendar/event-context-menu";
 import { AppTopBannerSlot } from "@/components/plugins/app-top-banner-slot";
+import { useStrictestDevices } from "@/hooks/use-device-policy";
 import { EmptySpaceContextMenu } from "@/components/calendar/empty-space-context-menu";
 import { useContextMenu } from "@/hooks/use-context-menu";
 import { useRefreshGesture } from "@/hooks/use-refresh-gesture";
+import { useCalendarPushRefresh } from "@/hooks/use-calendar-push-refresh";
 import { downloadEventICS } from "@/lib/calendar-ics-export";
 import { ICalImportModal } from "@/components/calendar/ical-import-modal";
 import { ICalSubscriptionModal } from "@/components/calendar/ical-subscription-modal";
@@ -52,55 +61,84 @@ import { useIsFocusedProTab, useIsPaneScoped } from "@/hooks/use-pane-context";
 import { useProMultiAccountCalendars } from "@/hooks/use-pro-multi-account-calendars";
 import { ResizeHandle } from "@/components/layout/resize-handle";
 import { buildDuplicateEventData } from "@/lib/calendar-duplicate";
+import { descriptionWithNote } from "@/lib/calendar-description";
 import { filterTasksByCalendars } from "@/lib/calendar-tasks";
-import {
-  baseEventStoreId,
-  buildFallbackExcludePatch,
-  buildFallbackOverridePatch,
-  isBrowserExpandedOccurrence,
-  isServerRecurrenceInstance,
-  overrideContextOf,
-  withNewOverrideDetails,
-} from "@/lib/recurrence-instances";
+import { baseEventStoreId, isServerRecurrenceInstance } from "@/lib/recurrence-instances";
+import { deleteOccurrence, saveOccurrenceEdit, type EventEditorState } from "@/lib/recurrence-scope-edit";
+import { useContactNameResolver } from "@/hooks/use-contact-name-resolver";
 import { getClientByLocalAccountId } from "@/stores/client-registry";
+import { useCalendarErrorMessage } from "@/hooks/use-calendar-error-message";
+import { useCalendarAutoRefresh } from "@/hooks/use-calendar-auto-refresh";
 import { resolveCalendarActionClient } from "@/lib/calendar-action-client";
-import { getEventStartDate } from "@/lib/calendar-utils";
-import { displayNow } from "@/lib/timezone";
-import { useTaskStore } from "@/stores/task-store";
+import { getEventDisplayEndDate, getEventEndDate, getEventStartDate } from "@/lib/calendar-utils";
+import { displayNow, getEffectiveTimeZone } from "@/lib/timezone";
+import { canCreateEventsIn, getEventEditability, type EditabilityContext } from "@/lib/calendar-editability";
+import { QuickCreatePopover, type QuickCreateDraft } from "@/components/calendar/quick-create-popover";
+import { TASKS_LOAD_ERROR, useTaskStore } from "@/stores/task-store";
 import { useContactStore } from "@/stores/contact-store";
-import { cn } from "@/lib/utils";
+import { cn, generateUUID } from "@/lib/utils";
 import type { Calendar, CalendarEvent, CalendarParticipant, CalendarRights, CalendarTask } from "@/lib/jmap/types";
 import { ShareCollectionDialog } from "@/components/settings/share-collection-dialog";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { Dialog } from "@/components/ui/dialog";
 import { useConfirmDialog } from "@/hooks/use-confirm-dialog";
 import { SchedulingDeniedError } from "@/lib/jmap/scheduling-error";
 import { SpaceCalendarError } from "@/lib/jmap/space-calendar-adapter";
-import { showSpaceCalendarAuthorization, showSpaceCalendarAuthorizationUrl } from "@/lib/space-calendar/authorization-ui";
+import { useSpaceCalendarSources } from "@/hooks/use-space-calendar-sources";
 import { CreateCalendarModal } from "@/components/calendar/create-calendar-modal";
-import { getUserParticipantId, collectUserCalendarAddresses } from "@/lib/calendar-participants";
+import { CalendarSidebarHeader } from "@/components/calendar/calendar-sidebar-header";
+import { getUserParticipantId, collectUserCalendarAddresses, userOrganizes, getParticipantList } from "@/lib/calendar-participants";
+import type { AnswerTarget } from "@/lib/calendar-delegate";
+import type { MoveEventHandler } from "@/hooks/use-time-grid-interactions";
+import type { RevealTime } from "@/hooks/use-display-hours";
 import { generateBirthdayEvents, createBirthdayCalendar, BIRTHDAY_CALENDAR_ID } from "@/lib/birthday-calendar";
-import { sharedCalendarColorKey, pickUnusedCalendarColor } from "@/lib/shared-calendar-colors";
+import { feedIdOf, isCompanyCalendarId } from "@/lib/company-calendars";
+import { expandRecurringEvents } from "@/lib/recurrence-expansion";
+import { useCompanyCalendars } from "./use-company-calendars";
+import { sharedCalendarColorKey, autoAssignSharedCalendarColors } from "@/lib/shared-calendar-colors";
 import { debug } from "@/lib/debug";
 import { consumePendingWebcal, hasPendingWebcal, subscribeToPendingWebcal } from "@/lib/protocol-handlers/session";
 import type { ParsedWebcal } from "@/lib/protocol-handlers/webcal";
 import { appPath, buildCalendarPath, parseCalendarPath, type CalendarDeepLink } from "@/lib/deep-links";
 import { consumePendingDeepLinkEntry, subscribePendingDeepLink } from "@/lib/deep-link-handoff";
 import { useDeepLinkUrl } from "@/hooks/use-deep-link-url";
+import { useCloseOnBack } from "@/hooks/use-close-on-back";
+import { useLeaveGuard } from "@/lib/leave-guard";
+import { useCalendarEventSearch } from "@/hooks/use-calendar-event-search";
+import { CalendarSearchField, CalendarSearchResults } from "@/components/calendar/calendar-search";
 import { useProInterfaceActive } from "@/components/pro/pro-interface-redirect";
 import { useCalendarLocale } from "@/hooks/use-calendar-locale";
+import { useHoverPreviewGate } from "@/hooks/use-hover-preview-gate";
 import {
   computeScrollWindow, fixedScrollWindowState, freshScrollWindowState, growScrollWindow, normalizeScrollWindowState,
   scrollWindowContains, type CalendarFocus, type ScrollViewMode, type ScrollWindowOptions,
   type ScrollWindowState, type ScrollWindowViewProps,
 } from "@/lib/calendar-scroll-window";
 import { useLiteLinkSegments } from "@/hooks/use-lite-link-segments";
+import { IS_LITE } from "@/lib/lite";
 import { findMeetingLink } from "@/lib/event-links";
 import { useDocumentTitle } from "@/hooks/use-document-title";
+import { useFocusTrap } from "@/hooks/use-focus-trap";
+import { MvTopBar } from "@/components/layout/mv-top-bar";
+import { useMountainViewShell } from "@/hooks/use-mountain-view-shell";
+import { calendarHooks } from "@/lib/plugin-hooks";
+import { eventToView } from "@/lib/plugin-projection";
+import { useAppSidePanel } from "@/components/plugins/app-side-panel";
+import { AppMain, SkipLink } from "@/components/layout/app-landmarks";
+import { calendarShortcutAction } from "@/lib/calendar-shortcuts";
+import { isAppShortcutBlocked, isArrowKeyWidgetTarget } from "@/lib/keyboard";
+import { isContextMenuOpen } from "@/components/ui/context-menu";
+import { useRegisterCommands } from "@/lib/command-registry";
+import { CalendarPrint, type CalendarPrintContent } from "@/components/calendar/calendar-print";
+import { usePrintListener, usePrinting } from "@/components/print/print-root";
+import { requestPrint, usePrintStore } from "@/stores/print-store";
 
+// `fromEditor`: asked on the way out of the event editor, which stays open
+// until a scope is picked, so Cancel goes back to it with the changes.
 type PendingScopeAction =
-  | { type: "edit"; event: CalendarEvent; updates: Partial<CalendarEvent>; sendScheduling?: boolean }
-  | { type: "delete"; event: CalendarEvent; sendScheduling?: boolean }
-  | { type: "rsvp"; event: CalendarEvent; participantId: string; status: CalendarParticipant["participationStatus"] };
+  | { type: "edit"; event: CalendarEvent; updates: Partial<CalendarEvent>; editor?: EventEditorState; sendScheduling?: boolean; fromEditor?: boolean }
+  | { type: "delete"; event: CalendarEvent; sendScheduling?: boolean; fromEditor?: boolean }
+  | { type: "rsvp"; event: CalendarEvent; participantId: string; status: CalendarParticipant["participationStatus"]; sentBy?: string };
 
 function isRecurringEvent(event: CalendarEvent): boolean {
   return (event.recurrenceRules?.length ?? 0) > 0 || event.recurrenceId != null;
@@ -116,19 +154,27 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
   const linkSegments = useLiteLinkSegments('calendar', routeSegments);
   const router = useRouter();
   const t = useTranslations("calendar");
-  const showSpaceAuthorization = useCallback((error: unknown) => showSpaceCalendarAuthorization(error, {
-    title: t("notifications.space_calendar_authorization_title"),
-    message: t("notifications.space_calendar_authorization_message"),
-    actionLabel: t("notifications.space_calendar_authorize"),
-  }), [t]);
+  // Organisation > Devices > No printing: no Print buttons (Ctrl+P prints a note).
+  const printOff = useStrictestDevices().noPrint;
+  // The server's reason for a refused change, where the user can act on it.
+  const describeError = useCalendarErrorMessage();
   const tSidebar = useTranslations("sidebar");
   const tSharing = useTranslations("sharing");
   useDocumentTitle(tSidebar("calendar"));
+  const skeletonLabels = useSkeletonLabels();
   const tWebcalAction = useTranslations("calendar.webcal_action");
+  const { demoMode } = useConfig();
+  // Subscriptions fetch the feed through /api/fetch-ical, which the demo has no
+  // mail server for and the Lite static build does not have at all.
+  const canSubscribe = !demoMode && !IS_LITE;
   const tDeepLink = useTranslations("deep_link");
   const isMobile = useIsMobile();
   const isDesktop = useIsDesktop();
   const isEmbedded = useIsEmbedded();
+  // The Pro interface takes over this route; the Pro tab loads the data then.
+  const proInterfaceActive = useProInterfaceActive();
+  // Mountain View's desktop chrome: its top bar in place of the left rail.
+  const mvShell = useMountainViewShell(isEmbedded);
   // When the pane (Pro shell) or window is narrower than `lg`, the sidebar
   // collapses into a burger-toggled overlay instead of taking inline space.
   const isNarrow = !isDesktop;
@@ -140,17 +186,14 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
   const { quota, isPushConnected } = useEmailStore();
   const {
     calendars, events, selectedDate, viewMode, selectedCalendarIds,
-    isLoading, isLoadingEvents, supportsCalendar, error,
+    isLoading, isLoadingEvents, supportsCalendar, error, eventsLoadError,
     fetchCalendars, fetchEvents, createEvent, updateEvent, deleteEvent, rsvpEvent,
     setSelectedDate, setViewMode, toggleCalendarVisibility, updateCalendar, shareCalendar,
-    removeCalendar, clearCalendarEvents, spaceCalendarAuthorizationUrl, clearSpaceCalendarAuthorizationUrl,
+    removeCalendar, clearCalendarEvents,
     refreshAllSubscriptions, icalSubscriptions, isSubscriptionCalendar,
   } = useCalendarStore();
-  // Gated by BOTH the env-driven config flag (operator kill switch, chainlink
-  // #1421) AND the per-server policy gate. When false the route renders
-  // nothing (see the `if (!calendarEnabled) return null` below) and the effect
-  // redirects to /.
-  const calendarConfigEnabled = useConfig().calendarEnabled;
+  // Account configuration and server policy must both enable the calendar.
+  const { calendarEnabled: calendarConfigEnabled, isLoading: configLoading } = useConfig();
   const calendarPolicyEnabled = usePolicyStore((s) => s.isFeatureEnabled('calendarEnabled'));
   const calendarEnabled = calendarConfigEnabled && calendarPolicyEnabled;
   const { firstDayOfWeek, timeFormat, showWeekNumbers, enableCalendarTasks, showTasksOnCalendar, calendarHoverPreview, showBirthdayCalendar, birthdayCalendarColor, updateSetting } = useSettingsStore();
@@ -163,6 +206,9 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
   const { identities } = useIdentityStore();
   const contacts = useContactStore((s) => s.contacts);
   const normalizedViewMode = isCalendarViewMode(viewMode) ? viewMode : "month";
+  usePrintListener();
+  const printing = usePrinting();
+  const printTarget = usePrintStore((s) => s.target);
 
   // Aliases live on the principal, not on identities; the calendar needs them
   // so an alias-organized event is recognised as the user's own (see isOrganizer).
@@ -181,9 +227,15 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
     ),
     [participantIdentities, identities, accountEmails]
   );
+  const resolveContactName = useContactNameResolver();
 
   const [showEventModal, setShowEventModal] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
+  // Event search (CAL-16): the query in the toolbar box; on phones the box
+  // opens as a row of its own.
+  const [searchQuery, setSearchQuery] = useState("");
+  const [mobileSearchOpen, setMobileSearchOpen] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const [showSubscriptionModal, setShowSubscriptionModal] = useState(false);
   const [pendingSubscription, setPendingSubscription] = useState<{ url: string; name: string } | null>(null);
   const [showWebcalActionChoice, setShowWebcalActionChoice] = useState(false);
@@ -196,6 +248,12 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
   const { dialogProps: confirmDialogProps, confirm: confirmAction } = useConfirmDialog();
   const tMgmt = useTranslations("calendar.management");
   const [editEvent, setEditEvent] = useState<CalendarEvent | null>(null);
+  // The attendee limit of the account the edited (or a new) event is in, for
+  // the editor's warning.
+  const maxParticipants = useMemo(() => {
+    const accountClient = (editEvent?.localAccountId && getClientByLocalAccountId(editEvent.localAccountId)) || client;
+    return accountClient?.getMaxParticipantsPerEvent?.(editEvent?.accountId) ?? null;
+  }, [client, editEvent]);
   const [defaultModalDate, setDefaultModalDate] = useState<Date | undefined>();
   const [defaultModalEndDate, setDefaultModalEndDate] = useState<Date | undefined>();
   const [defaultModalAllDay, setDefaultModalAllDay] = useState(false);
@@ -203,15 +261,28 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
   const [pendingScopeAction, setPendingScopeAction] = useState<PendingScopeAction | null>(null);
   const [detailEvent, setDetailEvent] = useState<CalendarEvent | null>(null);
   const [detailAnchorRect, setDetailAnchorRect] = useState<DOMRect | null>(null);
+  // A clicked event's card stays until closed; a hover preview goes when
+  // the pointer leaves. Held in a ref too for the hover timers.
+  const [detailPinned, setDetailPinned] = useState(false);
+  const detailPinnedRef = useRef(false);
+  useEffect(() => { detailPinnedRef.current = detailPinned; }, [detailPinned]);
   const [pendingPreview, setPendingPreview] = useState<PendingEventPreview | null>(null);
+  // Quick create (#calendar redesign): an empty slot clicked in the week or
+  // day view opens a small editor beside a placeholder block.
+  const [quickDraft, setQuickDraft] = useState<QuickCreateDraft | null>(null);
+  const [defaultModalTitle, setDefaultModalTitle] = useState<string | undefined>();
+  const [modalStartsInEdit, setModalStartsInEdit] = useState(false);
   const [showTaskModal, setShowTaskModal] = useState(false);
   const [editTask, setEditTask] = useState<import("@/lib/jmap/types").CalendarTask | null>(null);
   const [mobileReturnToMonth, setMobileReturnToMonth] = useState(false);
+  // Whether the open event or task editor holds unsaved changes (R5).
+  const eventEditorDirtyRef = useRef(false);
+  const taskEditorDirtyRef = useRef(false);
+  const setEventEditorDirty = useCallback((dirty: boolean) => { eventEditorDirtyRef.current = dirty; }, []);
+  const setTaskEditorDirty = useCallback((dirty: boolean) => { taskEditorDirtyRef.current = dirty; }, []);
   const [swipeDirection, setSwipeDirection] = useState<'left' | 'right' | null>(null);
   const [swipeKey, setSwipeKey] = useState(0);
   const hasFetched = useRef(false);
-  const previousSelectedCalendarIds = useRef(selectedCalendarIds);
-  const pendingConsentStarts = useRef(new Set<string>());
 
   // Sidebar resize state
   const [calSidebarWidth, setCalSidebarWidth] = useState(() => {
@@ -219,6 +290,18 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
   });
   const [isResizing, setIsResizing] = useState(false);
   const dragStartWidth = useRef(256);
+  // The burger in the toolbar hides the sidebar on wide screens, like
+  // Google Calendar's main menu button; remembered across visits.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try { return localStorage.getItem("calendar-sidebar-collapsed") === "1"; } catch { return false; }
+  });
+  const toggleSidebarCollapsed = useCallback(() => {
+    setSidebarCollapsed((prev) => {
+      const next = !prev;
+      try { localStorage.setItem("calendar-sidebar-collapsed", next ? "1" : "0"); } catch { /* storage unavailable */ }
+      return next;
+    });
+  }, []);
 
   // Swipe navigation ref (handlers defined after navigatePrev/navigateNext)
   const touchStartRef = useRef<{ x: number; y: number; time: number } | null>(null);
@@ -251,13 +334,15 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
     if (initialCheckDone && !isAuthenticated && !authLoading) {
       saveRedirectAfterLogin();
       redirectToLogin();
+    } else if (configLoading) {
+      return;
     } else if (client && !calendarEnabled) {
       // Calendar disabled by admin policy - send the user back to mail.
       router.push("/");
     } else if (client && !supportsCalendar && !pendingWebcalAccountChoice && !isProtocolAccountSwitching && !pendingSubscription && !showWebcalActionChoice && !hasPendingWebcal()) {
       router.push("/");
     }
-  }, [initialCheckDone, isAuthenticated, authLoading, client, calendarEnabled, supportsCalendar, pendingWebcalAccountChoice, isProtocolAccountSwitching, pendingSubscription, showWebcalActionChoice, router]);
+  }, [initialCheckDone, isAuthenticated, authLoading, client, configLoading, calendarEnabled, supportsCalendar, pendingWebcalAccountChoice, isProtocolAccountSwitching, pendingSubscription, showWebcalActionChoice, router]);
 
   useEffect(() => {
     if (error) {
@@ -346,14 +431,17 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
   // Single-account fetch path. The Pro shell aggregates calendars from
   // every connected account via [[useProMultiAccountCalendars]] below, so
   // skip this fetch there to avoid clobbering the merged list with the
-  // active client's calendars only.
+  // active client's calendars only. That includes the standard instance
+  // that renders while the Pro interface takes over the route: its raw ids
+  // replaced the merged list after the Pro tab loaded it, and the selection
+  // the user made in between went to another account's calendar.
   useEffect(() => {
-    if (isEmbedded) return;
+    if (isEmbedded || proInterfaceActive) return;
     if (client && !hasFetched.current) {
       hasFetched.current = true;
       fetchCalendars(client);
     }
-  }, [client, fetchCalendars, isEmbedded]);
+  }, [client, fetchCalendars, isEmbedded, proInterfaceActive]);
 
   // Auto-refresh iCal subscriptions
   useEffect(() => {
@@ -444,6 +532,8 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
   // The views report the day they show as the user scrolls; the title and
   // the mini calendar follow it, the selection does not.
   const handleVisibleDateChange = useCallback((date: Date) => {
+    // Hidden for printing, a view scrolls on its own; the copy keeps the dates on screen.
+    if (usePrintStore.getState().printing) return;
     setVisibleDate(date);
     setMiniMonth(date);
   }, []);
@@ -478,45 +568,11 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
   }, [client, enableCalendarTasks, normalizedViewMode, showTasksOnCalendar, fetchTasksFn]);
 
   useEffect(() => {
-    if (isEmbedded) return;
+    if (isEmbedded || proInterfaceActive) return;
     if (client && calendars.length > 0 && dateRange) {
       fetchEvents(client, dateRange.start, dateRange.end);
     }
-  }, [client, calendars.length, dateRange, fetchEvents, isEmbedded]);
-
-  useEffect(() => {
-    if (!spaceCalendarAuthorizationUrl) return;
-    showSpaceCalendarAuthorizationUrl(spaceCalendarAuthorizationUrl, {
-      title: t("notifications.space_calendar_authorization_title"),
-      message: t("notifications.space_calendar_authorization_message"),
-      actionLabel: t("notifications.space_calendar_authorize"),
-    });
-    clearSpaceCalendarAuthorizationUrl();
-  }, [spaceCalendarAuthorizationUrl, clearSpaceCalendarAuthorizationUrl, t]);
-
-  useEffect(() => {
-    const previouslySelected = previousSelectedCalendarIds.current;
-    previousSelectedCalendarIds.current = selectedCalendarIds;
-    const newlySelected = selectedCalendarIds.filter((id) => !previouslySelected.includes(id));
-    const pendingCalendar = calendars.find((calendar) => calendar.spaceConsentRequired && newlySelected.includes(calendar.id));
-    if (!pendingCalendar || pendingConsentStarts.current.has(pendingCalendar.id)) return;
-    const consentClient = pendingCalendar.localAccountId
-      ? getClientByLocalAccountId(pendingCalendar.localAccountId)
-      : client;
-    if (!consentClient?.startAtprotoSpaceCalendarConsent) return;
-
-    pendingConsentStarts.current.add(pendingCalendar.id);
-    void consentClient.startAtprotoSpaceCalendarConsent()
-      .then((authorizationUrl) => { showSpaceCalendarAuthorizationUrl(authorizationUrl, {
-        title: t("notifications.space_calendar_authorization_title"),
-        message: t("notifications.space_calendar_authorization_message"),
-        actionLabel: t("notifications.space_calendar_authorize"),
-      }); })
-      .catch((error) => {
-        if (!showSpaceAuthorization(error)) toast.error(t("notifications.space_calendar_consent_start_failed"));
-      })
-      .finally(() => pendingConsentStarts.current.delete(pendingCalendar.id));
-  }, [client, calendars, selectedCalendarIds, showSpaceAuthorization, t]);
+  }, [client, calendars.length, dateRange, fetchEvents, isEmbedded, proInterfaceActive]);
 
   // Pro shell only: aggregate calendars and events from every connected
   // account so the sidebar lists them all (and the views render their
@@ -527,6 +583,27 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
   );
   const fetchAllAccountsCalendarsFn = useCalendarStore((s) => s.fetchAllAccountsCalendars);
   const fetchAllAccountsEventsFn = useCalendarStore((s) => s.fetchAllAccountsEvents);
+
+  const refreshVisibleEvents = useCallback(async () => {
+    if (!client || !dateRange || useCalendarStore.getState().isLoadingEvents) return;
+    if (multiAccountEnabled && accountClients.length > 0) {
+      await fetchAllAccountsEventsFn(accountClients, dateRange.start, dateRange.end, { silent: true });
+    } else {
+      await fetchEvents(client, dateRange.start, dateRange.end, { silent: true });
+    }
+  }, [client, dateRange, multiAccountEnabled, accountClients, fetchAllAccountsEventsFn, fetchEvents]);
+  useCalendarAutoRefresh(Boolean(client && dateRange && calendars.length > 0 && (!proInterfaceActive || isEmbedded)), refreshVisibleEvents);
+
+  // Loads the range the view shows now - after a failed load the same as the
+  // store's dateRange, which then holds the range asked for.
+  const retryEventsLoad = useCallback(() => {
+    if (!client || !dateRange) return;
+    if (multiAccountEnabled && accountClients.length > 0) {
+      void fetchAllAccountsEventsFn(accountClients, dateRange.start, dateRange.end);
+      return;
+    }
+    void fetchEvents(client, dateRange.start, dateRange.end);
+  }, [client, dateRange, multiAccountEnabled, accountClients, fetchAllAccountsEventsFn, fetchEvents]);
 
   // The arrows step from what is on screen, which may have been scrolled
   // away from the selected day.
@@ -606,6 +683,17 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
     setNarrowSidebarOpen(false);
   }, [setSelectedDate, jumpTo, isMobile, normalizedViewMode, setViewMode]);
 
+  // Clicking a date number in the week or month header opens that day in
+  // the day view, as in Google Calendar.
+  const handleOpenDay = useCallback((date: Date) => {
+    setMobileReturnToMonth(isMobile && normalizedViewMode === "month");
+    jumpTo(date);
+    setSelectedDate(date);
+    setMiniMonth(date);
+    setViewMode("day");
+    setNarrowSidebarOpen(false);
+  }, [jumpTo, setSelectedDate, setViewMode, isMobile, normalizedViewMode]);
+
   // The mini calendar is a navigation control: unlike a click in the week or
   // month grid, which marks a day that is already on screen, picking a day
   // here has to bring that day into view.
@@ -627,7 +715,33 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
     jumpTo(date);
   }, [jumpTo]);
 
-  const openCreateModal = useCallback((date?: Date, endDate?: Date, allDay?: boolean) => {
+  // Runs `then` at once, or, while an editor holds unsaved changes, after
+  // the user agreed to drop them: a click elsewhere in the calendar must
+  // not throw away what was typed (R5).
+  const discardingRef = useRef(false);
+  const whenEditorsDiscarded = useCallback((then: () => void) => {
+    const dirty = eventEditorDirtyRef.current || taskEditorDirtyRef.current;
+    if (!dirty) { then(); return; }
+    if (discardingRef.current) return;
+    discardingRef.current = true;
+    void confirmAction({
+      title: t("discard.title"),
+      message: t("discard.message"),
+      confirmText: t("discard.confirm"),
+      cancelText: t("discard.keep"),
+      variant: "destructive",
+    }).then((ok) => {
+      discardingRef.current = false;
+      if (!ok) return;
+      eventEditorDirtyRef.current = false;
+      taskEditorDirtyRef.current = false;
+      then();
+    });
+  }, [confirmAction, t]);
+
+  const openCreateModal = useCallback((date?: Date, endDate?: Date, allDay?: boolean) => whenEditorsDiscarded(() => {
+    setQuickDraft(null);
+    setDefaultModalTitle(undefined);
     setEditEvent(null);
     const d = date || selectedDate;
     setDefaultModalDate(d);
@@ -637,15 +751,16 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
     setShowTaskModal(false);
     setEditTask(null);
     setShowEventModal(true);
-  }, [selectedDate, setSelectedDate]);
+  }), [selectedDate, setSelectedDate, whenEditorsDiscarded]);
 
-  const openEditModal = useCallback((event: CalendarEvent) => {
+  const openEditModal = useCallback((event: CalendarEvent, startInForm = false) => whenEditorsDiscarded(() => {
+    setModalStartsInEdit(startInForm);
     setEditEvent(event);
     setDefaultModalDate(undefined);
     setShowTaskModal(false);
     setEditTask(null);
     setShowEventModal(true);
-  }, []);
+  }), [whenEditorsDiscarded]);
 
   // The event and task panels share the space beside the grid; now that
   // tasks open from the month, week and day views (#1107), opening one
@@ -658,57 +773,111 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
     setDefaultModalAllDay(false);
   }, []);
 
-  const openCreateTaskModal = useCallback(() => {
+  const openCreateTaskModal = useCallback(() => whenEditorsDiscarded(() => {
     closeEventPanelForTask();
     setEditTask(null);
     setShowTaskModal(true);
-  }, [closeEventPanelForTask]);
+  }), [closeEventPanelForTask, whenEditorsDiscarded]);
 
-  const openEditTaskModal = useCallback((task: CalendarTask) => {
+  const openEditTaskModal = useCallback((task: CalendarTask) => whenEditorsDiscarded(() => {
     closeEventPanelForTask();
     setEditTask(task);
     setShowTaskModal(true);
-  }, [closeEventPanelForTask]);
+  }), [closeEventPanelForTask, whenEditorsDiscarded]);
+
+  // A plugin drawing the task view opens a task in the editor
+  // (api.ui.openTask), as a click in Bulwark's list does.
+  useEffect(() => onOpenTask((taskId) => {
+    const task = useTaskStore.getState().tasks.find((t) => t.id === taskId);
+    if (!task) return false;
+    openEditTaskModal(task);
+    return true;
+  }), [openEditTaskModal]);
 
   const handleToggleTaskComplete = useCallback((task: CalendarTask) => {
-    if (client) toggleTaskCompleteFn(client, task);
-  }, [client, toggleTaskCompleteFn]);
-
-  const handleSaveTask = useCallback(async (data: Partial<import("@/lib/jmap/types").CalendarTask>) => {
     if (!client) return;
-    if (editTask) {
-      await taskStore.updateTask(client, editTask.id, data);
-    } else {
-      await taskStore.createTask(client, data);
+    // The checkbox shows the result; only a failure needs saying.
+    toggleTaskCompleteFn(client, task).catch((error: unknown) => {
+      toast.error(describeError(error, t("notifications.task_update_error")));
+    });
+  }, [client, toggleTaskCompleteFn, describeError, t]);
+
+  // false: a plugin stopped it and said why, or the save failed: the task
+  // form stays open with what was typed.
+  const handleSaveTask = useCallback(async (data: Partial<import("@/lib/jmap/types").CalendarTask>) => {
+    if (!client) return false;
+    let saved: boolean;
+    try {
+      saved = editTask
+        ? await taskStore.updateTask(client, editTask.id, data)
+        : (await taskStore.createTask(client, data)) !== null;
+    } catch (error) {
+      toast.error(describeError(error, t("notifications.task_save_error")));
+      return false;
     }
+    if (!saved) return false;
+    toast.success(t(editTask ? "notifications.task_updated" : "notifications.task_created"));
     setShowTaskModal(false);
     setEditTask(null);
-  }, [client, editTask, taskStore]);
+    return true;
+  }, [client, editTask, taskStore, describeError, t]);
 
+  // A task delete can't be taken back: ask first (R3), then say how it went.
   const handleDeleteTask = useCallback(async (id: string) => {
     if (!client) return;
-    await taskStore.deleteTask(client, id);
+    const task = taskStore.tasks.find((x) => x.id === id);
+    const ok = await confirmAction({
+      title: t("delete_dialog.task_title"),
+      message: t("delete_dialog.task_message", { title: task?.title || t("tasks.no_title") }),
+      confirmText: t("delete_dialog.confirm"),
+      variant: "destructive",
+    });
+    if (!ok) return;
+    try {
+      // false: a plugin stopped it and said why.
+      if (!(await taskStore.deleteTask(client, id))) return;
+    } catch (error) {
+      toast.error(describeError(error, t("notifications.task_delete_error")));
+      return;
+    }
+    toast.success(t("notifications.task_deleted"));
     setShowTaskModal(false);
     setEditTask(null);
-  }, [client, taskStore]);
+  }, [client, taskStore, confirmAction, describeError, t]);
 
   const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const closeDetail = useCallback(() => {
     if (hoverTimerRef.current) { clearTimeout(hoverTimerRef.current); hoverTimerRef.current = null; }
+    detailPinnedRef.current = false;
+    setDetailPinned(false);
     setDetailEvent(null);
     setDetailAnchorRect(null);
   }, []);
 
-  const handleSelectEvent = useCallback((event: CalendarEvent, _anchorRect: DOMRect) => {
-    // Click opens the sidebar for viewing/editing
-    closeDetail();
-    openEditModal(event);
-  }, [closeDetail, openEditModal]);
+  const handleSelectEvent = useCallback((event: CalendarEvent, anchorRect: DOMRect) => {
+    // Phones open the full editor; wide screens show the event's card next
+    // to it, with edit and delete at the top (as in Google Calendar).
+    if (isMobile) {
+      closeDetail();
+      openEditModal(event);
+      return;
+    }
+    if (hoverTimerRef.current) { clearTimeout(hoverTimerRef.current); hoverTimerRef.current = null; }
+    setQuickDraft(null);
+    detailPinnedRef.current = true;
+    setDetailPinned(true);
+    setDetailEvent(event);
+    setDetailAnchorRect(anchorRect);
+    // A click opens the event's card; the hover preview does not count as
+    // opening it. The editor reports its own opens (event-modal).
+    void calendarHooks.onCalendarEventOpen.emit(eventToView(event));
+  }, [isMobile, closeDetail, openEditModal]);
 
   const {
     contextMenu: eventContextMenu,
     openContextMenu: openEventContextMenu,
+    openContextMenuFrom: openEventContextMenuFrom,
     closeContextMenu: closeEventContextMenu,
     menuRef: eventContextMenuRef,
   } = useContextMenu<CalendarEvent>();
@@ -733,15 +902,22 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
     [closeDetail, openEmptyContextMenu],
   );
 
+  // No preview over an open editor, card or dialog, nor after one closed
+  // until the pointer moves.
+  const canHoverPreview = useHoverPreviewGate(showEventModal || showTaskModal || detailPinned || quickDraft !== null);
+
   const handleHoverEvent = useCallback((event: CalendarEvent, anchorRect: DOMRect) => {
     if (isMobile) return;
+    if (detailPinnedRef.current) return;
     if (calendarHoverPreview === 'off') return;
+    // Settings > Accessibility: previews open on click only.
+    if (!hoverOpens()) return;
     if (hoverTimerRef.current) { clearTimeout(hoverTimerRef.current); hoverTimerRef.current = null; }
-    // Don't show hover popover if the sidebar is already open for this event
-    if (showEventModal && editEvent?.id === event.id) return;
+    if (!canHoverPreview()) return;
     if (calendarHoverPreview === 'delay-500ms' || calendarHoverPreview === 'delay-1s' || calendarHoverPreview === 'delay-2s') {
       const ms = calendarHoverPreview === 'delay-500ms' ? 500 : calendarHoverPreview === 'delay-1s' ? 1000 : 2000;
       hoverTimerRef.current = setTimeout(() => {
+        if (!canHoverPreview()) return;
         setDetailEvent(event);
         setDetailAnchorRect(anchorRect);
       }, ms);
@@ -749,11 +925,13 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
       setDetailEvent(event);
       setDetailAnchorRect(anchorRect);
     }
-  }, [isMobile, calendarHoverPreview, showEventModal, editEvent]);
+  }, [isMobile, calendarHoverPreview, canHoverPreview]);
 
   const handleHoverLeave = useCallback(() => {
     if (hoverTimerRef.current) { clearTimeout(hoverTimerRef.current); hoverTimerRef.current = null; }
+    if (detailPinnedRef.current) return;
     hoverTimerRef.current = setTimeout(() => {
+      if (detailPinnedRef.current) return;
       setDetailEvent(null);
       setDetailAnchorRect(null);
     }, 300);
@@ -823,9 +1001,12 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
   // The permalink for what the calendar is currently showing. In the Pro
   // shell only the focused tab writes the address bar; the standard instance
   // that renders while Pro takes over a route stays silent.
-  const proInterfaceActive = useProInterfaceActive();
   const isFocusedProTab = useIsFocusedProTab();
   const isPaneScoped = useIsPaneScoped();
+  // The phone's full-screen task editor: Tab stays in it and the focus goes
+  // back to the button that opened it. Escape is the editor's own (it asks
+  // about unsaved changes).
+  const mobileTaskEditorRef = useFocusTrap({ isActive: showTaskModal && isMobile, restoreFocus: true });
   const eventLinkId = showEventModal && editEvent ? editEvent.id : null;
   const calendarLinkPath = appPath(buildCalendarPath({
     view: normalizedViewMode,
@@ -839,11 +1020,44 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
       : proInterfaceActive ? null : calendarLinkPath,
   );
 
+  // Browser Back closes the event or task editor (asking first when it has
+  // unsaved changes) instead of leaving the calendar (R5).
+  const closeEditors = useCallback(() => {
+    setShowEventModal(false);
+    setEditEvent(null);
+    setPendingPreview(null);
+    setDefaultCalendarIdForCreate(undefined);
+    setDefaultModalAllDay(false);
+    setShowTaskModal(false);
+    setEditTask(null);
+  }, []);
+  const editorsInView = (showEventModal || showTaskModal) && (isEmbedded ? isFocusedProTab : !proInterfaceActive);
+  useCloseOnBack({
+    active: editorsInView,
+    shouldHold: () => eventEditorDirtyRef.current || taskEditorDirtyRef.current,
+    onBack: () => whenEditorsDiscarded(closeEditors),
+  });
+  // The rail, the phone tab bar and the Mountain View top bar ask too,
+  // before they leave the calendar (R5). Only ask there: leaving unmounts
+  // the editor, and clearing it first would let the Back guard above take
+  // its history step back over the navigation.
+  useLeaveGuard(
+    () => editorsInView && (eventEditorDirtyRef.current || taskEditorDirtyRef.current),
+    () => confirmAction({
+      title: t("discard.title"),
+      message: t("discard.message"),
+      confirmText: t("discard.confirm"),
+      cancelText: t("discard.keep"),
+      variant: "destructive",
+    }),
+  );
+
   const handleEditFromDetail = useCallback(() => {
     if (detailEvent) {
       const ev = detailEvent;
       closeDetail();
-      openEditModal(ev);
+      // The pencil on the event card goes straight to the form.
+      openEditModal(ev, true);
     }
   }, [detailEvent, closeDetail, openEditModal]);
 
@@ -897,23 +1111,44 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
     await fetchEvents(client, currentRange.start, currentRange.end);
   }, [client, fetchEvents, multiAccountEnabled, accountClients, activeAccountId, fetchAllAccountsEventsFn]);
 
-  // Intercept browser refresh gestures (F5, Ctrl/Cmd+R, pull-to-refresh)
-  // and refresh calendar data via JMAP instead of reloading the page.
-  const { indicator: refreshIndicator } = useRefreshGesture({
-    enabled: isAuthenticated && !!client,
-    onRefresh: async () => {
-      if (!client) return;
-      const calendarRefresh = multiAccountEnabled && accountClients.length > 0 && activeAccountId
-        ? fetchAllAccountsCalendarsFn(accountClients)
-        : fetchCalendars(client);
-      await Promise.all([
-        calendarRefresh,
-        refetchCurrentRange(),
-        refreshAllSubscriptions(client),
-      ]);
-    },
+  const { showSpaceAuthorization, handleToggleCalendarVisibility } = useSpaceCalendarSources({
+    client, multiAccountEnabled, accountClients, refetchCurrentRange,
   });
 
+  // Intercept browser refresh gestures (F5, Ctrl/Cmd+R, pull-to-refresh)
+  // and refresh calendar data via JMAP instead of reloading the page.
+  const refreshCalendar = useCallback(async () => {
+    if (!client) return;
+    const calendarRefresh = multiAccountEnabled && accountClients.length > 0 && activeAccountId
+      ? fetchAllAccountsCalendarsFn(accountClients, activeAccountId)
+      : fetchCalendars(client);
+    await Promise.all([
+      calendarRefresh,
+      refetchCurrentRange(),
+      refreshAllSubscriptions(client),
+    ]);
+  }, [client, multiAccountEnabled, accountClients, activeAccountId, fetchAllAccountsCalendarsFn, fetchCalendars, refetchCurrentRange, refreshAllSubscriptions]);
+  const { indicator: refreshIndicator } = useRefreshGesture({
+    enabled: isAuthenticated && !!client,
+    onRefresh: refreshCalendar,
+  });
+
+  // Changes made elsewhere (another device, another session, an invitation)
+  // reach the open calendar through push (#1349).
+  useCalendarPushRefresh(() => {
+    if (!client || !supportsCalendar) return;
+    // The standard instance under the Pro takeover leaves the data to the Pro tab.
+    if (!isEmbedded && proInterfaceActive) return;
+    const merged = multiAccountEnabled && accountClients.length > 0 && activeAccountId;
+    void (merged ? fetchAllAccountsCalendarsFn(accountClients, activeAccountId) : fetchCalendars(client));
+    void refetchCurrentRange();
+    // Tasks are calendar objects too (e.g. one created over CalDAV).
+    if (enableCalendarTasks && (normalizedViewMode === "tasks" || showTasksOnCalendar)) void fetchTasksFn(client);
+  }, { enabled: isAuthenticated && !!client, includeBackground: multiAccountEnabled });
+
+  // The time a saved event starts at, for the week and day grids to show it
+  // even when it is outside the hours on screen.
+  const [revealAt, setRevealAt] = useState<RevealTime | null>(null);
   const focusCalendarOnEvent = useCallback((event: Pick<Partial<CalendarEvent>, "start" | "utcStart" | "showWithoutTime">) => {
     if (!event.start) {
       return;
@@ -929,9 +1164,12 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
     }
 
     jumpTo(eventDate);
+    if (!event.showWithoutTime) {
+      setRevealAt((prev) => ({ minutes: eventDate.getHours() * 60 + eventDate.getMinutes(), nonce: (prev?.nonce ?? 0) + 1 }));
+    }
   }, [jumpTo]);
 
-  const handleSaveEvent = useCallback(async (data: Partial<CalendarEvent>, requestedScheduling?: boolean) => {
+  const handleSaveEvent = useCallback(async (data: Partial<CalendarEvent>, requestedScheduling?: boolean, editor?: EventEditorState) => {
     if (!client) { toast.error(t("notifications.event_error")); return; }
     const save = async (sendSchedulingMessages: boolean | undefined): Promise<void> => {
       try {
@@ -941,13 +1179,14 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
               type: "edit",
               event: editEvent,
               updates: data,
+              editor,
               sendScheduling: sendSchedulingMessages,
+              fromEditor: true,
             });
-            setShowEventModal(false);
-            setEditEvent(null);
             return;
           }
-          await updateEvent(client, editEvent.id, data, sendSchedulingMessages);
+          // false: a plugin stopped it and said why; the form stays open.
+          if (!(await updateEvent(client, editEvent.id, data, sendSchedulingMessages))) return;
           if (data.start) {
             focusCalendarOnEvent({ start: data.start });
           }
@@ -980,12 +1219,131 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
           return;
         }
         if (showSpaceAuthorization(error)) return;
-        if (error instanceof SpaceCalendarError) { toast.error(error.code === 'unsupported_operation' ? t("notifications.space_calendar_unsupported_operation") : t("notifications.event_error")); return; }
-        toast.error(t("notifications.event_error"));
+        if (error instanceof SpaceCalendarError) {
+          toast.error(error.code === 'mixed_audiences' ? t("notifications.space_calendar_mixed_audiences")
+            : error.code === 'unsupported_operation' ? t("notifications.space_calendar_unsupported_operation") : t("notifications.event_error"));
+          return;
+        }
+        toast.error(describeError(error, t("notifications.event_error")));
       }
     };
     await save(requestedScheduling);
-  }, [client, editEvent, createEvent, updateEvent, focusCalendarOnEvent, confirmAction, showSpaceAuthorization, t]);
+  }, [client, editEvent, createEvent, updateEvent, focusCalendarOnEvent, confirmAction, describeError, showSpaceAuthorization, t]);
+
+  // Calendars a new task can go into: writable, not a subscription.
+  const writableTaskCalendars = useMemo(
+    () => calendars.filter((c) => canCreateEventsIn(c, isSubscriptionCalendar)),
+    [calendars, isSubscriptionCalendar],
+  );
+
+  // Calendars a new event can go into: never a subscription or read-only one (#762).
+  const writableCalendars = useMemo(
+    () => calendars.filter((c) => !c.isTasksOnly && canCreateEventsIn(c, isSubscriptionCalendar)),
+    [calendars, isSubscriptionCalendar],
+  );
+
+  // A click or drag on empty grid space. On wide screens it opens the quick
+  // editor at that spot; on phones the full editor, as before.
+  const handleGridCreate = useCallback((start: Date, end?: Date, allDay = false) => whenEditorsDiscarded(() => {
+    if (isMobile) {
+      openCreateModal(start, end, allDay);
+      return;
+    }
+    const finalEnd = end ?? (allDay ? start : new Date(start.getTime() + 60 * 60 * 1000));
+    const preferred = writableCalendars.find((c) => c.isDefault) ?? writableCalendars[0];
+    setShowEventModal(false);
+    setEditEvent(null);
+    setShowTaskModal(false);
+    setEditTask(null);
+    closeDetail();
+    setQuickDraft((prev) => ({
+      start,
+      end: finalEnd,
+      title: "",
+      allDay,
+      calendarId: prev && writableCalendars.some((c) => c.id === prev.calendarId)
+        ? prev.calendarId
+        : preferred?.id ?? "",
+    }));
+  }), [isMobile, openCreateModal, writableCalendars, closeDetail, whenEditorsDiscarded]);
+
+  // A day in the month view or the all-day row: an all-day event, the same
+  // quick editor as a slot in week and day view.
+  const handleGridCreateAllDay = useCallback((day: Date) => {
+    const start = new Date(day);
+    start.setHours(0, 0, 0, 0);
+    handleGridCreate(start, start, true);
+  }, [handleGridCreate]);
+
+  const closeQuickCreate = useCallback(() => setQuickDraft(null), []);
+
+  // The create button and `n` make what the view shows: a task in Tasks.
+  const inTasksView = normalizedViewMode === "tasks";
+  const openCreateForView = useCallback(() => {
+    if (inTasksView) openCreateTaskModal();
+    else openCreateModal();
+  }, [inTasksView, openCreateTaskModal, openCreateModal]);
+  const createLabel = inTasksView ? t("events.new_task") : t("events.create");
+
+  const handleQuickCreateMoreOptions = useCallback(() => {
+    if (!quickDraft) return;
+    const draft = quickDraft;
+    openCreateModal(draft.start, draft.end, draft.allDay);
+    setDefaultCalendarIdForCreate(draft.calendarId || undefined);
+    setDefaultModalTitle(draft.title || undefined);
+  }, [quickDraft, openCreateModal]);
+
+  const handleQuickCreateSave = useCallback(async () => {
+    if (!quickDraft) return;
+    const { start, end, title, calendarId, allDay } = quickDraft;
+    if (allDay) {
+      setQuickDraft(null);
+      await handleSaveEvent({
+        uid: generateUUID(),
+        title: title.trim(),
+        start: format(start, "yyyy-MM-dd'T'00:00:00"),
+        duration: "P1D",
+        timeZone: null,
+        showWithoutTime: true,
+        calendarIds: { [calendarId]: true },
+        status: "confirmed",
+        freeBusyStatus: "busy",
+        privacy: "public",
+      });
+      return;
+    }
+    const minutes = Math.max(15, Math.round((end.getTime() - start.getTime()) / 60000));
+    const hours = Math.floor(minutes / 60);
+    const rest = minutes % 60;
+    const duration = `PT${hours > 0 ? `${hours}H` : ""}${rest > 0 ? `${rest}M` : ""}`;
+    setQuickDraft(null);
+    // Grid dates are wall-clock times in the user's zone (#755), the same
+    // as the full editor's fields, so they are labelled with that zone.
+    await handleSaveEvent({
+      uid: generateUUID(),
+      title: title.trim(),
+      start: format(start, "yyyy-MM-dd'T'HH:mm:ss"),
+      duration,
+      timeZone: getEffectiveTimeZone(),
+      showWithoutTime: false,
+      calendarIds: { [calendarId]: true },
+      status: "confirmed",
+      freeBusyStatus: "busy",
+      privacy: "public",
+    });
+  }, [quickDraft, handleSaveEvent]);
+
+  // While the quick editor is open its placeholder takes the preview slot.
+  const gridPreview = useMemo<PendingEventPreview | null>(() => {
+    if (!quickDraft) return pendingPreview;
+    return {
+      start: quickDraft.start,
+      end: quickDraft.end,
+      title: quickDraft.title.trim() || t("events.no_title"),
+      allDay: !!quickDraft.allDay,
+      calendarId: quickDraft.calendarId,
+    };
+  }, [quickDraft, pendingPreview, t]);
 
   const handleDuplicateEvent = useCallback(async (data: Partial<CalendarEvent>) => {
     if (!client) { toast.error(t("notifications.event_error")); return; }
@@ -1002,11 +1360,11 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
     } catch (error) {
       if (showSpaceAuthorization(error)) return;
       if (error instanceof SpaceCalendarError) { toast.error(error.code === 'unsupported_operation' ? t("notifications.space_calendar_unsupported_operation") : t("notifications.event_error")); return; }
-      toast.error(t("notifications.event_error"));
+      toast.error(describeError(error, t("notifications.event_error")));
       setShowEventModal(false);
       setEditEvent(null);
     }
-  }, [client, createEvent, focusCalendarOnEvent, showSpaceAuthorization, t]);
+  }, [client, createEvent, focusCalendarOnEvent, describeError, showSpaceAuthorization, t]);
 
   const handleDeleteEvent = useCallback(async (id: string, sendSchedulingMessages?: boolean) => {
     if (!client) { toast.error(t("notifications.event_error")); return; }
@@ -1016,191 +1374,109 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
         type: "delete",
         event: eventToDelete,
         sendScheduling: sendSchedulingMessages || undefined,
+        fromEditor: showEventModal && editEvent?.id === eventToDelete.id,
       });
-      setShowEventModal(false);
-      setEditEvent(null);
       return;
     }
+    // One event: asked here, from every place Delete is offered (R3). A
+    // series gets the scope question above instead.
+    const title = eventToDelete?.title || t("events.no_title");
+    const cancels = !!sendSchedulingMessages && !!eventToDelete && userOrganizes(eventToDelete, currentUserEmails);
+    const ok = await confirmAction({
+      title: t("delete_dialog.event_title"),
+      message: cancels
+        ? t("delete_dialog.event_message_attendees", { title })
+        : t("delete_dialog.event_message", { title }),
+      confirmText: t("delete_dialog.confirm"),
+      variant: "destructive",
+    });
+    if (!ok) return;
     try {
-      await deleteEvent(client, id, sendSchedulingMessages);
+      if (!(await deleteEvent(client, id, sendSchedulingMessages))) return;
       toast.success(t("notifications.event_deleted"));
+      if (editEvent?.id === id) {
+        setShowEventModal(false);
+        setEditEvent(null);
+      }
     } catch (error) {
       if (showSpaceAuthorization(error)) return;
       if (error instanceof SpaceCalendarError) { toast.error(error.code === 'unsupported_operation' ? t("notifications.space_calendar_unsupported_operation") : t("notifications.event_error")); return; }
-      toast.error(t("notifications.event_error"));
-    }
-  }, [client, deleteEvent, events, editEvent, showSpaceAuthorization, t]);
 
-  const truncateRecurrenceAtEvent = useCallback(async (event: CalendarEvent): Promise<{
-    master: CalendarEvent;
-    originalRules: CalendarEvent["recurrenceRules"];
-  } | null> => {
-    const master = await findMasterEvent(event);
-    if (!master) return null;
-    const originalRules = master.recurrenceRules
-      ? JSON.parse(JSON.stringify(master.recurrenceRules))
-      : null;
-    const occurrenceDate = event.recurrenceId || event.start;
-    const untilDate = new Date(occurrenceDate);
-    untilDate.setSeconds(untilDate.getSeconds() - 1);
-    const until = format(untilDate, "yyyy-MM-dd'T'HH:mm:ss");
-    const truncatedRules = (master.recurrenceRules || []).map(rule => ({
-      ...rule,
-      until,
-      count: null,
-    }));
-    await updateEvent(client!, master.id, { recurrenceRules: truncatedRules });
-    return { master, originalRules };
-  }, [client, findMasterEvent, updateEvent]);
+      toast.error(t("notifications.event_error"));
+      toast.error(describeError(error, t("notifications.event_delete_error")));
+    }
+  }, [client, deleteEvent, events, editEvent, showEventModal, showSpaceAuthorization, confirmAction, currentUserEmails, describeError, t]);
 
   const submitRsvp = useCallback(async (
     eventId: string,
     participantId: string,
     status: CalendarParticipant['participationStatus'],
     scope: 'occurrence' | 'series' = 'series',
+    sentBy?: string,
   ) => {
     if (!client) return;
     try {
-      await rsvpEvent(client, eventId, participantId, status, undefined, scope);
-      toast.success(t("notifications.rsvp_updated"));
+      if (await rsvpEvent(client, eventId, participantId, status, undefined, scope, sentBy ? { sentBy } : undefined)) toast.success(t("notifications.rsvp_updated"));
     } catch (error) {
       if (showSpaceAuthorization(error)) return;
       if (error instanceof SpaceCalendarError) { toast.error(error.code === 'unsupported_operation' ? t("notifications.space_calendar_unsupported_operation") : t("notifications.rsvp_error")); return; }
-      toast.error(t("notifications.rsvp_error"));
+
+      toast.error(describeError(error, t("notifications.rsvp_error")));
     }
-  }, [client, rsvpEvent, showSpaceAuthorization, t]);
+  }, [client, rsvpEvent, describeError, showSpaceAuthorization, t]);
 
   const handleScopeSelect = useCallback(async (scope: RecurrenceEditScope) => {
     if (!client || !pendingScopeAction) { toast.error(t("notifications.event_error")); return; }
     if (pendingScopeAction.type === "rsvp") {
-      const { event, participantId, status } = pendingScopeAction;
+      const { event, participantId, status, sentBy } = pendingScopeAction;
       setPendingScopeAction(null);
-      await submitRsvp(event.id, participantId, status, scope === "this" ? "occurrence" : "series");
+      await submitRsvp(event.id, participantId, status, scope === "this" ? "occurrence" : "series", sentBy);
       return;
     }
-    const { type, event, sendScheduling } = pendingScopeAction;
+    const { type, event, sendScheduling, fromEditor } = pendingScopeAction;
     const updates = type === "edit" ? pendingScopeAction.updates : undefined;
+    const editor = type === "edit" ? pendingScopeAction.editor : undefined;
     setPendingScopeAction(null);
+    // The editor the question came from closes once the change went through.
+    const closeEditor = () => {
+      if (!fromEditor) return;
+      setShowEventModal(false);
+      setEditEvent(null);
+    };
 
+    // false when a plugin stopped the change (it says why): no "updated".
+    let done = true;
     try {
       if (type === "edit" && updates) {
-        switch (scope) {
-          case "this": {
-            if (isServerRecurrenceInstance(event) || isBrowserExpandedOccurrence(event)) {
-              // The store writes one occurrence through its own (synthetic)
-              // id, or as a recurrence override on the base event it was
-              // expanded from.
-              await updateEvent(client, event.id, updates, sendScheduling);
-              break;
-            }
-            // An override outside an expanded series: override it on the master.
-            const master = await findMasterEvent(event);
-            const occurrence = master && overrideContextOf(event, master);
-            const overridePatch = occurrence
-              && buildFallbackOverridePatch(occurrence, withNewOverrideDetails(occurrence, updates));
-            if (master && overridePatch) {
-              await updateEvent(client, master.id, overridePatch, sendScheduling);
-            } else {
-              await updateEvent(client, event.id, updates, sendScheduling);
-            }
-            break;
-          }
-          case "this_and_future": {
-            const result = await truncateRecurrenceAtEvent(event);
-            if (!result) {
-              toast.error(t("notifications.event_error"));
-              return;
-            }
-            const { master, originalRules } = result;
-            const occurrenceStart = event.recurrenceId || event.start;
-            const newEventData: Partial<CalendarEvent> = {
-              title: master.title,
-              description: master.description,
-              duration: master.duration,
-              timeZone: master.timeZone,
-              calendarIds: { ...master.calendarIds },
-              status: master.status,
-              freeBusyStatus: master.freeBusyStatus,
-              privacy: master.privacy,
-              showWithoutTime: master.showWithoutTime,
-              recurrenceRules: originalRules,
-              ...updates,
-              start: updates.start || occurrenceStart,
-            };
-            delete (newEventData as Record<string, unknown>).id;
-            delete (newEventData as Record<string, unknown>).uid;
-            delete (newEventData as Record<string, unknown>).recurrenceId;
-            try {
-              await createEvent(client, newEventData, sendScheduling);
-            } catch (createError) {
-              debug.error("Failed to create new series, rolling back master truncation:", createError);
-              try {
-                await updateEvent(client, master.id, { recurrenceRules: originalRules });
-              } catch (rollbackError) {
-                debug.error("Rollback of master event also failed:", rollbackError);
-              }
-              throw createError;
-            }
-            break;
-          }
-          case "all": {
-            const master = await findMasterEvent(event);
-            if (!master) {
-              toast.error(t("notifications.event_error"));
-              return;
-            }
-            const allUpdates = { ...updates };
-            delete (allUpdates as Record<string, unknown>).recurrenceId;
-            await updateEvent(client, master.id, allUpdates, sendScheduling);
-            break;
-          }
-          default: {
-            const _exhaustive: never = scope;
-            throw new Error(`Unhandled scope: ${_exhaustive}`);
-          }
+        const saved = await saveOccurrenceEdit(scope, {
+          event,
+          updates,
+          editor,
+          sendScheduling,
+          userEmails: currentUserEmails,
+          resolveName: resolveContactName,
+        }, { client, updateEvent, createEvent, findMasterEvent });
+        done = saved !== "stopped";
+        if (!saved) {
+          toast.error(t("notifications.event_error"));
+          return;
         }
+        if (!done) return;
+        closeEditor();
         toast.success(t("notifications.event_updated"));
       } else {
-        switch (scope) {
-          case "this": {
-            if (isServerRecurrenceInstance(event) || isBrowserExpandedOccurrence(event)) {
-              // The store destroys a server occurrence, or excludes a
-              // browser-expanded one on its base event.
-              await deleteEvent(client, event.id, sendScheduling);
-              break;
-            }
-            // An override outside an expanded series: exclude it on the master.
-            const delMaster = await findMasterEvent(event);
-            const excludePatch = delMaster && buildFallbackExcludePatch(overrideContextOf(event, delMaster));
-            if (delMaster && excludePatch) {
-              await updateEvent(client, delMaster.id, excludePatch, sendScheduling);
-            } else {
-              await deleteEvent(client, event.id, sendScheduling);
-            }
-            break;
-          }
-          case "this_and_future": {
-            const result = await truncateRecurrenceAtEvent(event);
-            if (!result) {
-              toast.error(t("notifications.event_error"));
-              return;
-            }
-            break;
-          }
-          case "all": {
-            const master = await findMasterEvent(event);
-            if (!master) {
-              toast.error(t("notifications.event_error"));
-              return;
-            }
-            await deleteEvent(client, master.id, sendScheduling);
-            break;
-          }
-          default: {
-            const _exhaustive: never = scope;
-            throw new Error(`Unhandled scope: ${_exhaustive}`);
-          }
+        const deleted = await deleteOccurrence(scope, {
+          event,
+          sendScheduling,
+          userEmails: currentUserEmails,
+        }, { client, updateEvent, deleteEvent, findMasterEvent });
+        done = deleted !== "stopped";
+        if (!deleted) {
+          toast.error(t("notifications.event_error"));
+          return;
         }
+        if (!done) return;
+        closeEditor();
         toast.success(t("notifications.event_deleted"));
       }
       try {
@@ -1211,20 +1487,67 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
     } catch (error) {
       if (showSpaceAuthorization(error)) return;
       if (error instanceof SpaceCalendarError) { toast.error(error.code === 'unsupported_operation' ? t("notifications.space_calendar_unsupported_operation") : t("notifications.event_error")); return; }
-      toast.error(t("notifications.event_error"));
+      toast.error(describeError(error, t(type === "delete" ? "notifications.event_delete_error" : "notifications.event_error")));
     }
-  }, [client, pendingScopeAction, updateEvent, deleteEvent, createEvent, findMasterEvent, truncateRecurrenceAtEvent, refetchCurrentRange, submitRsvp, showSpaceAuthorization, t]);
+  }, [client, pendingScopeAction, updateEvent, deleteEvent, createEvent, findMasterEvent, currentUserEmails, resolveContactName, refetchCurrentRange, submitRsvp, describeError, showSpaceAuthorization, t]);
 
-  const handleRsvp = useCallback(async (eventId: string, participantId: string, status: CalendarParticipant['participationStatus']) => {
+  // A drag or resize. A series asks which occurrences it covers, as the
+  // editor does; one event moves at once and can be moved back.
+  const handleMoveEvent = useCallback<MoveEventHandler>(async (event, updates, sendScheduling, kind) => {
+    if (!client) { toast.error(t("notifications.event_move_error")); return; }
+    if (isRecurringEvent(event)) {
+      const moved = { ...event, ...updates };
+      const allDay = !!event.showWithoutTime;
+      // The attendees stay as they are; the save works out the rest from
+      // where the occurrence went, as for a time changed in the editor.
+      const attendees = getParticipantList(event, { resolveName: resolveContactName })
+        .filter((p) => !p.isOrganizer && p.email)
+        .map((p) => ({ name: p.name, email: p.email.trim() }));
+      setPendingScopeAction({
+        type: "edit",
+        event,
+        updates,
+        sendScheduling,
+        editor: {
+          initialAttendees: attendees,
+          attendees,
+          when: { allDay, start: getEventStartDate(moved), end: allDay ? getEventDisplayEndDate(moved) : getEventEndDate(moved) },
+          ruleChanged: false,
+        },
+      });
+      return;
+    }
+    try {
+      // false: a plugin stopped it and said why.
+      if (!(await updateEvent(client, event.id, updates, sendScheduling))) return;
+    } catch (error) {
+      toast.error(describeError(error, t(kind === "resize" ? "notifications.event_resize_error" : "notifications.event_move_error")));
+      return;
+    }
+    const before: Partial<CalendarEvent> = { start: event.start, duration: event.duration };
+    if (updates.timeZone !== undefined) before.timeZone = event.timeZone;
+    toast.success(t(kind === "resize" ? "notifications.event_updated" : "notifications.event_moved"), {
+      action: {
+        label: t("notifications.undo"),
+        onClick: () => {
+          void updateEvent(client, event.id, before, sendScheduling).catch((error: unknown) => {
+            toast.error(describeError(error, t("notifications.event_move_error")));
+          });
+        },
+      },
+    });
+  }, [client, updateEvent, resolveContactName, describeError, t]);
+
+  const handleRsvp = useCallback(async (eventId: string, participantId: string, status: CalendarParticipant['participationStatus'], sentBy?: string) => {
     if (!client) return;
     // An answer on one occurrence of a series asks whether it covers just
     // that occurrence or the whole series (#1086).
     const occurrence = events.find(e => e.id === eventId && e.recurrenceId != null);
     if (occurrence) {
-      setPendingScopeAction({ type: "rsvp", event: occurrence, participantId, status });
+      setPendingScopeAction({ type: "rsvp", event: occurrence, participantId, status, sentBy });
       return;
     }
-    await submitRsvp(eventId, participantId, status);
+    await submitRsvp(eventId, participantId, status, "series", sentBy);
   }, [client, events, submitRsvp]);
 
   const handleDeleteFromDetail = useCallback(() => {
@@ -1247,27 +1570,24 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
     } catch (error) {
       if (showSpaceAuthorization(error)) return;
       if (error instanceof SpaceCalendarError) { toast.error(error.code === 'unsupported_operation' ? t("notifications.space_calendar_unsupported_operation") : t("notifications.event_error")); return; }
-      toast.error(t("notifications.event_error"));
+      toast.error(describeError(error, t("notifications.event_error")));
     }
-  }, [detailEvent, client, createEvent, closeDetail, openEditModal, showSpaceAuthorization, t]);
+  }, [detailEvent, client, createEvent, closeDetail, openEditModal, describeError, showSpaceAuthorization, t]);
 
   const handleSaveNoteFromDetail = useCallback(async (note: string) => {
     if (!detailEvent || !client) return;
     const timestamp = format(displayNow(), "yyyy-MM-dd HH:mm");
-    const separator = `\n\n--- ${timestamp} ---\n`;
-    const newDescription = detailEvent.description
-      ? `${detailEvent.description}${separator}${note}`
-      : `--- ${timestamp} ---\n${note}`;
+    const fields = descriptionWithNote(detailEvent, `--- ${timestamp} ---`, note);
     try {
-      await updateEvent(client, detailEvent.id, { description: newDescription });
-      setDetailEvent({ ...detailEvent, description: newDescription });
+      if (!(await updateEvent(client, detailEvent.id, fields))) return;
+      setDetailEvent({ ...detailEvent, ...fields });
       toast.success(t("detail.note_saved"));
     } catch (error) {
       if (showSpaceAuthorization(error)) return;
       if (error instanceof SpaceCalendarError) { toast.error(error.code === 'unsupported_operation' ? t("notifications.space_calendar_unsupported_operation") : t("notifications.event_error")); return; }
-      toast.error(t("notifications.event_error"));
+      toast.error(describeError(error, t("notifications.event_error")));
     }
-  }, [detailEvent, client, updateEvent, showSpaceAuthorization, t]);
+  }, [detailEvent, client, updateEvent, describeError, showSpaceAuthorization, t]);
 
   const handleDuplicateContextMenu = useCallback(async (event: CalendarEvent) => {
     if (!client) { toast.error(t("notifications.event_error")); return; }
@@ -1281,9 +1601,9 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
     } catch (error) {
       if (showSpaceAuthorization(error)) return;
       if (error instanceof SpaceCalendarError) { toast.error(error.code === 'unsupported_operation' ? t("notifications.space_calendar_unsupported_operation") : t("notifications.event_error")); return; }
-      toast.error(t("notifications.event_error"));
+      toast.error(describeError(error, t("notifications.event_error")));
     }
-  }, [client, createEvent, openEditModal, showSpaceAuthorization, t]);
+  }, [client, createEvent, openEditModal, describeError, showSpaceAuthorization, t]);
 
   const handleExportICS = useCallback((event: CalendarEvent) => {
     try {
@@ -1319,41 +1639,147 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
     handleDeleteEvent(event.id, hasParticipants || undefined);
   }, [handleDeleteEvent]);
 
-  const handleRsvpFromDetail = useCallback(async (status: CalendarParticipant['participationStatus']) => {
+  const handleRsvpFromDetail = useCallback(async (status: CalendarParticipant['participationStatus'], target?: AnswerTarget) => {
     if (!detailEvent || !client) return;
-    const participantId = getUserParticipantId(detailEvent, currentUserEmails);
+    // A target names the event and participant: the owner's in a calendar
+    // shared with the user, or the user's own copy (lib/calendar-delegate.ts).
+    const participantId = target?.participantId ?? getUserParticipantId(detailEvent, currentUserEmails);
     if (!participantId) return;
     closeDetail();
-    await handleRsvp(detailEvent.id, participantId, status);
+    await handleRsvp(target?.eventId ?? detailEvent.id, participantId, status, target?.sentBy);
   }, [detailEvent, client, currentUserEmails, closeDetail, handleRsvp]);
+
+  // `/` and the palette's "Search events" go to the search box.
+  const openSearch = useCallback(() => {
+    if (isMobile) { setMobileSearchOpen(true); return; }
+    searchInputRef.current?.focus();
+    searchInputRef.current?.select();
+  }, [isMobile]);
+  // Moving the calendar (a view, a date) goes back to the grid.
+  const leaveSearch = useCallback(() => {
+    setSearchQuery("");
+    setMobileSearchOpen(false);
+  }, []);
+  const publicActionClient = useCallback((event: CalendarEvent) => (
+    event.localAccountId ? getClientByLocalAccountId(event.localAccountId) : client
+  ), [client]);
+
+  const handleSubscribePublicFromDetail = useCallback(async () => {
+    if (!detailEvent) return;
+    const actionClient = publicActionClient(detailEvent);
+    if (!actionClient?.subscribeAtprotoPublicCalendarEvent) return;
+    const source = detailEvent;
+    closeDetail();
+    try {
+      await actionClient.subscribeAtprotoPublicCalendarEvent(source);
+      await refetchCurrentRange();
+      toast.success(t('atmo.subscribe_succeeded'));
+    } catch (error) {
+      if (showSpaceAuthorization(error)) return;
+      toast.error(t('atmo.subscribe_failed'));
+    }
+  }, [detailEvent, publicActionClient, closeDetail, refetchCurrentRange, showSpaceAuthorization, t]);
+
+  const handlePublicRsvpFromDetail = useCallback(async (status: 'going' | 'interested' | 'notgoing') => {
+    if (!detailEvent) return;
+    const actionClient = publicActionClient(detailEvent);
+    if (!actionClient?.rsvpAtprotoPublicCalendarEvent) return;
+    const source = detailEvent;
+    closeDetail();
+    try {
+      await actionClient.rsvpAtprotoPublicCalendarEvent(source, status);
+      await refetchCurrentRange();
+      toast.success(t('atmo.rsvp_succeeded'));
+    } catch (error) {
+      if (showSpaceAuthorization(error)) return;
+      toast.error(t('atmo.rsvp_failed'));
+    }
+  }, [detailEvent, publicActionClient, closeDetail, refetchCurrentRange, showSpaceAuthorization, t]);
+
+  const handlePublishPublicFromDetail = useCallback(async () => {
+    if (!detailEvent) return;
+    const actionClient = publicActionClient(detailEvent);
+    if (!actionClient?.publishAtprotoPublicCalendarEvent) return;
+    const source = detailEvent;
+    closeDetail();
+    try {
+      await actionClient.publishAtprotoPublicCalendarEvent(source);
+      await refetchCurrentRange();
+      toast.success(t('atmo.publish_succeeded'));
+    } catch (error) {
+      if (showSpaceAuthorization(error)) return;
+      toast.error(t('atmo.publish_failed'));
+    }
+  }, [detailEvent, publicActionClient, closeDetail, refetchCurrentRange, showSpaceAuthorization, t]);
 
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement;
-      if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT") return;
-      if (target.getAttribute("contenteditable") === "true") return;
-      if (showEventModal || detailEvent) return;
+      // An open menu, popup or dialog owns the keyboard; a hover preview
+      // doesn't, only a card the user opened.
+      if (isAppShortcutBlocked(e)) return;
+      if (isContextMenuOpen()) return;
+      if (showEventModal || showTaskModal || detailPinned) return;
 
-      switch (e.key) {
-        case "ArrowLeft": e.preventDefault(); navigatePrev(); break;
-        case "ArrowRight": e.preventDefault(); navigateNext(); break;
-        case "t": goToToday(); break;
-        case "m": setViewMode("month"); break;
-        case "w": setViewMode("week"); break;
-        case "d": setViewMode("day"); break;
-        case "a": setViewMode("agenda"); break;
-        case "k": if (enableCalendarTasks) setViewMode("tasks"); break;
-        case "n": openCreateModal(); break;
+      const action = calendarShortcutAction(e, useSettingsStore.getState().singleKeyShortcuts !== false);
+      if (!action) return;
+      // A slider, tabs or a menu keeps its own arrows.
+      if ((action === "prev" || action === "next") && isArrowKeyWidgetTarget(e)) return;
+      if (action !== "new" && action !== "search") leaveSearch();
+      switch (action) {
+        case "prev": e.preventDefault(); navigatePrev(); break;
+        case "next": e.preventDefault(); navigateNext(); break;
+        case "today": goToToday(); break;
+        case "month": setViewMode("month"); break;
+        case "week": setViewMode("week"); break;
+        case "day": setViewMode("day"); break;
+        case "agenda": setViewMode("agenda"); break;
+        case "tasks": if (enableCalendarTasks) setViewMode("tasks"); break;
+        // Kept from typing itself into the title field the editor focuses.
+        case "new": e.preventDefault(); openCreateForView(); break;
+        case "search": e.preventDefault(); openSearch(); break;
       }
     };
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [navigatePrev, navigateNext, goToToday, setViewMode, openCreateModal, showEventModal, detailEvent, enableCalendarTasks]);
+  }, [navigatePrev, navigateNext, goToToday, setViewMode, openCreateForView, openSearch, leaveSearch, showEventModal, showTaskModal, detailPinned, enableCalendarTasks]);
+
+  // The command palette's Calendar group, while this calendar is the one in
+  // front (in the Pro shell: its focused tab).
+  const tCommon = useTranslations("common");
+  const tShell = useTranslations("shell");
+  const paletteViews: { mode: CalendarViewMode; key: string }[] = [
+    { mode: "day", key: "d" },
+    { mode: "week", key: "w" },
+    { mode: "month", key: "m" },
+    { mode: "agenda", key: "a" },
+    { mode: "tasks", key: "k" },
+  ];
+  useRegisterCommands(tSidebar("calendar"), [
+    { id: "new-event", label: t("events.new_event"), icon: Plus, shortcut: "n", run: () => openCreateModal() },
+    { id: "new-task", label: t("events.new_task"), icon: ListTodo, run: openCreateTaskModal, when: () => enableCalendarTasks },
+    { id: "search-events", label: t("search.title"), icon: Search, shortcut: "/", run: openSearch },
+    { id: "today", label: t("events.go_to_today"), icon: CalendarDays, shortcut: "t", run: goToToday, when: () => normalizedViewMode !== "tasks" },
+    ...paletteViews.map(({ mode, key }) => ({
+      id: `view-${mode}`,
+      label: t(`commands.${mode}`),
+      icon: CalendarDays,
+      shortcut: key,
+      run: () => { setMobileReturnToMonth(false); leaveSearch(); setViewMode(mode); },
+      when: () => mode !== normalizedViewMode && (mode !== "tasks" || enableCalendarTasks),
+    })),
+    { id: "import", label: t("toolbar.import"), icon: Upload, run: () => setShowImportModal(true), when: () => !demoMode },
+    { id: "subscribe", label: t("toolbar.subscribe"), icon: Globe, run: () => setShowSubscriptionModal(true), when: () => canSubscribe },
+    { id: "refresh", label: tCommon("refresh"), icon: RefreshCw, shortcut: "F5", run: () => { void refreshCalendar(); } },
+  ], isEmbedded ? isFocusedProTab : !proInterfaceActive);
 
   const birthdayEvents = useMemo(() => {
     if (!showBirthdayCalendar || !dateRange) return [];
     return generateBirthdayEvents(contacts, dateRange.start, dateRange.end);
   }, [showBirthdayCalendar, contacts, dateRange]);
+
+  // Loaded events answer a search at once; the server adds the rest.
+  const searchableEvents = useMemo(() => [...events, ...birthdayEvents], [events, birthdayEvents]);
+  const searchResults = useCalendarEventSearch(searchQuery, client, searchableEvents);
 
   const birthdayCalendarName = (() => {
     try { return t('birthday_calendar'); } catch { return 'Birthdays'; }
@@ -1368,38 +1794,78 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
       if (!cal.isShared) return cal;
       const override = sharedCalendarColors[sharedCalendarColorKey(cal)];
       if (!override) return cal;
-      return { ...cal, color: override, colorIsLocalOverride: true };
+      return { ...cal, color: override, colorIsLocalOverride: true, serverColor: cal.color };
     });
   }, [calendars, sharedCalendarColors]);
 
   // Auto-assign a random, not-yet-used palette color to any freshly shared
-  // calendar so multiple shared calendars don't collide on one color. Runs
-  // once per calendar (guarded by the presence of an existing key), and the
-  // user can still overwrite it from the sidebar.
+  // calendar the server gives no color, so multiple shared calendars don't
+  // collide on one color. Runs once per calendar (guarded by the presence of
+  // an existing key), and the user can still overwrite it from the sidebar.
   useEffect(() => {
-    const shared = calendars.filter((c) => c.isShared);
-    const missing = shared.filter((c) => !sharedCalendarColors[sharedCalendarColorKey(c)]);
-    if (missing.length === 0) return;
-    // Seed "used" with personal calendar colors plus already-assigned shared
-    // overrides so the picks stay distinct from what's already on screen.
-    const used = new Set<string>();
-    for (const c of calendars) {
-      if (!c.isShared && c.color) used.add(c.color.toLowerCase());
-    }
-    for (const color of Object.values(sharedCalendarColors)) {
-      if (color) used.add(color.toLowerCase());
-    }
-    for (const cal of missing) {
-      const color = pickUnusedCalendarColor(used);
-      used.add(color.toLowerCase());
-      setSharedCalendarColor(sharedCalendarColorKey(cal), color);
+    const assigned = autoAssignSharedCalendarColors(calendars, sharedCalendarColors);
+    for (const [key, color] of Object.entries(assigned)) {
+      setSharedCalendarColor(key, color);
     }
   }, [calendars, sharedCalendarColors, setSharedCalendarColor]);
 
+  // Company calendars the admin set (lib/company-calendars.ts): read-only,
+  // shown under "Organisation"; hiding one is a synced setting of its own.
+  const company = useCompanyCalendars(client);
+  const hiddenCompanyCalendars = useSettingsStore((s) => s.hiddenCompanyCalendars);
+  const shownCalendarIds = useMemo(() => {
+    if (company.calendars.length === 0) return selectedCalendarIds;
+    const hidden = new Set(company.hiddenIds);
+    return [...selectedCalendarIds, ...company.calendars.map((c) => c.id).filter((id) => !hidden.has(id))];
+  }, [selectedCalendarIds, company.calendars, company.hiddenIds]);
+  const toggleShownCalendar = useCallback((calendarId: string) => {
+    if (!isCompanyCalendarId(calendarId)) {
+      handleToggleCalendarVisibility(calendarId);
+      return;
+    }
+    const feedId = feedIdOf(calendarId);
+    const hidden = Array.isArray(hiddenCompanyCalendars) ? hiddenCompanyCalendars : [];
+    updateSetting('hiddenCompanyCalendars', hidden.includes(feedId) ? hidden.filter((id) => id !== feedId) : [...hidden, feedId]);
+  }, [handleToggleCalendarVisibility, hiddenCompanyCalendars, updateSetting]);
+  const companyEvents = useMemo(() => {
+    if (!dateRange || company.events.length === 0) return [];
+    const hidden = new Set(company.hiddenIds);
+    return expandRecurringEvents(company.events.filter((e) => !Object.keys(e.calendarIds).some((id) => hidden.has(id))), dateRange.start, dateRange.end);
+  }, [company.events, company.hiddenIds, dateRange]);
+
+  // The phone toolbar's calendar list: the user's own and the company calendars.
+  const toolbarCalendars = useMemo(
+    () => (company.calendars.length > 0 ? [...displayCalendars, ...company.calendars] : displayCalendars),
+    [displayCalendars, company.calendars],
+  );
+
   const allCalendars = useMemo(() => {
-    if (!showBirthdayCalendar) return displayCalendars;
-    return [...displayCalendars, createBirthdayCalendar(birthdayCalendarName, birthdayCalendarColor)];
-  }, [displayCalendars, showBirthdayCalendar, birthdayCalendarName, birthdayCalendarColor]);
+    const withBirthdays = showBirthdayCalendar
+      ? [...displayCalendars, createBirthdayCalendar(birthdayCalendarName, birthdayCalendarColor)]
+      : displayCalendars;
+    return company.calendars.length > 0 ? [...withBirthdays, ...company.calendars] : withBirthdays;
+  }, [displayCalendars, showBirthdayCalendar, birthdayCalendarName, birthdayCalendarColor, company.calendars]);
+
+  // What the user may change, by the rights of each event's calendar
+  // (birthdays, subscriptions and read-only shares can't be changed).
+  const editabilityContext = useMemo<EditabilityContext>(() => ({
+    calendarsById: new Map(allCalendars.map((c) => [c.id, c])),
+    userCalendarAddresses: currentUserEmails,
+    isSubscriptionCalendar,
+  }), [allCalendars, currentUserEmails, isSubscriptionCalendar]);
+  const canEditEvent = useCallback(
+    (event: CalendarEvent) => getEventEditability(event, editabilityContext) === "editable",
+    [editabilityContext],
+  );
+
+  // The event the user opened, marked in the grid (APP.md: the selected
+  // event gets the primary ring).
+  const selectedEventId = detailPinned ? detailEvent?.id ?? null : showEventModal ? editEvent?.id ?? null : null;
+
+  // The plugin side panel (app-side-panel), with the event the user opened.
+  const openEvent = detailPinned ? detailEvent : showEventModal ? editEvent : null;
+  const sidePanelContext = useMemo(() => (openEvent ? { event: eventToView(openEvent) } : {}), [openEvent]);
+  const sidePanel = useAppSidePanel({ view: "calendar", context: sidePanelContext });
 
   const visibleEvents = useMemo(() => {
     const filtered = events.filter((e) => {
@@ -1407,11 +1873,20 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
       const calIds = Object.keys(e.calendarIds);
       return calIds.some((id) => selectedCalendarIds.includes(id));
     });
+    const withCompany = companyEvents.length > 0 ? [...filtered, ...companyEvents] : filtered;
     if (showBirthdayCalendar && selectedCalendarIds.includes(BIRTHDAY_CALENDAR_ID)) {
-      return [...filtered, ...birthdayEvents];
+      return [...withCompany, ...birthdayEvents];
     }
-    return filtered;
-  }, [events, selectedCalendarIds, showBirthdayCalendar, birthdayEvents]);
+    return withCompany;
+  }, [events, selectedCalendarIds, showBirthdayCalendar, birthdayEvents, companyEvents]);
+
+  // The plugin drawing the task view's list, if one offers it.
+  const pluginTaskView = usePluginTaskView();
+  // The tasks the task list shows; plugin buttons in its toolbar act on them.
+  const listedTaskIds = useMemo(
+    () => filterTasksForList(taskStore.tasks, selectedCalendarIds, taskStore.filter).map((task) => task.id),
+    [taskStore.tasks, selectedCalendarIds, taskStore.filter],
+  );
 
   // Tasks on the month, week and day grids follow the calendar filter like
   // the events do (#1107).
@@ -1462,53 +1937,70 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
   ) : null;
 
   const renderWebcalActionChoice = () => showWebcalActionChoice && pendingSubscription ? (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-[1px]" onClick={closeWebcalActionChoice} aria-hidden="true" />
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label={tWebcalAction("title")}
-        className="relative bg-background border border-border rounded-lg shadow-xl w-full max-w-md mx-4 animate-in zoom-in-95 duration-200"
-      >
-        <div className="px-6 py-4 border-b border-border">
-          <h2 className="text-lg font-semibold">{tWebcalAction("title")}</h2>
-          <p className="text-sm text-muted-foreground mt-1">{tWebcalAction("description", { name: pendingSubscription.name })}</p>
-        </div>
-        <div className="px-6 py-4 space-y-3">
+    <Dialog
+      isOpen
+      onClose={closeWebcalActionChoice}
+      title={tWebcalAction("title")}
+      description={tWebcalAction("description", { name: pendingSubscription.name })}
+      footer={<Button variant="outline" onClick={closeWebcalActionChoice}>{tWebcalAction("cancel")}</Button>}
+    >
+        <div className="pt-4 space-y-3">
           <Button variant="outline" className="w-full justify-start h-auto py-3" onClick={handleImportWebcal}>
             <span className="text-start">
               <span className="block font-medium">{tWebcalAction("import_title")}</span>
               <span className="block text-xs text-muted-foreground mt-0.5">{tWebcalAction("import_description")}</span>
             </span>
           </Button>
-          <Button variant="outline" className="w-full justify-start h-auto py-3" onClick={handleSubscribeWebcal}>
-            <span className="text-start">
-              <span className="block font-medium">{tWebcalAction("subscribe_title")}</span>
-              <span className="block text-xs text-muted-foreground mt-0.5">{tWebcalAction("subscribe_description")}</span>
-            </span>
-          </Button>
+          {!IS_LITE && (
+            <Button variant="outline" className="w-full justify-start h-auto py-3" onClick={handleSubscribeWebcal}>
+              <span className="text-start">
+                <span className="block font-medium">{tWebcalAction("subscribe_title")}</span>
+                <span className="block text-xs text-muted-foreground mt-0.5">{tWebcalAction("subscribe_description")}</span>
+              </span>
+            </Button>
+          )}
         </div>
-        <div className="flex items-center justify-end gap-2 px-6 py-4 border-t border-border">
-          <Button variant="ghost" onClick={closeWebcalActionChoice}>{tWebcalAction("cancel")}</Button>
-        </div>
-      </div>
-    </div>
+    </Dialog>
   ) : null;
 
-  if (!isAuthenticated) return null;
+  // Until the session says what the account has, the page is drawn as the
+  // skeleton the server sent (components/boot-skeleton): the same markup, so
+  // nothing moves while the sign-in is restored or the redirects decide.
+  const skeletonText = calendarSkeletonText(t);
+  const skeleton = isEmbedded ? (
+    <SkeletonRegion surface="calendar" label={skeletonLabels.label} className="flex flex-col h-full">
+      <CalendarSkeletonBody embedded text={skeletonText} />
+    </SkeletonRegion>
+  ) : (
+    <CalendarSkeleton label={skeletonLabels.label} labels={skeletonLabels.labels} text={skeletonText} />
+  );
+  if (!isAuthenticated) return skeleton;
+  // Turned off by policy: nothing, while the effect above leaves for mail.
   if (!calendarEnabled) return null;
-  if (!supportsCalendar) return renderWebcalAccountPicker();
+  if (!supportsCalendar) return renderWebcalAccountPicker() ?? skeleton;
 
   const renderView = () => {
+    // The calendars are loading: the view's grid in the skeleton's shapes,
+    // where the real one is about to be drawn.
     if (isLoading && calendars.length === 0) {
-      return (
-        <div className="flex items-center justify-center flex-1 text-muted-foreground">
-          <p className="text-sm">{t("status.loading_calendars")}</p>
-        </div>
-      );
+      return <CalendarViewSkeleton view={normalizedViewMode} label={t("status.loading_calendars")} text={skeletonText} />;
     }
 
     const viewContent = (() => {
+      if (searchResults && normalizedViewMode !== "tasks") {
+        return (
+          <CalendarSearchResults
+            query={searchQuery}
+            results={searchResults}
+            calendars={allCalendars}
+            timeFormat={timeFormat}
+            currentUserEmails={currentUserEmails}
+            onSelectEvent={handleSelectEvent}
+            onContextMenuEvent={handleContextMenuEvent}
+            onClearSearch={() => { setSearchQuery(""); searchInputRef.current?.focus(); }}
+          />
+        );
+      }
       switch (normalizedViewMode) {
         case "month":
           return (
@@ -1518,19 +2010,23 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
               events={visibleEvents}
               calendars={allCalendars}
               onSelectDate={handleSelectDate}
+              onOpenDay={handleOpenDay}
               onSelectEvent={handleSelectEvent}
               onHoverEvent={handleHoverEvent}
               onHoverLeave={handleHoverLeave}
               onContextMenuEvent={handleContextMenuEvent}
               onContextMenuEmpty={handleContextMenuEmpty}
-              onCreateAtTime={openCreateModal}
+              onCreateAllDay={handleGridCreateAllDay}
               firstDayOfWeek={firstDayOfWeek}
               isMobile={isMobile}
-              pendingPreview={pendingPreview}
+              pendingPreview={gridPreview}
               tasks={calendarTasks}
               onToggleTaskComplete={handleToggleTaskComplete}
               onSelectTask={openEditTaskModal}
               currentUserEmails={currentUserEmails}
+              canEditEvent={canEditEvent}
+              selectedEventId={selectedEventId}
+              onMoveEvent={handleMoveEvent}
             />
           );
         case "week":
@@ -1541,20 +2037,26 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
               events={visibleEvents}
               calendars={allCalendars}
               onSelectDate={handleSelectDate}
+              onOpenDay={handleOpenDay}
               onSelectEvent={handleSelectEvent}
               onHoverEvent={handleHoverEvent}
               onHoverLeave={handleHoverLeave}
               onContextMenuEvent={handleContextMenuEvent}
               onContextMenuEmpty={handleContextMenuEmpty}
-              onCreateAtTime={openCreateModal}
+              onCreateAtTime={handleGridCreate}
+              onCreateAllDay={handleGridCreateAllDay}
               firstDayOfWeek={firstDayOfWeek}
               timeFormat={timeFormat}
               isMobile={isMobile}
-              pendingPreview={pendingPreview}
+              pendingPreview={gridPreview}
               tasks={calendarTasks}
               onToggleTaskComplete={handleToggleTaskComplete}
               onSelectTask={openEditTaskModal}
               currentUserEmails={currentUserEmails}
+              canEditEvent={canEditEvent}
+              selectedEventId={selectedEventId}
+              onMoveEvent={handleMoveEvent}
+              revealAt={revealAt}
             />
           );
         case "day":
@@ -1569,14 +2071,18 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
               onHoverLeave={handleHoverLeave}
               onContextMenuEvent={handleContextMenuEvent}
               onContextMenuEmpty={handleContextMenuEmpty}
-              onCreateAtTime={openCreateModal}
+              onCreateAtTime={handleGridCreate}
               timeFormat={timeFormat}
               isMobile={isMobile}
-              pendingPreview={pendingPreview}
+              pendingPreview={gridPreview}
               tasks={calendarTasks}
               onToggleTaskComplete={handleToggleTaskComplete}
               onSelectTask={openEditTaskModal}
               currentUserEmails={currentUserEmails}
+              canEditEvent={canEditEvent}
+              selectedEventId={selectedEventId}
+              onMoveEvent={handleMoveEvent}
+              revealAt={revealAt}
             />
           );
         case "agenda":
@@ -1591,57 +2097,176 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
               onContextMenuEvent={handleContextMenuEvent}
               timeFormat={timeFormat}
               currentUserEmails={currentUserEmails}
+              onCreateEvent={() => openCreateModal()}
             />
           );
-        case "tasks":
+        case "tasks": {
+          const taskList = (
+            <TaskListView
+              tasks={taskStore.tasks}
+              calendars={displayCalendars}
+              selectedCalendarIds={selectedCalendarIds}
+              filter={taskStore.filter}
+              onSelectTask={openEditTaskModal}
+              onToggleComplete={handleToggleTaskComplete}
+              selectedTaskId={taskStore.selectedTaskId}
+              onQuickCreate={(title) => {
+                // Into a calendar that takes it: the default one, else the
+                // first the user may write to.
+                const target = writableTaskCalendars.find((c) => c.isDefault) ?? writableTaskCalendars[0];
+                if (!client || !target) {
+                  toast.error(t("notifications.task_save_error"));
+                  return;
+                }
+                taskStore.createTask(client, { "@type": "Task", title, progress: "needs-action", calendarIds: { [target.id]: true } })
+                  .then((created) => { if (created) toast.success(t("notifications.task_created")); })
+                  .catch((error: unknown) => toast.error(describeError(error, t("notifications.task_save_error"))));
+              }}
+            />
+          );
           return (
             <div className="flex flex-col h-full">
+              {taskStore.error === TASKS_LOAD_ERROR && (
+                <CalendarLoadErrorNotice what="tasks" onRetry={() => { if (client) void fetchTasksFn(client); }} />
+              )}
               <TaskToolbar
                 filter={taskStore.filter}
-                showCompleted={taskStore.showCompleted}
                 onFilterChange={taskStore.setFilter}
-                onShowCompletedChange={taskStore.setShowCompleted}
                 onCreateTask={openCreateTaskModal}
+                taskIds={listedTaskIds}
+                compact={isMobile}
               />
-              <TaskListView
-                tasks={taskStore.tasks}
-                calendars={displayCalendars}
-                selectedCalendarIds={selectedCalendarIds}
-                filter={taskStore.filter}
-                showCompleted={taskStore.showCompleted}
-                onSelectTask={openEditTaskModal}
-                onToggleComplete={handleToggleTaskComplete}
-                selectedTaskId={taskStore.selectedTaskId}
-                onQuickCreate={(title) => {
-                  if (client) {
-                    taskStore.createTask(client, { "@type": "Task", title, progress: "needs-action", calendarIds: { [calendars[0]?.id ?? ""]: true } });
-                  }
-                }}
-              />
+              {/* A plugin may draw the list itself (the calendar-task-view
+                  slot), with Bulwark's list back while its frame is not
+                  drawn; the toolbar above stays Bulwark's. */}
+              {pluginTaskView ? (
+                <PluginTaskView
+                  pluginId={pluginTaskView.pluginId}
+                  fill={pluginTaskView.fill}
+                  filter={taskStore.filter}
+                  calendarIds={selectedCalendarIds}
+                  fallback={taskList}
+                />
+              ) : taskList}
             </div>
           );
+        }
       }
     })();
 
     return (
       <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+        {eventsLoadError && normalizedViewMode !== "tasks" && (
+          <CalendarLoadErrorNotice onRetry={retryEventsLoad} />
+        )}
         {viewContent}
+        {/* The first events: the grid is drawn already and they fill in on
+            it, so this is said rather than shown (a dimmed grid with a
+            spinner flashed between the skeleton and the events). */}
         {isLoadingEvents && calendars.length > 0 && events.length === 0 && (
-          <div className="absolute inset-0 bg-background/50 flex items-center justify-center pointer-events-none">
-            <div className="h-5 w-5 border-2 border-primary border-t-transparent rounded-full animate-spin" />
-          </div>
+          <span role="status" className="sr-only">{t("status.loading_events")}</span>
         )}
       </div>
     );
   };
 
+  // The print copy (Ctrl+P or Print): an event opened by click, else the
+  // view with the dates on screen.
+  const printContent: CalendarPrintContent = printTarget?.kind === "calendar-event"
+    ? { kind: "event", event: printTarget.event }
+    : !printTarget && detailPinned && detailEvent
+      ? { kind: "event", event: detailEvent }
+      : { kind: "view" };
+  const printCopy = printing ? (
+    <CalendarPrint
+      content={printContent}
+      viewMode={normalizedViewMode}
+      periodDate={visibleDate ?? selectedDate}
+      weekStart={visibleDate ?? startOfWeek(selectedDate, { weekStartsOn })}
+      rangeStart={scrollWindow?.start ?? selectedDate}
+      rangeEnd={scrollWindow?.end ?? selectedDate}
+      events={visibleEvents}
+      calendars={allCalendars}
+      shownCalendars={allCalendars.filter((c) => shownCalendarIds.includes(c.id))}
+      gridTasks={calendarTasks}
+      tasks={taskStore.tasks}
+      taskFilter={taskStore.filter}
+      selectedCalendarIds={selectedCalendarIds}
+      timeFormat={timeFormat}
+      timeZone={getEffectiveTimeZone()}
+      currentUserEmails={currentUserEmails}
+      search={searchResults && normalizedViewMode !== "tasks"
+        ? { query: searchQuery, events: [...searchResults.upcoming, ...searchResults.past] }
+        : null}
+    />
+  ) : null;
+
+  const calendarToolbar = (
+    <CalendarToolbar
+      selectedDate={selectedDate}
+      visibleDate={visibleDate}
+      viewMode={normalizedViewMode}
+      onPrev={() => { leaveSearch(); navigatePrev(); }}
+      onNext={() => { leaveSearch(); navigateNext(); }}
+      onToday={() => { leaveSearch(); goToToday(); }}
+      onViewModeChange={(mode) => { setMobileReturnToMonth(false); leaveSearch(); setViewMode(mode); }}
+      onCreateEvent={openCreateForView}
+      createLabel={createLabel}
+      onImport={demoMode ? undefined : () => setShowImportModal(true)}
+      onSubscribe={canSubscribe ? () => setShowSubscriptionModal(true) : undefined}
+      onRefresh={() => { void refreshCalendar(); }}
+      onPrint={printOff ? undefined : () => { void requestPrint({ kind: "calendar-view" }); }}
+      isMobile={isMobile}
+      onNavigateBack={isMobile && mobileReturnToMonth && normalizedViewMode === "day" ? navigateBackToMonth : undefined}
+      calendars={toolbarCalendars}
+      selectedCalendarIds={shownCalendarIds}
+      onToggleVisibility={toggleShownCalendar}
+      enableCalendarTasks={enableCalendarTasks}
+      onMenuClick={isNarrow ? () => setNarrowSidebarOpen(true) : isMobile ? undefined : toggleSidebarCollapsed}
+      sidebarOpen={isNarrow ? narrowSidebarOpen : !sidebarCollapsed}
+      menuTogglesSidebar={!isNarrow}
+      showCreateButton={isNarrow || sidebarCollapsed}
+      // Tasks have their own list and no events to search.
+      searchField={normalizedViewMode === "tasks" ? undefined : (
+        <CalendarSearchField
+          ref={searchInputRef}
+          value={searchQuery}
+          onChange={setSearchQuery}
+          className="w-40 lg:w-56 xl:w-64 me-1"
+        />
+      )}
+      onOpenSearch={normalizedViewMode === "tasks" ? undefined : () => setMobileSearchOpen(true)}
+      mobileSearchField={mobileSearchOpen ? (
+        <CalendarSearchField
+          ref={searchInputRef}
+          value={searchQuery}
+          onChange={setSearchQuery}
+          onDismiss={leaveSearch}
+          autoFocus
+        />
+      ) : null}
+      onCloseSearch={leaveSearch}
+      panelToggle={sidePanel.toggle}
+    />
+  );
+
   return (
-    <div className={cn("flex flex-col bg-background overflow-hidden pt-[env(safe-area-inset-top)]", isEmbedded ? "h-full" : "h-dvh")}>
+    <div className={cn("flex flex-col overflow-hidden pt-[env(safe-area-inset-top)]", mvShell ? "bg-[var(--mv-canvas)]" : "bg-background", isEmbedded ? "h-full" : "h-dvh")}>
+      {!isEmbedded && <SkipLink>{tShell("skip_to_content")}</SkipLink>}
       <AppTopBannerSlot />
       {refreshIndicator}
-      <div className={cn("relative flex flex-1 min-h-0 overflow-hidden", isMobile && "flex-col")}>
+      {mvShell && (
+        <MvTopBar
+          showMenuButton={false}
+          onManageApps={handleManageApps}
+          onInlineApp={handleInlineApp}
+          onCloseInlineApp={closeInlineApp}
+          activeAppId={inlineApp?.id ?? null}
+        />
+      )}
+      <div data-mv-card={mvShell ? "" : undefined} className={cn("relative flex flex-1 min-h-0 overflow-hidden", isMobile && "flex-col", mvShell && "mb-4 mx-4")}>
       {/* Left Navigation Rail (hidden when embedded in Pro shell) */}
-      {!isMobile && !isEmbedded && (
+      {!isMobile && !isEmbedded && !mvShell && (
         <div className="w-14 bg-secondary flex flex-col flex-shrink-0" style={{ borderRight: '1px solid rgba(128, 128, 128, 0.3)' }}>
           <NavigationRail
             collapsed
@@ -1671,21 +2296,33 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
         />
       )}
 
-      {/* Sidebar - in-flow when desktop pane, overlay when narrow */}
       {!inlineApp && (
+      <div className="flex flex-col flex-1 min-w-0 min-h-0">
+      <div className="flex flex-1 min-w-0 min-h-0">
+      {/* Sidebar - in-flow when desktop pane, overlay when narrow */}
+      {(isNarrow || !sidebarCollapsed) && (
         <>
           <div
+            // A closed drawer is off-screen: not a pane for F6.
+            data-pane={!isNarrow || narrowSidebarOpen ? "sidebar" : undefined}
             className={cn(
-              "border-e border-border bg-secondary overflow-y-auto flex-shrink-0 p-3",
+              "border-e border-border bg-secondary flex flex-col overflow-hidden flex-shrink-0",
               !isResizing && "transition-[width] duration-300",
               isNarrow && cn(
-                "absolute inset-y-0 left-0 z-50 w-72 pt-[env(safe-area-inset-top)]",
+                "absolute inset-y-0 start-0 z-50 w-72 pt-[env(safe-area-inset-top)]",
                 "transform transition-transform duration-300 ease-in-out",
-                !narrowSidebarOpen && "-translate-x-full"
+                !narrowSidebarOpen && "-translate-x-full rtl:translate-x-full"
               )
             )}
             style={isNarrow ? undefined : { width: `${calSidebarWidth}px` }}
           >
+            <CalendarSidebarHeader
+              onCreateEvent={() => { setNarrowSidebarOpen(false); openCreateForView(); }}
+              createLabel={createLabel}
+              tourTarget={!isNarrow}
+            />
+            <div className="flex-1 overflow-y-auto overflow-x-hidden py-3">
+            <div className="px-3">
             <MiniCalendar
               selectedDate={selectedDate}
               displayMonth={miniMonth}
@@ -1695,10 +2332,11 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
               firstDayOfWeek={firstDayOfWeek}
               showWeekNumbers={showWeekNumbers}
             />
+            </div>
             <CalendarSidebarPanel
               calendars={allCalendars}
-              selectedCalendarIds={selectedCalendarIds}
-              onToggleVisibility={toggleCalendarVisibility}
+              selectedCalendarIds={shownCalendarIds}
+              onToggleVisibility={toggleShownCalendar}
               onColorChange={client ? (calendarId, color) => {
                 if (calendarId === BIRTHDAY_CALENDAR_ID) {
                   updateSetting('birthdayCalendarColor', color);
@@ -1715,8 +2353,9 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
                 updateCalendar(client, calendarId, { color });
               } : undefined}
               onResetColor={(cal) => {
-                // Drop the local override; the auto-assign effect picks a
-                // fresh unused color (so it never reverts to a collision).
+                // Drop the local override. A calendar with a server color goes
+                // back to it; one without gets a fresh unused color from the
+                // auto-assign effect (so it never reverts to a collision).
                 removeSharedCalendarColor(sharedCalendarColorKey(cal));
               }}
               onShareCalendar={client ? (cal) => {
@@ -1762,14 +2401,19 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
                 }
               } : undefined}
               onCreateCalendar={client ? () => setShowCreateCalendar(true) : undefined}
-              onSubscribe={() => setShowSubscriptionModal(true)}
+              onSubscribe={canSubscribe ? () => setShowSubscriptionModal(true) : undefined}
               onEditSubscription={(subId) => setEditingSubscription(subId)}
               client={client}
               multiAccountMode={multiAccountEnabled && accountClients.length > 1}
             />
+            </div>
           </div>
           {!isNarrow && (
             <ResizeHandle
+              pane="sidebar"
+              value={calSidebarWidth}
+              min={180}
+              max={400}
               onResizeStart={() => { dragStartWidth.current = calSidebarWidth; setIsResizing(true); }}
               onResize={(delta) => setCalSidebarWidth(Math.max(180, Math.min(400, dragStartWidth.current + delta)))}
               onResizeEnd={() => {
@@ -1782,33 +2426,18 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
         </>
       )}
 
-      {!inlineApp && (
-      <div className="flex flex-col flex-1 min-w-0 min-h-0">
-        <CalendarToolbar
-          selectedDate={selectedDate}
-          visibleDate={visibleDate}
-          viewMode={normalizedViewMode}
-          onPrev={navigatePrev}
-          onNext={navigateNext}
-          onToday={goToToday}
-          onViewModeChange={(mode) => { setMobileReturnToMonth(false); setViewMode(mode); }}
-          onCreateEvent={() => openCreateModal()}
-          onImport={() => setShowImportModal(true)}
-          onSubscribe={() => setShowSubscriptionModal(true)}
-          isMobile={isMobile}
-          onNavigateBack={isMobile && mobileReturnToMonth && normalizedViewMode === "day" ? navigateBackToMonth : undefined}
-          calendars={displayCalendars}
-          selectedCalendarIds={selectedCalendarIds}
-          onToggleVisibility={toggleCalendarVisibility}
-          enableCalendarTasks={enableCalendarTasks}
-          onMenuClick={isNarrow ? () => setNarrowSidebarOpen(true) : undefined}
-        />
+      <AppMain embedded={isEmbedded} label={tSidebar("calendar")} className="flex flex-col flex-1 min-w-0 min-h-0">
+        {calendarToolbar}
 
         {/* isolate keeps the views' sticky headers (z-50) below the toolbar's
             import dropdown, which overlaps this area (#1049). */}
         <div
+          ref={sidePanel.rowRef}
           className="flex flex-1 overflow-hidden relative isolate"
           data-tour="calendar-view"
+          // Where the focus goes after an event is saved or deleted and
+          // what opened its editor is gone (components/layout/focus-rescue).
+          data-focus-fallback=""
           onTouchStart={handleTouchStart}
           onTouchEnd={handleTouchEnd}
         >
@@ -1827,21 +2456,26 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
           {!isMobile && showEventModal && (
             <div className="w-[400px] border-s border-border flex-shrink-0 overflow-hidden">
               <EventModal
-                key={editEvent?.id ?? 'new'}
+                key={`${editEvent?.id ?? 'new'}${modalStartsInEdit ? ':edit' : ''}`}
                 event={editEvent}
                 calendars={displayCalendars}
                 defaultDate={defaultModalDate}
                 defaultEndDate={defaultModalEndDate}
                 defaultAllDay={defaultModalAllDay}
+                defaultTitle={defaultModalTitle}
+                startInEditMode={modalStartsInEdit}
                 defaultCalendarId={defaultCalendarIdForCreate}
                 onSave={handleSaveEvent}
                 onDelete={handleDeleteEvent}
                 onDuplicate={handleDuplicateEvent}
                 onRsvp={handleRsvp}
+                onMore={editEvent ? (anchor) => openEventContextMenuFrom(anchor, editEvent, "end") : undefined}
+                onDirtyChange={setEventEditorDirty}
                 onClose={() => { setShowEventModal(false); setEditEvent(null); setPendingPreview(null); setDefaultCalendarIdForCreate(undefined); setDefaultModalAllDay(false); }}
                 onPreviewChange={setPendingPreview}
                 currentUserEmails={currentUserEmails}
                 isSubscriptionCalendar={isSubscriptionCalendar}
+                maxParticipants={maxParticipants}
                 isMobile={false}
               />
             </div>
@@ -1854,8 +2488,10 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
                 key={editTask?.id ?? 'new-task'}
                 task={editTask}
                 calendars={displayCalendars}
+                isSubscriptionCalendar={isSubscriptionCalendar}
                 onSave={handleSaveTask}
                 onDelete={handleDeleteTask}
+                onDirtyChange={setTaskEditorDirty}
                 onClose={() => { setShowTaskModal(false); setEditTask(null); }}
                 isMobile={false}
               />
@@ -1865,14 +2501,19 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
           {/* Floating Create Event Button (mobile) */}
           {isMobile && (
             <Button
-              onClick={() => openCreateModal()}
-              className="absolute bottom-4 right-4 z-40 h-14 w-14 rounded-full shadow-lg"
-              aria-label={t("events.create")}
+              onClick={openCreateForView}
+              className="absolute bottom-4 end-4 z-40 h-14 w-14 rounded-full shadow-lg"
+              aria-label={createLabel}
+              data-tour="create-event-button"
             >
               <Plus className="h-6 w-6" />
             </Button>
           )}
+
+          {sidePanel.panel}
         </div>
+      </AppMain>
+      </div>
       </div>
       )}
 
@@ -1896,12 +2537,15 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
           isOpen={eventContextMenu.isOpen}
           onClose={closeEventContextMenu}
           menuRef={eventContextMenuRef}
-          onEdit={() => openEditModal(eventContextMenu.data!)}
+          // Edit opens the form, as the card's pencil and `e` do.
+          onEdit={() => openEditModal(eventContextMenu.data!, true)}
           onDuplicate={() => handleDuplicateContextMenu(eventContextMenu.data!)}
           onExportICS={() => handleExportICS(eventContextMenu.data!)}
           onCopyTitle={() => handleCopyTitle(eventContextMenu.data!)}
           onCopyMeetingLink={() => handleCopyMeetingLink(eventContextMenu.data!)}
           onDelete={() => handleDeleteContextMenu(eventContextMenu.data!)}
+          onPrint={printOff ? undefined : () => { void requestPrint({ kind: "calendar-event", event: eventContextMenu.data! }); }}
+          editable={canEditEvent(eventContextMenu.data)}
         />
       )}
 
@@ -1939,42 +2583,68 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
         );
       })()}
 
+      {quickDraft && !isMobile && (
+        <QuickCreatePopover
+          draft={quickDraft}
+          calendars={writableCalendars}
+          timeFormat={timeFormat}
+          onChange={setQuickDraft}
+          onSave={handleQuickCreateSave}
+          onMoreOptions={handleQuickCreateMoreOptions}
+          onClose={closeQuickCreate}
+        />
+      )}
+
       {detailEvent && detailAnchorRect && (
         <EventDetailPopover
           event={detailEvent}
-          calendar={displayCalendars.find(c => detailEvent.calendarIds[c.id])}
+          calendar={allCalendars.find(c => detailEvent.calendarIds[c.id])}
           anchorRect={detailAnchorRect}
           onEdit={handleEditFromDetail}
           onDelete={handleDeleteFromDetail}
           onDuplicate={handleDuplicateFromDetail}
+          onMore={(e) => handleContextMenuEvent(e, detailEvent)}
+          onPrint={printOff ? undefined : () => { void requestPrint({ kind: "calendar-event", event: detailEvent }); }}
           onClose={closeDetail}
           onSaveNote={handleSaveNoteFromDetail}
           onRsvp={handleRsvpFromDetail}
+          onSubscribePublic={detailEvent.atprotoUri && detailEvent.atprotoCid && client?.subscribeAtprotoPublicCalendarEvent
+            ? handleSubscribePublicFromDetail : undefined}
+          onPublicRsvp={detailEvent.atprotoUri && detailEvent.atprotoCid && client?.rsvpAtprotoPublicCalendarEvent
+            ? handlePublicRsvpFromDetail : undefined}
+          onPublishPublic={detailEvent.source === 'atproto-space' && !detailEvent.atprotoUri && client?.publishAtprotoPublicCalendarEvent
+            ? handlePublishPublicFromDetail : undefined}
           onMouseEnter={() => { if (hoverTimerRef.current) { clearTimeout(hoverTimerRef.current); hoverTimerRef.current = null; } }}
           onMouseLeave={handleHoverLeave}
           currentUserEmails={currentUserEmails}
           isSubscriptionCalendar={isSubscriptionCalendar}
           timeFormat={timeFormat}
           isMobile={isMobile}
+          pinned={detailPinned}
         />
       )}
 
       {showEventModal && isMobile && (
         <EventModal
-          key={editEvent?.id ?? 'new'}
+          key={`${editEvent?.id ?? 'new'}${modalStartsInEdit ? ':edit' : ''}`}
           event={editEvent}
           calendars={displayCalendars}
           defaultDate={defaultModalDate}
           defaultEndDate={defaultModalEndDate}
           defaultAllDay={defaultModalAllDay}
+          defaultTitle={defaultModalTitle}
+          startInEditMode={modalStartsInEdit}
           defaultCalendarId={defaultCalendarIdForCreate}
           onSave={handleSaveEvent}
           onDelete={handleDeleteEvent}
           onDuplicate={handleDuplicateEvent}
           onRsvp={handleRsvp}
+          onMore={editEvent ? (anchor) => openEventContextMenuFrom(anchor, editEvent, "end") : undefined}
+          onDirtyChange={setEventEditorDirty}
           onClose={() => { setShowEventModal(false); setEditEvent(null); setDefaultCalendarIdForCreate(undefined); setDefaultModalAllDay(false); }}
           currentUserEmails={currentUserEmails}
           isSubscriptionCalendar={isSubscriptionCalendar}
+          maxParticipants={maxParticipants}
           isMobile={true}
         />
       )}
@@ -1982,6 +2652,7 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
       {/* Mobile task editor: full screen, like the event editor. */}
       {showTaskModal && isMobile && (
         <div
+          ref={mobileTaskEditorRef}
           role="dialog"
           aria-modal="true"
           aria-label={editTask ? t("tasks.edit") : t("tasks.create")}
@@ -1991,8 +2662,10 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
             key={editTask?.id ?? 'new-task'}
             task={editTask}
             calendars={displayCalendars}
+            isSubscriptionCalendar={isSubscriptionCalendar}
             onSave={handleSaveTask}
             onDelete={handleDeleteTask}
+            onDirtyChange={setTaskEditorDirty}
             onClose={() => { setShowTaskModal(false); setEditTask(null); }}
             isMobile={true}
           />
@@ -2041,6 +2714,11 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
       <RecurrenceScopeDialog
         isOpen={!!pendingScopeAction}
         actionType={pendingScopeAction?.type || "edit"}
+        note={pendingScopeAction?.type === "delete" && pendingScopeAction.sendScheduling
+          && userOrganizes(pendingScopeAction.event, currentUserEmails)
+          ? t("participants.cancel_notification")
+          : undefined}
+        eventTitle={pendingScopeAction?.event.title || t("events.no_title")}
         onSelect={handleScopeSelect}
         onClose={() => setPendingScopeAction(null)}
       />
@@ -2079,6 +2757,7 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
         );
       })()}
       </div>
+      {printCopy}
     </div>
   );
 }

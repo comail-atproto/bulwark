@@ -3,6 +3,7 @@ import { debug } from '@/lib/debug';
 import { PERIOD_REQUIRES, hasPeriod, periodTests } from '@/lib/sieve/period';
 import { VACATION_FORWARD_MARKER, isValidVacationForward, normalizeVacationForward } from '@/lib/sieve/vacation-forward';
 import { isValidVacationAudience, normalizeVacationAudience } from '@/lib/sieve/vacation-audience';
+import { usesRegex } from '@/lib/sieve/regex';
 
 const HEADER_MAP: Record<string, string> = {
   from: 'From',
@@ -16,6 +17,24 @@ const ADDRESS_FIELDS = new Set<FilterCondition['field']>(['from', 'to', 'cc']);
 
 function escapeString(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+/**
+ * Header names Stalwart's Sieve compiler accepts (sieve-rs, 0.16 and 1.0).
+ * Anything else - a space, a dot, a colon - fails the whole script with
+ * "Invalid header name".
+ */
+const SIEVE_HEADER_NAME_RE = /^[A-Za-z0-9_-]+$/;
+
+export function isValidSieveHeaderName(name: string): boolean {
+  return SIEVE_HEADER_NAME_RE.test(name);
+}
+
+/** The header a condition tests; a header condition without a name tests X-Unknown. */
+function conditionHeaderName(condition: FilterCondition): string {
+  return condition.field === 'header'
+    ? (condition.headerName?.trim() || 'X-Unknown')
+    : HEADER_MAP[condition.field];
 }
 
 // Normalise the condition value to a non-empty string array. Single-value
@@ -55,7 +74,7 @@ function generateCondition(condition: FilterCondition): string {
   const values = toValueList(value);
 
   if (field === 'body') {
-    const matchType = comparator === 'is' ? ':is' : ':contains';
+    const matchType = comparator === 'is' ? ':is' : comparator === 'regex' ? ':regex' : ':contains';
     return `body ${matchType} ${formatStringArg(values)}`;
   }
 
@@ -79,9 +98,7 @@ function generateCondition(condition: FilterCondition): string {
     return `header :mime :anychild :matches ["Content-Disposition", "Content-Type"] ${formatStringArg(normalised, (ext) => `*.${ext}*`)}`;
   }
 
-  const headerName = escapeString(field === 'header'
-    ? (condition.headerName || 'X-Unknown')
-    : HEADER_MAP[field]);
+  const headerName = escapeString(conditionHeaderName(condition));
 
   // RFC 5228 §5.1: `address` compares the parsed address, so the display
   // name and the angle brackets play no part. `header :contains` would let
@@ -107,6 +124,8 @@ function generateCondition(condition: FilterCondition): string {
       return `header :matches "${headerName}" ${formatStringArg(values, (v) => `*${v}`)}`;
     case 'matches':
       return `header :matches "${headerName}" ${formatStringArg(values)}`;
+    case 'regex':
+      return `header :regex "${headerName}" ${formatStringArg(values)}`;
     default:
       return `header :contains "${headerName}" ${formatStringArg(values)}`;
   }
@@ -203,6 +222,7 @@ function computeRequires(
     for (const condition of rule.conditions) {
       if (condition.field === 'body') extensions.add('body');
       if (condition.field === 'attachment') extensions.add('mime');
+      if (usesRegex(condition)) extensions.add('regex');
     }
     for (const action of rule.actions) {
       switch (action.type) {
@@ -326,8 +346,14 @@ export function generateScript(
   // without what it does not know: a rule without its period forwards for
   // good, the auto-reply goes to everyone. It leaves version 2 alone. A
   // forward that is off only loses its remembered address that way, so it
-  // stays version 1: the native app still edits version 1 only.
-  if (metadata.rules.some(hasPeriod) || metadata.vacationForward?.enabled || metadata.vacationAudience) {
+  // stays version 1: the native app still edits version 1 only. A regex
+  // condition would come back from those as a plain "contains".
+  if (
+    metadata.rules.some(hasPeriod) ||
+    metadata.rules.some(r => r.conditions.some(usesRegex)) ||
+    metadata.vacationForward?.enabled ||
+    metadata.vacationAudience
+  ) {
     metadata.version = 2;
   }
   // The JSON sits inside a /* ... */ comment: a "*/" in any string (a rule
@@ -416,6 +442,16 @@ export function generateScript(
       debug.warn('filters', `Skipping rule "${rule.name}": empty conditions or actions`);
       continue;
     }
+    // The server would refuse the whole script, every other rule with it.
+    // The rule stays in the metadata, so it can still be corrected.
+    const badHeader = rule.conditions
+      .filter(c => c.field === 'header')
+      .map(conditionHeaderName)
+      .find(name => !isValidSieveHeaderName(name));
+    if (badHeader !== undefined) {
+      debug.warn('filters', `Skipping rule "${rule.name}": invalid header name "${badHeader}"`);
+      continue;
+    }
     // Without its period a rule would act all the time - a forwarding rule
     // would forward for good - so one whose period is unusable is dropped.
     const period = periodTests(rule);
@@ -469,15 +505,17 @@ export function generateScript(
     lines.push('}');
   }
 
-  // Append preserved external rules verbatim. Each rawBlock already carries its
-  // own leading comments and trailing whitespace from the source script.
-  if (externalRules.length > 0) {
+  // Append preserved external rules verbatim. Each rawBlock carries its own
+  // leading comments, but also the blank lines around it in the source
+  // script; trim those and put exactly one blank line between blocks, so a
+  // save writes the same script as the one before it.
+  const externalBlocks = externalRules
+    .map((ext) => (ext.rawBlock ?? '').trim())
+    .filter((block) => block.length > 0);
+  if (externalBlocks.length > 0) {
     lines.push('');
     lines.push('# --- External rules (managed outside Bulwark) ---');
-    for (const ext of externalRules) {
-      if (!ext.rawBlock) continue;
-      lines.push(ext.rawBlock.replace(/\s+$/, ''));
-    }
+    lines.push(externalBlocks.join('\n\n'));
   }
 
   lines.push('');

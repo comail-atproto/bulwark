@@ -1,16 +1,14 @@
 import type { Metadata, Viewport } from "next";
 import { getLocaleDirection } from "@/i18n/direction";
-import {
-  Atkinson_Hyperlegible,
-  Geist,
-  Geist_Mono,
-  Young_Serif,
-} from "next/font/google";
+import { Geist, Geist_Mono } from "next/font/google";
+import { atkinsonHyperlegible, youngSerif } from "@/app/comail-fonts";
 import { headers } from "next/headers";
 import { getLocale, getTranslations } from "next-intl/server";
 import { ServiceWorkerRegistration } from "@/components/service-worker-registration";
 import { FaviconBadge } from "@/components/favicon-badge";
+import { ErrorReportingRoot } from "@/components/error/error-reporting-root";
 import { ThemeColorSync } from "@/components/theme-color-sync";
+import { IosViewportHeal } from "@/components/ios-viewport-heal";
 import { configManager } from "@/lib/admin/config-manager";
 import {
   matchDomainBranding,
@@ -21,7 +19,10 @@ import {
 import { withBasePath } from "@/lib/browser-navigation";
 import { locales, defaultLocale } from "@/i18n/routing";
 import { IS_LITE, LITE_MOUNT_GLOBAL } from "@/lib/lite";
+import { accessibilityBootScript } from "@/lib/accessibility-settings";
+import { bootSkeletonScript } from "@/lib/boot-skeleton/boot-script";
 import "../globals.css";
+import "../print.css";
 
 // This layout renders <html> and sits ABOVE the [locale] segment, so
 // next-intl's getLocale() returns the default locale here - emitting
@@ -43,22 +44,6 @@ const geistSans = Geist({
 const geistMono = Geist_Mono({
   variable: "--font-geist-mono",
   subsets: ["latin"],
-});
-
-// Match Comail's public-site typography without loading fonts from a third party.
-const youngSerif = Young_Serif({
-  variable: "--comail-font-display",
-  subsets: ["latin"],
-  weight: "400",
-  display: "swap",
-});
-
-const atkinsonHyperlegible = Atkinson_Hyperlegible({
-  variable: "--comail-font-body",
-  subsets: ["latin"],
-  weight: ["400", "700"],
-  style: ["normal", "italic"],
-  display: "swap",
 });
 
 // Resolve a branding value for the requesting host: per-domain override first,
@@ -276,18 +261,21 @@ export default async function RootLayout({
 }: {
   children: React.ReactNode;
 }) {
-  const parentOrigin = process.env.NEXT_PUBLIC_PARENT_ORIGIN || "";
-
+  let parentOrigin: string;
   let locale: string;
   let nonce: string | undefined;
   let themeColorConfigured: boolean;
   if (IS_LITE) {
     // Static export: no request, no nonce, no admin config.
+    parentOrigin = process.env.NEXT_PUBLIC_PARENT_ORIGIN || "";
     locale = defaultLocale;
     nonce = undefined;
     themeColorConfigured = false;
   } else {
     await configManager.ensureLoaded();
+    // Admin setting, then NEXT_PUBLIC_PARENT_ORIGIN, read per request. The
+    // iframe bridge only posts to the origin named in this meta tag.
+    parentOrigin = configManager.get<string>("parentOrigin", "") || "";
     locale = await resolveRequestLocale();
     nonce = (await headers()).get("x-nonce") ?? "";
     themeColorConfigured = await hasExplicitThemeColor();
@@ -317,9 +305,12 @@ export default async function RootLayout({
                   const resolved = theme === 'system' ? systemTheme : theme;
                   document.documentElement.classList.remove('light', 'dark');
                   document.documentElement.classList.add(resolved);
+                  document.documentElement.style.colorScheme = resolved;
                 } catch (e) {
                   document.documentElement.classList.add('light');
                 }
+                ${accessibilityBootScript()}
+                ${bootSkeletonScript()}
               })();
             `,
           }}
@@ -331,6 +322,8 @@ export default async function RootLayout({
         <ServiceWorkerRegistration />
         {!themeColorConfigured && <ThemeColorSync />}
         <FaviconBadge />
+        <ErrorReportingRoot />
+        <IosViewportHeal />
         {children}
       </body>
     </html>

@@ -1,0 +1,32 @@
+{
+  "font": "Young Serif Regular",
+  "fontRevision": "9862abc066c9b83bf84c3e8ed1fc2d8d48f9bbf0",
+  "fontSource": "ofl/youngserif/YoungSerif-Regular.ttf",
+  "fontSha256": "42bb2602364b28569fdce5eeb6ab3d81cf8090ba81b211f1229ed69f33155523",
+  "letterSpacingEm": -0.03,
+  "viewBox": [
+    0,
+    0,
+    3191.0,
+    1000
+  ],
+  "palettes": {
+    "light": {
+      "accent": "#3fa1c0",
+      "ink": "#012102"
+    },
+    "dark": {
+      "accent": "#87c4cd",
+      "ink": "#dfe0c0"
+    },
+    "spooky": {
+      "accent": "#ffad3b",
+      "ink": "#ffe596"
+    }
+  },
+  "sha256": {
+    "comail-light.svg": "4807cd389a9f6919b7b395f254947f5290cc5f38989ea3281d3eb4b36903220e",
+    "comail-dark.svg": "6b7bad4de4307feafb2aeb031fd507a9b5f929227a873cac45ac3e4951abc51a",
+    "comail-spooky.svg": "bfd40a1f3be0cdb1cb4c02e652d3b9d9f3d3449c05f23a0094c17642c21fecf2"
+  }
+}

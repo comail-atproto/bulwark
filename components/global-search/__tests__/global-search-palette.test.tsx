@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ContactHit, MailHit, SearchOutcome } from '@/lib/global-search/types';
@@ -28,7 +28,6 @@ vi.mock('@/hooks/use-global-search', () => ({
 
 vi.mock('@/stores/account-store', () => {
   const state = {
-    getActiveAccount: () => undefined,
     accounts: [
       { id: 'login-a', label: 'Work', email: 'a@x', isConnected: true },
       { id: 'login-b', label: 'Home', email: 'b@x', isConnected: true },
@@ -129,7 +128,9 @@ describe('GlobalSearchPalette', () => {
     expect(useGlobalSearchStore.getState().isOpen).toBe(false);
   });
 
-  it('ArrowDown moves focus from the input into the first result row', () => {
+  // A combobox: the focus stays in the field and the arrow keys move the
+  // highlight a screen reader follows through aria-activedescendant.
+  it('ArrowDown highlights the results while the focus stays in the field', () => {
     useGlobalSearchStore.setState({ query: 'zeb' });
     searchState.parsed = parseSearchQuery('zeb');
     searchState.isEmpty = false;
@@ -138,11 +139,46 @@ describe('GlobalSearchPalette', () => {
     outcome.status.mail.status = 'done';
     searchState.outcome = outcome;
     render(<GlobalSearchPalette />);
-    const dialog = screen.getByRole('dialog');
-    fireEvent.keyDown(dialog, { key: 'ArrowDown' });
-    expect((document.activeElement as HTMLElement).textContent).toContain('Zebra subject');
-    fireEvent.keyDown(dialog, { key: 'ArrowDown' });
-    expect((document.activeElement as HTMLElement).textContent).toContain('Second');
+    const input = screen.getByRole('combobox', { name: 'title' });
+    const listbox = screen.getByRole('listbox');
+    expect(input).toHaveAttribute('aria-controls', listbox.id);
+    expect(screen.getByRole('group', { name: 'scope_mail' })).toBeInTheDocument();
+    const [first, second] = within(listbox).getAllByRole('option');
+    expect(first).toHaveAttribute('aria-selected', 'false');
+
+    input.focus();
+    fireEvent.keyDown(input, { key: 'ArrowDown' });
+    expect(input).toHaveFocus();
+    expect(input).toHaveAttribute('aria-activedescendant', first.id);
+    expect(first).toHaveAttribute('aria-selected', 'true');
+    expect(first).toHaveTextContent('Zebra subject');
+    fireEvent.keyDown(input, { key: 'ArrowDown' });
+    expect(input).toHaveAttribute('aria-activedescendant', second.id);
+    expect(second).toHaveAttribute('aria-selected', 'true');
+    expect(first).toHaveAttribute('aria-selected', 'false');
+
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(openHit).toHaveBeenCalledWith(expect.objectContaining({ id: 'm2' }), expect.anything());
+  });
+
+  it('keeps the focus inside and gives it back on close', () => {
+    useGlobalSearchStore.setState({ isOpen: false });
+    const opener = document.createElement('button');
+    document.body.appendChild(opener);
+    opener.focus();
+    const { rerender } = render(<GlobalSearchPalette />);
+    act(() => { useGlobalSearchStore.setState({ isOpen: true }); });
+    rerender(<GlobalSearchPalette />);
+    const input = screen.getByRole('combobox', { name: 'title' });
+    expect(input).toHaveFocus();
+    // Shift+Tab from the first control wraps to the last one in the dialog.
+    fireEvent.keyDown(input, { key: 'Tab', shiftKey: true });
+    expect(screen.getByRole('dialog')).toContainElement(document.activeElement as HTMLElement);
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'Escape' });
+    expect(useGlobalSearchStore.getState().isOpen).toBe(false);
+    rerender(<GlobalSearchPalette />);
+    expect(opener).toHaveFocus();
+    opener.remove();
   });
 
   it('Escape closes the palette', () => {

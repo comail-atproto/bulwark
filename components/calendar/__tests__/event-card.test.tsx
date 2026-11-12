@@ -1,6 +1,7 @@
-import { render, screen, cleanup } from '@testing-library/react';
-import { describe, it, expect, afterEach } from 'vitest';
+import { render, screen, cleanup, fireEvent } from '@testing-library/react';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { EventCard } from '../event-card';
+import { useSettingsStore } from '@/stores/settings-store';
 import type { Calendar, CalendarEvent, CalendarParticipant } from '@/lib/jmap/types';
 
 // #1110: an invitation the user declined - the whole series or one occurrence
@@ -88,5 +89,70 @@ describe('EventCard fill', () => {
     const shadow = screen.getByRole('button').style.boxShadow;
     expect(shadow).toContain('0 0 0 2px var(--color-primary)');
     expect(shadow).toContain('inset 0 0 0 1px');
+  });
+
+  describe('with light event colours', () => {
+    beforeEach(() => useSettingsStore.setState({ calendarTintedEvents: true }));
+    afterEach(() => useSettingsStore.setState({ calendarTintedEvents: false }));
+
+    it.each(['chip', 'span', 'block'] as const)('tints the %s and draws the calendar colour as a bar at its start', (variant) => {
+      render(<EventCard event={makeOccurrence('a', 'accepted')} calendar={calendar} variant={variant} currentUserEmails={me} />);
+      const card = screen.getByRole('button');
+      expect(card).toHaveClass('start-bar');
+      expect(card.style.getPropertyValue('--start-bar')).toBe('#22c55e');
+      expect(card.style.backgroundColor).not.toBe('rgb(34, 197, 94)');
+      expect(card.style.color).toBe('var(--color-foreground)');
+    });
+
+    it('keeps the outline of a declined event, without a bar', () => {
+      render(<EventCard event={makeOccurrence('a', 'declined')} calendar={calendar} variant="block" currentUserEmails={me} />);
+      const card = screen.getByRole('button');
+      expect(card).not.toHaveClass('start-bar');
+      expect(card.style.boxShadow).toContain('inset 0 0 0 1px');
+    });
+  });
+});
+
+describe('EventCard colour settings', () => {
+  const calendar = { id: 'cal-1', name: 'Work', color: '#22c55e' } as unknown as Calendar;
+  afterEach(() => {
+    cleanup();
+    useSettingsStore.setState({ showColorNames: false, colorBlindPalette: false });
+  });
+
+  it.each(['chip', 'span', 'block'] as const)('shows the calendar name on the %s with "Show names next to colours"', (variant) => {
+    useSettingsStore.setState({ showColorNames: true });
+    render(<EventCard event={makeOccurrence('a', 'accepted')} calendar={calendar} variant={variant} currentUserEmails={me} />);
+    expect(screen.getByText('Work')).toBeInTheDocument();
+  });
+
+  it('shows only the colour without it', () => {
+    render(<EventCard event={makeOccurrence('a', 'accepted')} calendar={calendar} variant="block" currentUserEmails={me} />);
+    expect(screen.queryByText('Work')).not.toBeInTheDocument();
+  });
+
+  it("draws the event in the colour-blind-safe colour and keeps the calendar's own", () => {
+    useSettingsStore.setState({ colorBlindPalette: true });
+    render(<EventCard event={makeOccurrence('a', 'accepted')} calendar={calendar} variant="block" currentUserEmails={me} />);
+    // #009E73, the palette's bluish green
+    expect(screen.getByRole('button').style.backgroundColor).toBe('rgb(0, 158, 115)');
+    expect(calendar.color).toBe('#22c55e');
+  });
+});
+
+describe('EventCard from the keyboard (MA-05)', () => {
+  afterEach(cleanup);
+
+  it.each(['chip', 'span', 'block'] as const)('opens the event menu with Shift+F10 on the %s', (variant) => {
+    const onContextMenu = vi.fn();
+    const event = makeOccurrence('a', 'accepted');
+    render(<EventCard event={event} variant={variant} onContextMenu={onContextMenu} currentUserEmails={me} />);
+    const card = screen.getByRole('button');
+    fireEvent.keyDown(card, { key: 'F10' });
+    expect(onContextMenu).not.toHaveBeenCalled();
+    fireEvent.keyDown(card, { key: 'F10', shiftKey: true });
+    expect(onContextMenu).toHaveBeenCalledOnce();
+    expect(onContextMenu.mock.calls[0][1]).toBe(event);
+    expect(onContextMenu.mock.calls[0][0].currentTarget).toBe(card);
   });
 });

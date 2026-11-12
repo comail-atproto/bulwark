@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef } from "react";
+import { useTranslations } from "next-intl";
 import { cn } from "@/lib/utils";
 
 interface ResizeHandleProps {
@@ -10,45 +11,82 @@ interface ResizeHandleProps {
   onDoubleClick?: () => void;
   orientation?: "vertical" | "horizontal";
   className?: string;
-  // Current size of the pane this handle resizes (px). Exposed as
-  // aria-valuenow so the focusable role="separator" satisfies the ARIA
-  // window-splitter contract (axe aria-required-attr). Consumers that pass a
-  // live value should update it on drag; when omitted the handle still
-  // reports a valid (mid-range) value so the required attribute is present.
+  /** Stable hook for tests (not user-visible). */
+  testId?: string;
+  /**
+   * The pane the handle resizes, which names it for screen readers
+   * ("Resize message list"). Without it the name is a plain "Resize".
+   */
+  pane?: ResizePane;
+  /**
+   * The size of the pane it resizes, in px, and the limits of that size. A
+   * focusable separator must expose its value (WCAG 4.1.2), so screen
+   * readers say how wide the pane is now and how far it can go.
+   */
   value?: number;
-  valueMin?: number;
-  valueMax?: number;
+  min?: number;
+  max?: number;
   valueText?: string;
 }
 
 const KEYBOARD_STEP = 10;
 
-const DEFAULT_VALUE_MIN = 0;
-const DEFAULT_VALUE_MAX = 100;
+export type ResizePane = "sidebar" | "messageList" | "contactList" | "sidePanel";
 
-function clampRound(value: number, min: number, max: number): number {
-  return Math.round(Math.min(Math.max(value, min), max));
-}
+const PANE_LABEL_KEYS: Record<ResizePane, string> = {
+  sidebar: "resize_sidebar",
+  messageList: "resize_message_list",
+  contactList: "resize_contact_list",
+  sidePanel: "resize_side_panel",
+};
 
-export function ResizeHandle({ onResizeStart, onResize, onResizeEnd, onDoubleClick, orientation = "vertical", className, value, valueMin, valueMax, valueText }: ResizeHandleProps) {
-  const isDragging = useRef(false);
+export function ResizeHandle({ onResizeStart, onResize, onResizeEnd, onDoubleClick, orientation = "vertical", className, testId, pane, value, min = 0, max = 100, valueText }: ResizeHandleProps) {
+  const t = useTranslations("shell");
+  const handleRef = useRef<HTMLDivElement>(null);
+  // Id of the pointer that started the drag, or null when idle. Only that
+  // pointer may move or end the drag, so a second finger or button can't
+  // hijack it.
+  const activePointer = useRef<number | null>(null);
   const startPos = useRef(0);
   const isHorizontal = orientation === "horizontal";
 
-  const ariaMin = valueMin ?? DEFAULT_VALUE_MIN;
-  const ariaMax = valueMax ?? DEFAULT_VALUE_MAX;
-  // Fall back to the mid-point so a value is always present (axe
-  // aria-required-attr) even when a consumer has not wired a live size.
-  const ariaNow = clampRound(value ?? (ariaMin + ariaMax) / 2, ariaMin, ariaMax);
 
-  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+  // Latest callbacks, so the document listeners below never go stale and
+  // never need re-subscribing while a drag is in progress.
+  const callbacks = useRef({ onResizeStart, onResize, onResizeEnd });
+  callbacks.current = { onResizeStart, onResize, onResizeEnd };
+
+  const endDrag = useCallback(() => {
+    if (activePointer.current === null) return;
+    const pointerId = activePointer.current;
+    activePointer.current = null;
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+    const el = handleRef.current;
+    if (el && typeof el.hasPointerCapture === "function" && el.hasPointerCapture(pointerId)) {
+      el.releasePointerCapture(pointerId);
+    }
+    callbacks.current.onResizeEnd?.();
+  }, []);
+
+  const handlePointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    // Primary button only; ignore a second pointer while one is dragging.
+    if (e.button !== 0 || activePointer.current !== null) return;
     e.preventDefault();
-    isDragging.current = true;
+    activePointer.current = e.pointerId;
     startPos.current = isHorizontal ? e.clientY : e.clientX;
     document.body.style.cursor = isHorizontal ? "row-resize" : "col-resize";
     document.body.style.userSelect = "none";
-    onResizeStart?.();
-  }, [onResizeStart, isHorizontal]);
+    // Capture routes every later pointer event for this drag to the handle,
+    // even when the pointer is over an iframe (message body, plugin panel)
+    // or outside the window. Without it the release over an iframe never
+    // reaches this document and the handle keeps following the mouse.
+    const el = e.currentTarget;
+    if (typeof el.setPointerCapture === "function") {
+      try { el.setPointerCapture(e.pointerId); } catch { /* unsupported pointer */ }
+    }
+    callbacks.current.onResizeStart?.();
+  }, [isHorizontal]);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     let delta = 0;
@@ -62,51 +100,79 @@ export function ResizeHandle({ onResizeStart, onResize, onResizeEnd, onDoubleCli
       else return;
     }
     e.preventDefault();
-    onResize(delta);
-    onResizeEnd?.();
-  }, [onResize, onResizeEnd, isHorizontal]);
+    // The arrows belong to the handle: the mail shortcuts listen on the
+    // window and would otherwise also move the selection.
+    e.stopPropagation();
+    // Each step starts from the size the pane has now, as a drag does;
+    // without the start every press moved from the same old width.
+    callbacks.current.onResizeStart?.();
+    callbacks.current.onResize(delta);
+    // The end runs after the new size has rendered, so a caller that saves
+    // the size in its end callback saves this step and not the last one.
+    queueMicrotask(() => callbacks.current.onResizeEnd?.());
+  }, [isHorizontal]);
 
   useEffect(() => {
-    const handleMouseMove = (e: MouseEvent) => {
-      if (!isDragging.current) return;
+    const handlePointerMove = (e: PointerEvent) => {
+      if (activePointer.current === null || e.pointerId !== activePointer.current) return;
+      // A move with no button held means the release happened somewhere we
+      // never heard about (another frame, outside the window). Stop instead
+      // of dragging the divider around with a released mouse.
+      if (e.pointerType === "mouse" && e.buttons === 0) {
+        endDrag();
+        return;
+      }
       const delta = (isHorizontal ? e.clientY : e.clientX) - startPos.current;
-      onResize(delta);
+      callbacks.current.onResize(delta);
     };
 
-    const handleMouseUp = () => {
-      if (!isDragging.current) return;
-      isDragging.current = false;
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-      onResizeEnd?.();
+    const handlePointerEnd = (e: PointerEvent) => {
+      if (activePointer.current === null || e.pointerId !== activePointer.current) return;
+      endDrag();
     };
 
-    document.addEventListener("mousemove", handleMouseMove);
-    document.addEventListener("mouseup", handleMouseUp);
+    // Listen on the document rather than the handle so the fallback without
+    // pointer capture still sees moves anywhere in the page.
+    document.addEventListener("pointermove", handlePointerMove);
+    document.addEventListener("pointerup", handlePointerEnd);
+    document.addEventListener("pointercancel", handlePointerEnd);
+    window.addEventListener("blur", endDrag);
     return () => {
-      document.removeEventListener("mousemove", handleMouseMove);
-      document.removeEventListener("mouseup", handleMouseUp);
+      document.removeEventListener("pointermove", handlePointerMove);
+      document.removeEventListener("pointerup", handlePointerEnd);
+      document.removeEventListener("pointercancel", handlePointerEnd);
+      window.removeEventListener("blur", endDrag);
     };
-  }, [onResize, onResizeEnd, isHorizontal]);
+  }, [endDrag, isHorizontal]);
+
+  // Unmounting mid-drag (the pane layout switched) must not leave the body
+  // cursor and selection lock behind.
+  useEffect(() => endDrag, [endDrag]);
 
   return (
     <div
+      ref={handleRef}
       role="separator"
       aria-orientation={isHorizontal ? "horizontal" : "vertical"}
-      aria-label="Resize"
-      aria-valuenow={ariaNow}
-      aria-valuemin={ariaMin}
-      aria-valuemax={ariaMax}
+      aria-label={t(pane ? PANE_LABEL_KEYS[pane] : "resize")}
+      aria-valuenow={Math.round(Math.min(max, Math.max(min, value ?? (min + max) / 2)))}
+      aria-valuemin={min}
+      aria-valuemax={max}
       aria-valuetext={valueText}
+      data-testid={testId}
       tabIndex={0}
-      onMouseDown={handleMouseDown}
+      onPointerDown={handlePointerDown}
+      onLostPointerCapture={endDrag}
       onKeyDown={handleKeyDown}
       onDoubleClick={onDoubleClick}
       className={cn(
         // Centered over the seam with negative margins so the handle adds no
         // net layout space (panes sit flush) while staying draggable.
         "flex-shrink-0 hover:bg-primary/30 active:bg-primary/50 transition-colors relative group z-10",
-        "focus-visible:outline-none focus-visible:bg-primary/40 focus-visible:ring-2 focus-visible:ring-primary/50",
+        "focus-visible:outline-hidden focus-visible:bg-primary/40",
+        // touch-none keeps the browser from turning a touch drag into a
+        // scroll and cancelling the pointer.
+        "touch-none",
         isHorizontal ? "h-1 -my-0.5 cursor-row-resize bg-border" : "w-1 -mx-0.5 cursor-col-resize",
         className
       )}

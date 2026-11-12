@@ -1,3 +1,5 @@
+import { noThirdPartyTraffic } from '@/lib/third-party-mode';
+
 /**
  * Resolve an atproto (Bluesky) account's public profile for the account UI.
  *
@@ -40,7 +42,7 @@ function isSupportedDid(did: string): boolean {
  * profile without an avatar is still returned so handle-only accounts render.
  */
 export async function resolveAtprotoProfile(did: string): Promise<AtprotoProfile | null> {
-  if (!did || !isSupportedDid(did)) return null;
+  if (!did || !isSupportedDid(did) || noThirdPartyTraffic()) return null;
 
   if (profileCache.has(did)) {
     return profileCache.get(did) ?? null;

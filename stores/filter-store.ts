@@ -3,17 +3,50 @@ import type { IJMAPClient } from '@/lib/jmap/client-interface';
 import type { FilterRule, SieveCapabilities, VacationAudience, VacationForward, VacationSieveConfig } from '@/lib/jmap/sieve-types';
 import { parseScript } from '@/lib/sieve/parser';
 import { generateScript, supportsSpamGuard, VACATION_SCRIPT_NAME } from '@/lib/sieve/generator';
-import { OpaqueFiltersError, applyScriptTransforms, supportsInclude, writeFiltersScript } from '@/lib/filters/account-filters';
+import {
+  OpaqueFiltersError, applyScriptTransforms, assertFiltersSaveAllowed, filterRuleToView, readAccountFilters, renderFiltersScript,
+  supportsInclude, writeFiltersScript,
+} from '@/lib/filters/account-filters';
+import { countKeywordUses, renameKeywordInRules } from '@/lib/sieve/keyword-rename';
+import { filterHooks } from '@/lib/plugin-hooks';
 import { worstCaseForwards } from '@/lib/filters/forward-limit';
 import { supportsPeriods } from '@/lib/sieve/period';
 import { isValidVacationForward, withVacationPeriod } from '@/lib/sieve/vacation-forward';
 import { isValidVacationAudience, normalizeVacationAudience } from '@/lib/sieve/vacation-audience';
 import { debug } from '@/lib/debug';
 
+/** What a tag rename managed to do to the filters that name the tag. */
+export interface KeywordRenameOutcome {
+  /** Filter actions rewritten to the new tag id. */
+  changed: number;
+  /**
+   * References to the old tag left in place because the script is hand-edited
+   * and is kept verbatim. The caller should tell the user, who has to fix those
+   * by hand - nothing else will.
+   */
+  unhandled: number;
+}
+
 interface SieveAccount {
   id: string;
   name: string;
   isPrimary: boolean;
+}
+
+function emitFiltersLoaded(rules: FilterRule[]): void {
+  if (filterHooks.onFiltersLoaded.size > 0) void filterHooks.onFiltersLoaded.emit(rules.map(filterRuleToView));
+}
+
+type RuleChange = 'added' | 'updated' | 'deleted' | 'reordered' | 'toggled';
+
+function emitRuleChange(ruleId: string, change: RuleChange): void {
+  void filterHooks.onFilterRuleChange.emit({ ruleId, change });
+}
+
+/** Rules from other clients and hand-edited scripts are read-only here. */
+function isEditableRule(rules: FilterRule[], ruleId: string): boolean {
+  const rule = rules.find(r => r.id === ruleId);
+  return !!rule && rule.origin !== 'external' && rule.origin !== 'opaque';
 }
 
 interface FilterStore {
@@ -40,6 +73,7 @@ interface FilterStore {
   fetchFilters: (client: IJMAPClient, accountId?: string) => Promise<void>;
   selectAccount: (client: IJMAPClient, accountId: string) => Promise<void>;
   saveFilters: (client: IJMAPClient) => Promise<void>;
+  renameKeywordInFilters: (client: IJMAPClient, oldId: string, newId: string) => Promise<KeywordRenameOutcome>;
   validateScript: (client: IJMAPClient, content: string) => Promise<{ isValid: boolean; errors?: string[] }>;
   addRule: (rule: FilterRule) => void;
   updateRule: (ruleId: string, updates: Partial<FilterRule>) => void;
@@ -58,6 +92,30 @@ interface FilterStore {
  * in place for the next account, and the next save would upload them there.
  */
 let fetchGeneration = 0;
+
+/** What the filter view holds for a parsed script, on load and after a raw save. */
+function stateFromScript(result: ReturnType<typeof parseScript>, vacationActive: boolean) {
+  if (result.isOpaque) {
+    return {
+      isOpaque: true,
+      rules: [] as FilterRule[],
+      vacationSettings: result.vacation || null,
+      externalRequires: result.externalRequires,
+      includeVacation: false,
+      vacationForward: null,
+      vacationAudience: null,
+    };
+  }
+  return {
+    isOpaque: false,
+    rules: result.rules,
+    vacationSettings: result.vacation || null,
+    externalRequires: result.externalRequires,
+    includeVacation: !!result.includeVacation || vacationActive,
+    vacationForward: result.vacationForward ?? null,
+    vacationAudience: result.vacationAudience ?? null,
+  };
+}
 
 export const useFilterStore = create<FilterStore>()((set, get) => ({
   rules: [],
@@ -108,6 +166,7 @@ export const useFilterStore = create<FilterStore>()((set, get) => ({
 
       const activeScript = scripts.find(s => s.isActive) || scripts[0];
       if (!activeScript) {
+        emitFiltersLoaded([]);
         set({
           isLoading: false,
           rules: [],
@@ -128,32 +187,10 @@ export const useFilterStore = create<FilterStore>()((set, get) => ({
       set({ rawScript: content });
 
       const result = parseScript(content);
-
-      if (result.isOpaque) {
-        debug.log('filters', 'Sieve script is opaque (hand-edited)');
-        set({
-          isLoading: false,
-          isOpaque: true,
-          rules: [],
-          vacationSettings: result.vacation || null,
-          externalRequires: result.externalRequires,
-          includeVacation: false,
-          vacationForward: null,
-          vacationAudience: null,
-        });
-      } else {
-        debug.log('filters', 'Parsed', result.rules.length, 'filter rules');
-        set({
-          isLoading: false,
-          isOpaque: false,
-          rules: result.rules,
-          vacationSettings: result.vacation || null,
-          externalRequires: result.externalRequires,
-          includeVacation: !!result.includeVacation || vacationActive,
-          vacationForward: result.vacationForward ?? null,
-          vacationAudience: result.vacationAudience ?? null,
-        });
-      }
+      if (result.isOpaque) debug.log('filters', 'Sieve script is opaque (hand-edited)');
+      else debug.log('filters', 'Parsed', result.rules.length, 'filter rules');
+      emitFiltersLoaded(result.isOpaque ? [] : result.rules);
+      set({ isLoading: false, ...stateFromScript(result, vacationActive) });
     } catch (error) {
       if (stale()) return;
       debug.error('Failed to fetch filters:', error);
@@ -189,6 +226,9 @@ export const useFilterStore = create<FilterStore>()((set, get) => ({
         isOpaque, rawScript, rules, activeScriptId, vacationSettings, externalRequires, includeVacation,
         vacationForward, vacationAudience, selectedAccountId, sieveCapabilities,
       } = get();
+      // Throws FiltersSaveVetoedError (handled below like any failed save,
+      // so the settings UI puts its optimistic change back).
+      await assertFiltersSaveAllowed(rules);
 
       let content: string;
       if (isOpaque) {
@@ -205,7 +245,14 @@ export const useFilterStore = create<FilterStore>()((set, get) => ({
       const written = await writeFiltersScript(client, selectedAccountId || null, content, activeScriptId);
       if (!activeScriptId) set({ activeScriptId: written.scriptId });
 
-      set({ isSaving: false, rawScript: written.content });
+      if (isOpaque) {
+        // A script saved from the raw editor is read the way a page load
+        // reads it: one the builder understands shows its rules again.
+        const result = parseScript(written.content);
+        set({ isSaving: false, rawScript: written.content, ...stateFromScript(result, includeVacation) });
+      } else {
+        set({ isSaving: false, rawScript: written.content });
+      }
       debug.log('filters', 'Filters saved successfully');
     } catch (error) {
       debug.error('Failed to save filters:', error);
@@ -215,6 +262,66 @@ export const useFilterStore = create<FilterStore>()((set, get) => ({
       });
       throw error;
     }
+  },
+
+  /**
+   * Follows a renamed tag into this account's filters.
+   *
+   * Renaming a tag changes its id, and therefore the `$label:` keyword a rule
+   * writes. Migrating only the messages (`migrateKeyword`) would leave the rule
+   * tagging new mail under the old id, which nothing names any more - the rule
+   * looks broken while running exactly as written.
+   *
+   * The script is fetched and written back on its own rather than through
+   * `fetchFilters`/`saveFilters`, so a rename from the tag settings never
+   * disturbs which account an open filter view is showing. That view is updated
+   * in place when it happens to be showing this same account.
+   *
+   * A hand-edited (opaque) script is left alone - it has no parsed rules to
+   * rewrite and re-generating it would discard the user's own Sieve - and its
+   * remaining references are reported instead. Upload failures propagate.
+   */
+  renameKeywordInFilters: async (client, oldId, newId) => {
+    const nothing: KeywordRenameOutcome = { changed: 0, unhandled: 0 };
+    if (!oldId || !newId || oldId === newId) return nothing;
+    if (!client.supportsSieve()) return nothing;
+
+    // The account that runs the rules. A rule can only tag mail arriving in
+    // its own account, so this is the one to rewrite even in a session where
+    // the Sieve and mail primaries are different accounts - which RFC 8620
+    // permits, and which the caller's message migration, bound to the mail
+    // primary, would not have covered anyway.
+    const accountId = client.getSieveAccountId();
+    // The same read, render and write a normal save and a rule made from a
+    // message use, so the vacation include, forwarding, audience and the
+    // plugin pipeline survive the rename.
+    const filters = await readAccountFilters(client, accountId);
+    if (!filters.script || filters.activeScriptId !== filters.script.id) {
+      // Nothing is filtering mail right now. Writing would activate the
+      // script, and a tag rename must not switch someone's filters back on.
+      return nothing;
+    }
+    if (filters.parsed.isOpaque) {
+      return { changed: 0, unhandled: countKeywordUses(filters.content, oldId) };
+    }
+
+    const { rules, changed } = renameKeywordInRules(filters.parsed.rules, oldId, newId);
+    if (changed === 0) return { changed: 0, unhandled: countKeywordUses(filters.content, oldId) };
+
+    // A plugin can veto filter saves; the caller warns when this throws.
+    await assertFiltersSaveAllowed(rules);
+    const written = await writeFiltersScript(client, accountId, renderFiltersScript(rules, filters), filters.script.id);
+    // Count what still names the old tag in the script actually written,
+    // after the plugin transform: a rule kept verbatim, a test comparing
+    // against the keyword, or a section a plugin just grafted back on.
+    const unhandled = countKeywordUses(written.content, oldId);
+    debug.log('filters', 'Renamed tag in', changed, 'filter action(s)');
+
+    const state = get();
+    if (state.selectedAccountId === accountId && !state.isOpaque) {
+      set({ rules, rawScript: written.content, activeScriptId: written.scriptId });
+    }
+    return { changed, unhandled };
   },
 
   validateScript: async (client, content) => {
@@ -229,9 +336,11 @@ export const useFilterStore = create<FilterStore>()((set, get) => ({
       const external = state.rules.filter(r => r.origin === 'external' || r.origin === 'opaque');
       return { rules: [...bulwark, rule, ...external] };
     });
+    emitRuleChange(rule.id, 'added');
   },
 
   updateRule: (ruleId, updates) => {
+    if (!isEditableRule(get().rules, ruleId)) return;
     set((state) => ({
       rules: state.rules.map(r => {
         if (r.id !== ruleId) return r;
@@ -239,18 +348,22 @@ export const useFilterStore = create<FilterStore>()((set, get) => ({
         return { ...r, ...updates };
       }),
     }));
+    emitRuleChange(ruleId, 'updated');
   },
 
   deleteRule: (ruleId) => {
+    if (!isEditableRule(get().rules, ruleId)) return;
     set((state) => ({
       rules: state.rules.filter(r => {
         if (r.id !== ruleId) return true;
         return r.origin === 'external' || r.origin === 'opaque';
       }),
     }));
+    emitRuleChange(ruleId, 'deleted');
   },
 
   reorderRules: (ruleIds) => {
+    const before = get().rules;
     // Only reorder bulwark rules; external rules always stay at the end in
     // their original order.
     set((state) => {
@@ -261,9 +374,14 @@ export const useFilterStore = create<FilterStore>()((set, get) => ({
       const reordered = ruleIds.map(id => bulwarkMap.get(id)).filter(Boolean) as FilterRule[];
       return { rules: [...reordered, ...external] };
     });
+    // A reorder moves several rules at once, so the first rule that changed
+    // place stands for it.
+    const moved = get().rules.find((r, i) => r.id !== before[i]?.id);
+    if (moved) emitRuleChange(moved.id, 'reordered');
   },
 
   toggleRule: (ruleId) => {
+    if (!isEditableRule(get().rules, ruleId)) return;
     set((state) => ({
       rules: state.rules.map(r => {
         if (r.id !== ruleId) return r;
@@ -271,6 +389,7 @@ export const useFilterStore = create<FilterStore>()((set, get) => ({
         return { ...r, enabled: !r.enabled };
       }),
     }));
+    emitRuleChange(ruleId, 'toggled');
   },
 
   setRawScript: (content) => set({ rawScript: content }),

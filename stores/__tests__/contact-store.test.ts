@@ -1,7 +1,19 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { useContactStore, getContactPhotoUri, normalizeContactPhotoUri, TRUSTED_SENDERS_BOOK_NAME } from '../contact-store';
-import type { ContactCard } from '@/lib/jmap/types';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import {
+  useContactStore,
+  principalsToDirectory,
+  findContactPhotoEntry,
+  getContactPhotoIndex,
+  getContactPhotoRef,
+  getContactPhotoUri,
+  hasContactPhoto,
+  normalizeContactPhotoUri,
+  TRUSTED_SENDERS_BOOK_NAME,
+} from '../contact-store';
+import type { ContactCard, ContactMedia } from '@/lib/jmap/types';
 import type { IJMAPClient } from '@/lib/jmap/client-interface';
+import { clearContactPhotoCache } from '@/lib/contact-photo-cache';
+import { setClientLookup } from '../client-registry';
 
 vi.stubGlobal('crypto', { randomUUID: () => '00000000-0000-0000-0000-000000000000' });
 
@@ -34,72 +46,74 @@ const defaultState = {
   activeTab: 'all' as const,
   directoryPrincipals: [],
   directoryLoaded: false,
+  directoryStatus: 'idle' as const,
 };
 
 describe('contact-store', () => {
   beforeEach(() => {
     useContactStore.setState(defaultState);
+    setClientLookup(() => undefined);
   });
 
   describe('addLocalContact', () => {
-    it('should append contact to array', () => {
-      useContactStore.getState().addLocalContact(makeContact());
+    it('should append contact to array', async () => {
+      await useContactStore.getState().addLocalContact(makeContact());
       expect(useContactStore.getState().contacts).toHaveLength(1);
       expect(useContactStore.getState().contacts[0].id).toBe('contact-1');
     });
 
-    it('should preserve existing contacts', () => {
-      useContactStore.getState().addLocalContact(makeContact({ id: 'c1' }));
-      useContactStore.getState().addLocalContact(makeContact({ id: 'c2' }));
+    it('should preserve existing contacts', async () => {
+      await useContactStore.getState().addLocalContact(makeContact({ id: 'c1' }));
+      await useContactStore.getState().addLocalContact(makeContact({ id: 'c2' }));
       expect(useContactStore.getState().contacts).toHaveLength(2);
     });
   });
 
   describe('updateLocalContact', () => {
-    it('should update matching contact', () => {
-      useContactStore.getState().addLocalContact(makeContact({ id: 'c1' }));
-      useContactStore.getState().updateLocalContact('c1', {
+    it('should update matching contact', async () => {
+      await useContactStore.getState().addLocalContact(makeContact({ id: 'c1' }));
+      await useContactStore.getState().updateLocalContact('c1', {
         emails: { e0: { address: 'updated@example.com' } },
       });
       expect(useContactStore.getState().contacts[0].emails!.e0.address).toBe('updated@example.com');
     });
 
-    it('should not modify other contacts', () => {
-      useContactStore.getState().addLocalContact(makeContact({ id: 'c1' }));
-      useContactStore.getState().addLocalContact(makeContact({ id: 'c2', emails: { e0: { address: 'c2@test.com' } } }));
-      useContactStore.getState().updateLocalContact('c1', { emails: { e0: { address: 'new@test.com' } } });
+    it('should not modify other contacts', async () => {
+      await useContactStore.getState().addLocalContact(makeContact({ id: 'c1' }));
+      await useContactStore.getState().addLocalContact(makeContact({ id: 'c2', emails: { e0: { address: 'c2@test.com' } } }));
+      await useContactStore.getState().updateLocalContact('c1', { emails: { e0: { address: 'new@test.com' } } });
       expect(useContactStore.getState().contacts[1].emails!.e0.address).toBe('c2@test.com');
     });
 
-    it('should no-op for non-existent id', () => {
-      useContactStore.getState().addLocalContact(makeContact());
-      useContactStore.getState().updateLocalContact('nonexistent', { kind: 'org' });
+    it('should no-op for non-existent id', async () => {
+      await useContactStore.getState().addLocalContact(makeContact());
+      await useContactStore.getState().updateLocalContact('nonexistent', { kind: 'org' });
       expect(useContactStore.getState().contacts).toHaveLength(1);
       expect(useContactStore.getState().contacts[0].kind).toBeUndefined();
     });
   });
 
   describe('deleteLocalContact', () => {
-    it('should remove contact by id', () => {
-      useContactStore.getState().addLocalContact(makeContact({ id: 'c1' }));
-      useContactStore.getState().addLocalContact(makeContact({ id: 'c2' }));
-      useContactStore.getState().deleteLocalContact('c1');
+    it('should remove contact by id', async () => {
+      await useContactStore.getState().addLocalContact(makeContact({ id: 'c1' }));
+      await useContactStore.getState().addLocalContact(makeContact({ id: 'c2' }));
+      await useContactStore.getState().deleteLocalContact('c1');
       expect(useContactStore.getState().contacts).toHaveLength(1);
       expect(useContactStore.getState().contacts[0].id).toBe('c2');
     });
 
-    it('should clear selectedContactId when deleting selected', () => {
-      useContactStore.getState().addLocalContact(makeContact({ id: 'c1' }));
+    it('should clear selectedContactId when deleting selected', async () => {
+      await useContactStore.getState().addLocalContact(makeContact({ id: 'c1' }));
       useContactStore.getState().setSelectedContact('c1');
-      useContactStore.getState().deleteLocalContact('c1');
+      await useContactStore.getState().deleteLocalContact('c1');
       expect(useContactStore.getState().selectedContactId).toBeNull();
     });
 
-    it('should preserve selectedContactId when deleting other', () => {
-      useContactStore.getState().addLocalContact(makeContact({ id: 'c1' }));
-      useContactStore.getState().addLocalContact(makeContact({ id: 'c2' }));
+    it('should preserve selectedContactId when deleting other', async () => {
+      await useContactStore.getState().addLocalContact(makeContact({ id: 'c1' }));
+      await useContactStore.getState().addLocalContact(makeContact({ id: 'c2' }));
       useContactStore.getState().setSelectedContact('c1');
-      useContactStore.getState().deleteLocalContact('c2');
+      await useContactStore.getState().deleteLocalContact('c2');
       expect(useContactStore.getState().selectedContactId).toBe('c1');
     });
   });
@@ -139,6 +153,12 @@ describe('contact-store', () => {
   });
 
   describe('clearContacts', () => {
+    it('clears the consent ticket when leaving its account', () => {
+      useContactStore.setState({ spaceContactsAuthorizationUrl: `https://inbox.comail.at/oauth/contacts/tickets/${'A'.repeat(43)}` });
+      useContactStore.getState().clearContacts();
+      expect(useContactStore.getState().spaceContactsAuthorizationUrl).toBeNull();
+    });
+
     it('should reset all contact-related state', () => {
       useContactStore.setState({
         contacts: [makeContact()],
@@ -198,6 +218,7 @@ describe('contact-store', () => {
         ],
       });
       const client = makeClient();
+      setClientLookup(id => id === 'local-2' ? client as unknown as IJMAPClient : undefined);
 
       await useContactStore.getState().setDefaultAddressBook(client as unknown as IJMAPClient, book);
 
@@ -349,14 +370,13 @@ describe('contact-store', () => {
       expect(results).toHaveLength(2);
     });
 
-    it('should augment results with directory principals', () => {
+    it('excludes stale directory principals from recipient suggestions', () => {
       useContactStore.setState({
         contacts: [],
         directoryPrincipals: [{ name: 'Dana Director', email: 'dana@example.com' }],
       });
       const results = useContactStore.getState().getAutocomplete('dana');
-      expect(results).toHaveLength(1);
-      expect(results[0]).toEqual({ name: 'Dana Director', email: 'dana@example.com' });
+      expect(results).toEqual([]);
     });
 
     it('should not duplicate a directory principal already matched as a contact', () => {
@@ -412,6 +432,41 @@ describe('contact-store', () => {
       });
       const results = useContactStore.getState().getAutocomplete('jane');
       expect(results).toEqual([{ name: 'janedoe', email: 'jane.doe@example.com' }]);
+    });
+  });
+
+  describe('fetchDirectory', () => {
+    it('clears cached entries without requesting the server directory', async () => {
+      const client = {
+        supportsPrincipals: () => true,
+        getPrincipals: vi.fn().mockResolvedValue([]),
+        listPrincipals: vi.fn().mockResolvedValue({ status: 'ok', principals: [] }),
+      } as unknown as IJMAPClient;
+      useContactStore.setState({
+        directoryPrincipals: [{ name: 'Other Member', email: 'other@example.com' }],
+        directoryLoaded: true,
+        directoryStatus: 'ready',
+      });
+
+      await useContactStore.getState().fetchDirectory(client);
+
+      expect(client.listPrincipals).not.toHaveBeenCalled();
+      expect(client.getPrincipals).not.toHaveBeenCalled();
+      expect(useContactStore.getState().directoryPrincipals).toEqual([]);
+      expect(useContactStore.getState().directoryStatus).toBe('unavailable');
+    });
+
+    it('does not fall back to getPrincipals for clients without listPrincipals', async () => {
+      const client = {
+        supportsPrincipals: () => true,
+        getPrincipals: vi.fn().mockResolvedValue([{ id: 'a', type: 'individual', name: 'anna@example.com', email: 'anna@example.com' }]),
+      } as unknown as IJMAPClient;
+
+      await useContactStore.getState().fetchDirectory(client);
+
+      expect(client.getPrincipals).not.toHaveBeenCalled();
+      expect(useContactStore.getState().directoryStatus).toBe('unavailable');
+      expect(useContactStore.getState().directoryPrincipals).toEqual([]);
     });
   });
 
@@ -574,7 +629,7 @@ describe('contact-store', () => {
     });
 
     it('should preserve selectedContactId when deleting other group', async () => {
-      useContactStore.getState().addLocalContact(makeContact({ id: 'c1' }));
+      await useContactStore.getState().addLocalContact(makeContact({ id: 'c1' }));
       useContactStore.getState().setSelectedContact('c1');
       await useContactStore.getState().createGroup(null, 'Team', []);
       const groupId = useContactStore.getState().contacts[1].id;
@@ -609,6 +664,89 @@ describe('contact-store', () => {
       });
       await useContactStore.getState().bulkDeleteContacts(null, ['c1']);
       expect(useContactStore.getState().selectedContactId).toBeNull();
+    });
+  });
+
+  // Multi-account Pro mode lists every login's cards together. Card ids
+  // repeat across logins (each account numbers its own), so a write sent
+  // through the active login with another login's card id hits the active
+  // login's card of that id.
+  describe('writes to another login\'s cards', () => {
+    const loginClient = () => ({
+      getContactsAccountId: vi.fn(() => 'acct-primary'),
+      updateContact: vi.fn().mockResolvedValue(undefined),
+      deleteContact: vi.fn().mockResolvedValue(undefined),
+    });
+    let active: ReturnType<typeof loginClient>;
+    let other: ReturnType<typeof loginClient>;
+
+    beforeEach(() => {
+      active = loginClient();
+      other = loginClient();
+      setClientLookup((localAccountId) => (localAccountId === 'b@host' ? other as unknown as IJMAPClient : undefined));
+      useContactStore.setState({
+        supportsSync: true,
+        contacts: [
+          makeContact({ id: 'a@host::c', originalId: 'c', localAccountId: 'a@host' }),
+          makeContact({ id: 'b@host::c', originalId: 'c', localAccountId: 'b@host' }),
+          makeGroup({ id: 'b@host::g', originalId: 'g', localAccountId: 'b@host', members: { 'urn:uuid:x': true } }),
+        ],
+      });
+    });
+
+    afterEach(() => {
+      setClientLookup(() => undefined);
+    });
+
+    it('deletes selected cards through the login they belong to', async () => {
+      await useContactStore.getState().bulkDeleteContacts(active as unknown as IJMAPClient, ['b@host::c']);
+
+      expect(other.deleteContact).toHaveBeenCalledWith('c', undefined);
+      expect(active.deleteContact).not.toHaveBeenCalled();
+    });
+
+    it('changes and deletes a group through the login it belongs to', async () => {
+      const client = active as unknown as IJMAPClient;
+      await useContactStore.getState().updateGroup(client, 'b@host::g', 'Renamed');
+      await useContactStore.getState().addMembersToGroup(client, 'b@host::g', ['b@host::c']);
+      await useContactStore.getState().removeMembersFromGroup(client, 'b@host::g', ['urn:uuid:x']);
+      await useContactStore.getState().deleteGroup(client, 'b@host::g');
+
+      expect(other.updateContact).toHaveBeenCalledTimes(3);
+      expect(other.updateContact.mock.calls.every(([id, , accountId]) => id === 'g' && accountId === undefined)).toBe(true);
+      expect(other.deleteContact).toHaveBeenCalledWith('g', undefined);
+      expect(active.updateContact).not.toHaveBeenCalled();
+      expect(active.deleteContact).not.toHaveBeenCalled();
+    });
+
+    it('moves a card between two books of its own login there', async () => {
+      // Each login's own books carry that login's primary account.
+      other.getContactsAccountId.mockReturnValue('acct-b');
+      const target = { id: 'b@host::ab-2', originalId: 'ab-2', localAccountId: 'b@host', accountId: 'acct-b', name: 'Work' };
+
+      await useContactStore.getState().moveContactToAddressBook(active as unknown as IJMAPClient, ['b@host::c'], target);
+
+      expect(other.updateContact).toHaveBeenCalledWith('c', { addressBookIds: { 'ab-2': true } }, undefined);
+      expect(active.updateContact).not.toHaveBeenCalled();
+      expect(active.deleteContact).not.toHaveBeenCalled();
+    });
+
+    it('moves a card into a shared book of its login by creating it and deleting the old one there', async () => {
+      other.getContactsAccountId.mockReturnValue('acct-b');
+      const created = makeContact({ id: 'n', addressBookIds: { 'ab-7': true } });
+      const otherCreate = vi.fn().mockResolvedValue(created);
+      Object.assign(other, { createContact: otherCreate });
+      const target = { id: 'b@host::acct-s:ab-7', originalId: 'ab-7', localAccountId: 'b@host', accountId: 'acct-s', accountName: 'Team', isShared: true, name: 'Team' };
+
+      await useContactStore.getState().moveContactToAddressBook(active as unknown as IJMAPClient, ['b@host::c'], target);
+
+      expect(otherCreate).toHaveBeenCalledWith(expect.objectContaining({ addressBookIds: { 'ab-7': true } }), 'acct-s');
+      expect(other.deleteContact).toHaveBeenCalledWith('c', undefined);
+      expect(active.deleteContact).not.toHaveBeenCalled();
+      expect(useContactStore.getState().contacts.find((c) => c.originalId === 'n')).toMatchObject({
+        id: 'b@host::acct-s:n', localAccountId: 'b@host', isShared: true, accountId: 'acct-s',
+        addressBookIds: { 'b@host::acct-s:ab-7': true },
+      });
     });
   });
 
@@ -673,6 +811,230 @@ describe('contact-store', () => {
 
     it('returns undefined when no photo media is present', () => {
       expect(getContactPhotoUri(makeContact())).toBeUndefined();
+    });
+
+    it('returns undefined for a Stalwart 1.0 blob photo, which has no URI', () => {
+      expect(getContactPhotoUri(makeContact({
+        media: { photo: { kind: 'photo', blobId: 'dbcX', mediaType: 'image/jpeg' } },
+      }))).toBeUndefined();
+    });
+  });
+
+  describe('getContactPhotoRef / hasContactPhoto', () => {
+    // The shapes ContactCard/get returns for the same PHOTO.
+    const photo0_16_23 = { kind: 'photo' as const, uri: 'data:image/jpeg;base64,/9j/', mediaType: 'image/jpeg' };
+    const photo0_16_0 = { kind: 'photo' as const, uri: 'data:base64,/9j/' };
+    const photo1_0 = { kind: 'photo' as const, blobId: 'dbcX', mediaType: 'image/jpeg' };
+
+    it('returns the data URI on Stalwart 0.16.23', () => {
+      const contact = makeContact({ media: { m0: photo0_16_23 } });
+      expect(getContactPhotoRef(contact)).toEqual({ uri: 'data:image/jpeg;base64,/9j/' });
+      expect(hasContactPhoto(contact)).toBe(true);
+    });
+
+    it('returns a data URI with a media type for the Stalwart 0.16.0 shape', () => {
+      const contact = makeContact({ media: { m0: photo0_16_0 } });
+      expect(getContactPhotoRef(contact)).toEqual({ uri: 'data:image/jpeg;base64,/9j/' });
+      expect(hasContactPhoto(contact)).toBe(true);
+    });
+
+    it('returns the blob and where to download it on Stalwart 1.0', () => {
+      const contact = makeContact({
+        media: { m0: photo1_0 },
+        accountId: 'shared-1',
+        localAccountId: 'me@host',
+      });
+      expect(getContactPhotoRef(contact)).toEqual({
+        blobId: 'dbcX', mediaType: 'image/jpeg', accountId: 'shared-1', localAccountId: 'me@host',
+      });
+      expect(hasContactPhoto(contact)).toBe(true);
+    });
+
+    it('keeps an https photo as it is', () => {
+      const contact = makeContact({ media: { m0: { kind: 'photo', uri: 'https://x.test/p.jpg' } } });
+      expect(getContactPhotoRef(contact)).toEqual({ uri: 'https://x.test/p.jpg' });
+    });
+
+    it('finds no photo on a card with only a logo, an empty entry or a null entry', () => {
+      const contact = makeContact({
+        media: {
+          logo: { kind: 'logo', blobId: 'dbcLogo', mediaType: 'image/png' },
+          empty: { kind: 'photo' },
+          gone: null as unknown as ContactMedia,
+        },
+      });
+      expect(getContactPhotoRef(contact)).toBeUndefined();
+      expect(hasContactPhoto(contact)).toBe(false);
+      expect(hasContactPhoto(makeContact())).toBe(false);
+    });
+
+    it('prefers the photo with the lowest pref', () => {
+      const contact = makeContact({
+        media: {
+          a: { kind: 'photo', uri: 'https://x.test/a.jpg' },
+          b: { kind: 'photo', blobId: 'dbcB', pref: 1 },
+        },
+      });
+      expect(findContactPhotoEntry(contact)?.[0]).toBe('b');
+    });
+  });
+
+  describe('getContactPhotoIndex', () => {
+    it('maps each address to the photo of the first contact that has one', () => {
+      const contacts = [
+        makeContact({ id: 'c1', emails: { e0: { address: 'Ann@Example.com' } } }),
+        makeContact({
+          id: 'c2',
+          emails: { e0: { address: 'ann@example.com' }, e1: { address: 'boss@example.com' } },
+          media: { photo: { kind: 'photo', blobId: 'dbcAnn', mediaType: 'image/jpeg' } },
+        }),
+        makeContact({ id: 'c3', emails: { e0: { address: 'ann@example.com' } }, media: { photo: { kind: 'photo', uri: 'https://x.test/other.jpg' } } }),
+      ];
+
+      const index = getContactPhotoIndex(contacts);
+
+      expect(index.get('ann@example.com')).toEqual(expect.objectContaining({ blobId: 'dbcAnn' }));
+      expect(index.get('boss@example.com')).toEqual(expect.objectContaining({ blobId: 'dbcAnn' }));
+      expect(getContactPhotoIndex(contacts)).toBe(index);
+    });
+  });
+
+  describe('saving a new photo (P0-3)', () => {
+    const NEW_PHOTO = 'data:image/jpeg;base64,/9j/4AAQ';
+
+    const makeClient = (blobMedia: boolean) => ({
+      getContactsAccountId: vi.fn(() => 'acct-primary'),
+      supportsContactBlobMedia: vi.fn(() => blobMedia),
+      rejectContactBlobMedia: vi.fn(),
+      uploadBlob: vi.fn(async (file: File) => ({ blobId: 'Gupload1', size: file.size, type: file.type })),
+      createContact: vi.fn(async (c: Partial<ContactCard>) => ({ ...makeContact(), ...c, id: 'created-id' })),
+      updateContact: vi.fn().mockResolvedValue(undefined),
+    });
+
+    it('uploads the photo and sends its blobId on Stalwart 1.0', async () => {
+      useContactStore.setState({ contacts: [makeContact({ id: 'c-1' })] });
+      const client = makeClient(true);
+
+      await useContactStore.getState().updateContact(
+        client as unknown as IJMAPClient,
+        'c-1',
+        { media: { photo: { kind: 'photo', uri: NEW_PHOTO, mediaType: 'image/jpeg' } } },
+        { photoKey: 'photo' },
+      );
+
+      expect(client.uploadBlob).toHaveBeenCalledWith(expect.any(File), 'acct-primary');
+      expect(client.updateContact).toHaveBeenCalledWith(
+        'c-1',
+        { media: { photo: { kind: 'photo', mediaType: 'image/jpeg', blobId: 'Gupload1' } } },
+        undefined,
+      );
+      // The list shows the picked photo until the next fetch brings the blob.
+      expect(useContactStore.getState().contacts[0].media?.photo.uri).toBe(NEW_PHOTO);
+    });
+
+    it('sends the data: URI without uploading on Stalwart 0.16', async () => {
+      const client = makeClient(false);
+
+      await useContactStore.getState().createContact(
+        client as unknown as IJMAPClient,
+        { media: { photo: { kind: 'photo', uri: NEW_PHOTO, mediaType: 'image/jpeg' } } },
+        { photoKey: 'photo' },
+      );
+
+      expect(client.uploadBlob).not.toHaveBeenCalled();
+      expect(client.createContact).toHaveBeenCalledWith(
+        { media: { photo: { kind: 'photo', uri: NEW_PHOTO, mediaType: 'image/jpeg' } } },
+        undefined,
+      );
+    });
+
+    it('checks the capability of the shared account the card is written to', async () => {
+      useContactStore.setState({
+        contacts: [makeContact({ id: 'shared-1:c-9', originalId: 'c-9', isShared: true, accountId: 'shared-1' })],
+      });
+      const client = makeClient(true);
+
+      await useContactStore.getState().updateContact(
+        client as unknown as IJMAPClient,
+        'shared-1:c-9',
+        { media: { photo: { kind: 'photo', uri: NEW_PHOTO, mediaType: 'image/jpeg' } } },
+        { photoKey: 'photo' },
+      );
+
+      expect(client.supportsContactBlobMedia).toHaveBeenCalledWith('shared-1');
+      expect(client.uploadBlob).toHaveBeenCalledWith(expect.any(File), 'acct-primary');
+      expect(client.updateContact).toHaveBeenCalledWith('c-9', expect.anything(), 'shared-1');
+    });
+  });
+
+  describe('fetchContactFromServer', () => {
+    // The contact form rebuilds `media` on this when the photo changed: the
+    // list's copy may carry a blobId Stalwart 1.0 no longer resolves.
+    it('reads a shared card from its account by its server id', async () => {
+      useContactStore.setState({
+        contacts: [makeContact({ id: 'shared-1:c-9', originalId: 'c-9', isShared: true, accountId: 'shared-1' })],
+      });
+      const current = makeContact({ id: 'c-9', media: { logo: { kind: 'logo', blobId: 'dbcLogoNew' } } });
+      const client = { getContact: vi.fn(async () => current) };
+
+      const card = await useContactStore.getState().fetchContactFromServer(client as unknown as IJMAPClient, 'shared-1:c-9');
+
+      expect(client.getContact).toHaveBeenCalledWith('c-9', 'shared-1');
+      expect(card).toBe(current);
+    });
+
+    it('reads an own card from the default account', async () => {
+      useContactStore.setState({ contacts: [makeContact({ id: 'c-1' })] });
+      const client = { getContact: vi.fn(async () => null) };
+
+      expect(await useContactStore.getState().fetchContactFromServer(client as unknown as IJMAPClient, 'c-1')).toBeNull();
+      expect(client.getContact).toHaveBeenCalledWith('c-1', undefined);
+    });
+  });
+
+  describe('moving a contact to another account', () => {
+    beforeEach(() => {
+      clearContactPhotoCache();
+      vi.spyOn(URL, 'createObjectURL').mockImplementation(() => 'blob:x');
+      vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      clearContactPhotoCache();
+      vi.restoreAllMocks();
+    });
+
+    it('sends the bytes of a Stalwart 1.0 blob photo, not the source blobId', async () => {
+      useContactStore.setState({
+        contacts: [makeContact({
+          id: 'c-1',
+          originalId: 'c-1',
+          accountId: 'acct-primary',
+          media: { photo: { kind: 'photo', blobId: 'dbcX', mediaType: 'image/jpeg' } },
+        })],
+      });
+      const client = {
+        getContactsAccountId: vi.fn(() => 'acct-primary'),
+        fetchBlob: vi.fn(async () => new Blob([new Uint8Array([0xff, 0xd8, 0xff])], { type: 'image/jpeg' })),
+        createContact: vi.fn(async (c: Partial<ContactCard>) => ({ ...makeContact(), ...c, id: 'moved-id' })),
+        deleteContact: vi.fn().mockResolvedValue(undefined),
+      };
+
+      await useContactStore.getState().moveContactToAddressBook(
+        client as unknown as IJMAPClient,
+        ['c-1'],
+        { id: 'shared-1:ab-7', originalId: 'ab-7', name: 'Team', isShared: true, accountId: 'shared-1' },
+      );
+
+      expect(client.fetchBlob).toHaveBeenCalledWith('dbcX', 'photo', 'image/jpeg', 'acct-primary');
+      expect(client.createContact).toHaveBeenCalledWith(
+        expect.objectContaining({
+          media: { photo: { kind: 'photo', mediaType: 'image/jpeg', uri: 'data:image/jpeg;base64,/9j/' } },
+          addressBookIds: { 'ab-7': true },
+        }),
+        'shared-1',
+      );
+      expect(client.deleteContact).toHaveBeenCalledWith('c-1', undefined);
     });
   });
 
@@ -831,6 +1193,7 @@ describe('contact-store', () => {
         })],
       });
       const client = makeClient();
+      setClientLookup(id => id === 'me@host' ? client as unknown as IJMAPClient : undefined);
 
       await useContactStore.getState().updateContact(
         client as unknown as IJMAPClient,
@@ -862,6 +1225,7 @@ describe('contact-store', () => {
         })],
       });
       const client = makeClient();
+      setClientLookup(id => id === 'me@host' ? client as unknown as IJMAPClient : undefined);
 
       await useContactStore.getState().updateContact(
         client as unknown as IJMAPClient,
@@ -884,6 +1248,7 @@ describe('contact-store', () => {
         })],
       });
       const client = makeClient();
+      setClientLookup(id => id === 'me@host' ? client as unknown as IJMAPClient : undefined);
 
       await useContactStore.getState().updateContact(
         client as unknown as IJMAPClient,
@@ -917,6 +1282,7 @@ describe('contact-store', () => {
         ],
       });
       const client = makeClient();
+      setClientLookup(id => id === 'me@host' ? client as unknown as IJMAPClient : undefined);
 
       await useContactStore.getState().createContact(
         client as unknown as IJMAPClient,
@@ -927,6 +1293,59 @@ describe('contact-store', () => {
         expect.objectContaining({ addressBookIds: { 'ab-1': true } }),
         undefined,
       );
+    });
+
+    // Card ids repeat across accounts (live on 0.16 and 1.0: the sharee's own
+    // card and one it creates in the owner's shared book both got "c"). A card
+    // created in a shared book was kept under its bare id: deleting it right
+    // after deleted the own card with that id.
+    it('keeps a card created in a shared book apart from an own card with the same id', async () => {
+      useContactStore.setState({
+        addressBooks: [
+          { id: 'ab-1', name: 'Personal', isDefault: true },
+          { id: 'acct-a:ab-7', originalId: 'ab-7', name: 'Team', isShared: true, accountId: 'acct-a', accountName: 'Alice' },
+        ],
+        contacts: [makeContact({ id: 'c', addressBookIds: { 'ab-1': true } })],
+      });
+      const client = makeClient();
+      client.createContact.mockImplementation(async (c: Partial<ContactCard>) => ({ ...makeContact(), ...c, id: 'c' }));
+
+      await useContactStore.getState().createContact(
+        client as unknown as IJMAPClient,
+        { addressBookIds: { 'acct-a:ab-7': true } },
+      );
+
+      expect(client.createContact).toHaveBeenCalledWith(expect.objectContaining({ addressBookIds: { 'ab-7': true } }), 'acct-a');
+      const created = useContactStore.getState().contacts[1];
+      expect(created).toMatchObject({
+        id: 'acct-a:c', originalId: 'c', isShared: true, accountId: 'acct-a', accountName: 'Alice',
+        addressBookIds: { 'acct-a:ab-7': true },
+      });
+
+      await useContactStore.getState().deleteContact(client as unknown as IJMAPClient, 'acct-a:c');
+
+      expect(client.deleteContact).toHaveBeenCalledWith('c', 'acct-a');
+      expect(useContactStore.getState().contacts.map((c) => c.id)).toEqual(['c']);
+    });
+
+    it('namespaces a card created through another login like that login\'s listing', async () => {
+      useContactStore.setState({
+        addressBooks: [
+          { id: 'me@host::ab-1', originalId: 'ab-1', localAccountId: 'me@host', name: 'Personal', isDefault: true },
+        ],
+      });
+      const client = makeClient();
+      setClientLookup(id => id === 'me@host' ? client as unknown as IJMAPClient : undefined);
+
+      await useContactStore.getState().createContact(
+        client as unknown as IJMAPClient,
+        { addressBookIds: { 'me@host::ab-1': true } },
+      );
+
+      expect(useContactStore.getState().contacts[0]).toMatchObject({
+        id: 'me@host::created-id', originalId: 'created-id', localAccountId: 'me@host',
+        addressBookIds: { 'me@host::ab-1': true },
+      });
     });
 
     it('moves to a namespaced personal book with the raw id and keeps the display id locally', async () => {
@@ -944,6 +1363,7 @@ describe('contact-store', () => {
         })],
       });
       const client = makeClient();
+      setClientLookup(id => id === 'me@host' ? client as unknown as IJMAPClient : undefined);
 
       await useContactStore.getState().moveContactToAddressBook(
         client as unknown as IJMAPClient,
@@ -973,4 +1393,50 @@ describe('contact-store', () => {
       expect(persisted.supportsSync).toBe(true);
     });
   });
+
+  describe('fetchDirectory', () => {
+    const principal = (id: string, email: string | null, description?: string) =>
+      ({ id, type: 'individual' as const, name: email ?? id, email, description });
+
+    it('maps principals with an address to entries named by their description', () => {
+      expect(principalsToDirectory([
+        principal('a', 'ana@example.org', 'Ana Silva'),
+        principal('b', null),
+        principal('c', 'ANA@example.org', 'Duplicate'),
+      ])).toEqual([
+        { id: 'a', name: 'Ana Silva', email: 'ana@example.org', description: 'Ana Silva', type: 'individual' },
+      ]);
+    });
+
+    it('reports a server without principals as unavailable', async () => {
+      const getPrincipals = vi.fn();
+      const client = { supportsPrincipals: () => false, getPrincipals } as unknown as IJMAPClient;
+      await useContactStore.getState().fetchDirectory(client);
+      expect(useContactStore.getState().directoryStatus).toBe('unavailable');
+      expect(getPrincipals).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe('contact display name', () => {
+  it('shows the name an imported card gives itself (FN), not only first and last name', async () => {
+    const { getContactDisplayName } = await import('../contact-store');
+    expect(getContactDisplayName({
+      id: 'x', addressBookIds: {},
+      name: { full: 'UX-cf Jürgen Müller', components: [{ kind: 'given', value: 'Jürgen' }, { kind: 'surname', value: 'Müller' }] },
+    } as never)).toBe('UX-cf Jürgen Müller');
+  });
+});
+
+describe('private contacts authorization',()=>{
+ it('retains the consent action instead of silently using another contact source',async()=>{
+  const {SpaceContactError}=await import('@/lib/jmap/space-contact-adapter');
+  const authorizationUrl=`https://inbox.comail.at/oauth/contacts/tickets/${'A'.repeat(43)}`;
+  const client={getAllContacts:vi.fn().mockRejectedValue(new SpaceContactError('authorization_required',authorizationUrl))} as unknown as IJMAPClient;
+  useContactStore.setState({contacts:[],error:null});
+  await useContactStore.getState().fetchContacts(client);
+  expect(useContactStore.getState().spaceContactsAuthorizationUrl).toBe(authorizationUrl);
+  useContactStore.getState().clearSpaceContactsAuthorizationUrl();
+  expect(useContactStore.getState().spaceContactsAuthorizationUrl).toBeNull();
+ });
 });

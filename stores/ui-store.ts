@@ -1,19 +1,20 @@
 "use client";
 
 import { create } from "zustand";
+import { uiHooks } from "@/lib/plugin-hooks";
 
 export type ActiveView = "sidebar" | "list" | "viewer";
 
 // Column width constraints (in pixels)
-const SIDEBAR_MIN = 180;
-const SIDEBAR_MAX = 400;
+export const SIDEBAR_MIN = 180;
+export const SIDEBAR_MAX = 400;
 const SIDEBAR_DEFAULT = 256;
-const EMAIL_LIST_MIN = 240;
-const EMAIL_LIST_MAX = 600;
+export const EMAIL_LIST_MIN = 240;
+export const EMAIL_LIST_MAX = 600;
 const EMAIL_LIST_DEFAULT = 384;
 // Email list height (in pixels) for horizontal "Reading Pane at Bottom" layout
-const EMAIL_LIST_HEIGHT_MIN = 160;
-const EMAIL_LIST_HEIGHT_MAX = 800;
+export const EMAIL_LIST_HEIGHT_MIN = 160;
+export const EMAIL_LIST_HEIGHT_MAX = 800;
 const EMAIL_LIST_HEIGHT_DEFAULT = 320;
 
 interface UIState {
@@ -37,6 +38,11 @@ interface UIState {
   // Sidebar collapsed state (desktop)
   sidebarCollapsed: boolean;
 
+  // Open composers and expanded quick replies. Floating cards such as the
+  // PWA install prompt stay hidden while any is open and toasts lift clear,
+  // so neither sits on top of a Send button.
+  composingCount: number;
+
   // Actions
   setActiveView: (view: ActiveView) => void;
   setSidebarOpen: (open: boolean) => void;
@@ -52,6 +58,8 @@ interface UIState {
   persistColumnWidths: () => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
   toggleSidebarCollapsed: () => void;
+  beginComposing: () => void;
+  endComposing: () => void;
 
   // Navigation helpers
   showEmailList: () => void;
@@ -73,6 +81,7 @@ export const useUIStore = create<UIState>((set, get) => ({
   emailListWidth: EMAIL_LIST_DEFAULT,
   emailListHeight: EMAIL_LIST_HEIGHT_DEFAULT,
   sidebarCollapsed: false,
+  composingCount: 0,
 
   // Actions
   setActiveView: (view) => set({ activeView: view }),
@@ -97,6 +106,7 @@ export const useUIStore = create<UIState>((set, get) => ({
 
   resetSidebarWidth: () => {
     set({ sidebarWidth: SIDEBAR_DEFAULT });
+    reportColumnWidths(get());
     const { emailListWidth, emailListHeight } = get();
     try {
       localStorage.setItem("column-widths", JSON.stringify({ sidebarWidth: SIDEBAR_DEFAULT, emailListWidth, emailListHeight }));
@@ -105,6 +115,7 @@ export const useUIStore = create<UIState>((set, get) => ({
 
   resetEmailListWidth: () => {
     set({ emailListWidth: EMAIL_LIST_DEFAULT });
+    reportColumnWidths(get());
     const { sidebarWidth, emailListHeight } = get();
     try {
       localStorage.setItem("column-widths", JSON.stringify({ sidebarWidth, emailListWidth: EMAIL_LIST_DEFAULT, emailListHeight }));
@@ -113,6 +124,7 @@ export const useUIStore = create<UIState>((set, get) => ({
 
   resetEmailListHeight: () => {
     set({ emailListHeight: EMAIL_LIST_HEIGHT_DEFAULT });
+    reportColumnWidths(get());
     const { sidebarWidth, emailListWidth } = get();
     try {
       localStorage.setItem("column-widths", JSON.stringify({ sidebarWidth, emailListWidth, emailListHeight: EMAIL_LIST_HEIGHT_DEFAULT }));
@@ -121,6 +133,7 @@ export const useUIStore = create<UIState>((set, get) => ({
 
   persistColumnWidths: () => {
     const { sidebarWidth, emailListWidth, emailListHeight } = get();
+    reportColumnWidths({ sidebarWidth, emailListWidth, emailListHeight });
     try {
       localStorage.setItem("column-widths", JSON.stringify({ sidebarWidth, emailListWidth, emailListHeight }));
     } catch { /* localStorage may be unavailable */ }
@@ -128,6 +141,8 @@ export const useUIStore = create<UIState>((set, get) => ({
 
   setSidebarCollapsed: (collapsed) => set({ sidebarCollapsed: collapsed }),
   toggleSidebarCollapsed: () => set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed })),
+  beginComposing: () => set((state) => ({ composingCount: state.composingCount + 1 })),
+  endComposing: () => set((state) => ({ composingCount: Math.max(0, state.composingCount - 1) })),
 
   // Navigation helpers for mobile
   showEmailList: () => {
@@ -147,6 +162,7 @@ export const useUIStore = create<UIState>((set, get) => ({
   goBack: () => {
     const { activeView, isMobile } = get();
     if (!isMobile) return;
+    void uiHooks.onMobileBack.emit({});
 
     if (activeView === "viewer") {
       set({ activeView: "list" });
@@ -155,3 +171,49 @@ export const useUIStore = create<UIState>((set, get) => ({
     }
   },
 }));
+
+type ColumnWidths = Pick<UIState, "sidebarWidth" | "emailListWidth" | "emailListHeight">;
+
+const COLUMN_NAMES: Record<keyof ColumnWidths, string> = {
+  sidebarWidth: "sidebar",
+  emailListWidth: "email-list",
+  emailListHeight: "email-list-height",
+};
+
+let reportedWidths: ColumnWidths | null = null;
+
+// Called when a resize ends (widths are saved then), not on every pixel of
+// the drag. Reports only the columns that changed since the last report.
+function reportColumnWidths(widths: ColumnWidths): void {
+  const before = reportedWidths;
+  reportedWidths = { sidebarWidth: widths.sidebarWidth, emailListWidth: widths.emailListWidth, emailListHeight: widths.emailListHeight };
+  if (!before) return;
+  for (const key of Object.keys(COLUMN_NAMES) as (keyof ColumnWidths)[]) {
+    if (widths[key] !== before[key]) {
+      void uiHooks.onColumnResize.emit({ column: COLUMN_NAMES[key], width: widths[key] });
+    }
+  }
+}
+
+function deviceType(s: Pick<UIState, "isMobile" | "isTablet">): "mobile" | "tablet" | "desktop" {
+  return s.isMobile ? "mobile" : s.isTablet ? "tablet" : "desktop";
+}
+
+// Mirrored on <html> for CSS: toasts lift clear of Send (see toast.tsx).
+useUIStore.subscribe((state, prev) => {
+  if (state.composingCount === prev.composingCount || typeof document === "undefined") return;
+  const root = document.documentElement;
+  if (state.composingCount > 0) root.dataset.composerOpen = String(state.composingCount);
+  else delete root.dataset.composerOpen;
+});
+
+// Plugins hear about layout changes, whichever control or effect made them.
+useUIStore.subscribe((state, prev) => {
+  if (!reportedWidths) {
+    reportedWidths = { sidebarWidth: prev.sidebarWidth, emailListWidth: prev.emailListWidth, emailListHeight: prev.emailListHeight };
+  }
+  if (state.activeView !== prev.activeView) void uiHooks.onViewChange.emit({ view: state.activeView });
+  if (state.sidebarOpen !== prev.sidebarOpen) void uiHooks.onSidebarToggle.emit({ open: state.sidebarOpen });
+  if (state.sidebarCollapsed !== prev.sidebarCollapsed) void uiHooks.onSidebarCollapse.emit({ collapsed: state.sidebarCollapsed });
+  if (deviceType(state) !== deviceType(prev)) void uiHooks.onDeviceTypeChange.emit({ deviceType: deviceType(state) });
+});

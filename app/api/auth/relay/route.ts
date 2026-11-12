@@ -10,10 +10,12 @@ import { normalizeJmapServerUrl, validateProxyAuthHeader } from '@/lib/auth/veri
 import { setStalwartAuthContextInStore, stalwartAuthContextCookieName } from '@/lib/stalwart/auth-context';
 import { configManager } from '@/lib/admin/config-manager';
 import { recordLogin } from '@/lib/telemetry/login-tracker';
+import { revokeInboxCredential } from '@/lib/auth/inbox-credential';
 import {
   readRelayRedemptionConfig,
   readBoundedUtf8Body,
   redeemRelaySsoCode,
+  RelayRedemptionStatusError,
   relaySsoBootstrapHtml,
   type RelaySsoCredential,
 } from '@/lib/auth/relay-redemption';
@@ -101,11 +103,13 @@ async function grantSession(credential: RelaySsoCredential): Promise<NextRespons
   const cookieStore = await cookies();
   let freeSlot: number | undefined;
   let matchingSlot: number | undefined;
+  let previous: ReturnType<typeof decryptSession> = null;
   for (let index = 0; index < MAX_ACCOUNT_SLOTS; index++) {
     const token = cookieStore.get(sessionCookieName(index))?.value;
     const existing = token ? decryptSession(token) : null;
     if (existing?.serverUrl === normalizedServerUrl && existing.username === mailbox) {
       matchingSlot = index;
+      previous = existing;
       break;
     }
     const occupied = token || cookieStore.get(refreshTokenCookieName(index))?.value ||
@@ -121,6 +125,7 @@ async function grantSession(credential: RelaySsoCredential): Promise<NextRespons
     sessionCookieName(slot),
     encryptSession(normalizedServerUrl, mailbox, appPassword, {
       did, groupwareEnabled: credential.groupwareEnabled, buildersEnabled: credential.buildersEnabled,
+      credentialId: credential.credentialId,
     }),
     options,
   );
@@ -129,6 +134,7 @@ async function grantSession(credential: RelaySsoCredential): Promise<NextRespons
     username: mailbox,
     authHeader,
   });
+  if (previous) await revokeInboxCredential(previous.username, previous.credentialId);
 
   logger.info('Inbox SSO session granted', {
     event: 'relay_sso_granted',
@@ -170,12 +176,31 @@ export async function POST(request: NextRequest) {
     return errorResponse('Invalid request', 400);
   }
 
+  let credential: RelaySsoCredential;
   try {
-    const credential = await redeemRelaySsoCode(code, config);
-    return await grantSession(credential);
+    credential = await redeemRelaySsoCode(code, config);
   } catch (err) {
     logger.warn('Relay SSO opaque-code redemption rejected', {
       event: 'relay_sso_redeem_failed',
+      stage: 'redemption',
+      ...(err instanceof RelayRedemptionStatusError ? { status: err.status } : {}),
+      ...(err instanceof DOMException && err.name === 'TimeoutError' ? { reason: 'timeout' } : {}),
+      error_type: err instanceof Error ? err.name : 'unknown',
+    });
+    if (err instanceof RelayRedemptionStatusError && err.credentialCapacity) {
+      return errorResponse('Your account has reached its sign-in and mail-client limit. In an existing session, open Settings → Connect mail client and revoke a credential you no longer use, then start sign-in again.', 429);
+    }
+    return errorResponse('Sign-in code unavailable', 401);
+  }
+  try {
+    const response = await grantSession(credential);
+    if (response.status !== 303) await revokeInboxCredential(credential.mailbox, credential.credentialId);
+    return response;
+  } catch (err) {
+    await revokeInboxCredential(credential.mailbox, credential.credentialId);
+    logger.warn('Relay SSO session grant failed', {
+      event: 'relay_sso_redeem_failed',
+      stage: 'session',
       error_type: err instanceof Error ? err.name : 'unknown',
     });
     return errorResponse('Sign-in code unavailable', 401);

@@ -19,7 +19,7 @@ vi.mock('@/stores/auth-store', async () => {
   };
 });
 vi.mock('@/stores/account-store', () => {
-  const state = { getAccountById: () => undefined };
+  const state = { accounts: [], getAccountById: () => undefined };
   return {
     useAccountStore: Object.assign(
       (selector?: (s: typeof state) => unknown) => (selector ? selector(state) : state),
@@ -125,7 +125,7 @@ describe('email list scroll position', () => {
       scrollTo.mockClear();
       act(() => {
         useEmailStore.getState().selectMailbox('archive');
-        view.rerender(<EmailList emails={mails} selectedEmailId="m20" />);
+        view.rerender(<EmailList emails={mails} selectedEmailKey="m20" />);
       });
       // The reset comes first and the scroll down to the selected mail after
       // it - the other way round, the reset would leave the mail out of view.

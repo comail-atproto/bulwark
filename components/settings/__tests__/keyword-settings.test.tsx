@@ -29,6 +29,15 @@ describe('KeywordSettings', () => {
     expect(screen.getByText('$label:blue')).toBeInTheDocument();
   });
 
+  // MO-06: the tag order was drag-only.
+  it('moves a tag down with its Move down button', () => {
+    render(<KeywordSettings />);
+    const [first, second] = useSettingsStore.getState().emailKeywords.map((k) => k.id);
+    fireEvent.click(screen.getAllByTestId('move-down')[0]);
+    const ids = useSettingsStore.getState().emailKeywords.map((k) => k.id);
+    expect(ids.slice(0, 2)).toEqual([second, first]);
+  });
+
   it('renders add keyword button', () => {
     render(<KeywordSettings />);
     expect(screen.getByText('add_keyword')).toBeInTheDocument();
@@ -87,6 +96,17 @@ describe('KeywordSettings', () => {
     fireEvent.click(deleteButtons[0]);
     expect(useSettingsStore.getState().emailKeywords).toHaveLength(DEFAULT_KEYWORDS.length - 1);
     expect(useSettingsStore.getState().emailKeywords.find((k) => k.id === 'red')).toBeUndefined();
+  });
+
+  // A list of "Edit" / "Delete" with nothing else said which tag a screen
+  // reader user was on; each button is named after its tag now, as a full
+  // size icon button (32px, 44px hit area on touch).
+  it('names each tag row button after its tag', () => {
+    render(<KeywordSettings />);
+    expect(screen.getAllByRole('button', { name: 'edit_tag' })).toHaveLength(DEFAULT_KEYWORDS.length);
+    const deletes = screen.getAllByRole('button', { name: 'delete_tag' });
+    expect(deletes).toHaveLength(DEFAULT_KEYWORDS.length);
+    expect(deletes[0].className).toContain('h-8 w-8');
   });
 
   it('shows edit form when edit button clicked', () => {
@@ -163,8 +183,10 @@ describe('KeywordSettings', () => {
     expect(screen.getByText('$label:work/clients')).toBeInTheDocument();
   });
 
-  it('rejects a path that would exceed the keyword length limit', () => {
-    const deepId = 'a'.repeat(240);
+  it('rejects a path that would exceed the 128-byte keyword limit of Stalwart', () => {
+    // `$label:` + 110 + `/overflowing-name` is 134 bytes: fine by the RFC's
+    // 255, refused by Stalwart 1.0 and cut short by 0.16.
+    const deepId = 'a'.repeat(110);
     useSettingsStore.setState({
       emailKeywords: [{ id: deepId, label: 'Deep', color: 'blue' }],
       nestedTags: true,
@@ -177,6 +199,33 @@ describe('KeywordSettings', () => {
 
     expect(screen.getByText('too_long')).toBeInTheDocument();
     expect(screen.getByText('add').closest('button')).toBeDisabled();
+  });
+
+  it('still saves a new colour for a tag whose id predates the limit', () => {
+    // 128 characters, 135 bytes as a keyword: created when the limit was the
+    // RFC's 255.
+    const parentId = 'a'.repeat(120);
+    const oldId = `${parentId}/old-tag`;
+    useSettingsStore.setState({
+      emailKeywords: [
+        { id: parentId, label: 'Deep', color: 'blue' },
+        { id: oldId, label: 'Old tag', color: 'blue' },
+      ],
+      nestedTags: true,
+    });
+    render(<KeywordSettings />);
+
+    fireEvent.click(screen.getAllByTitle('edit')[1]);
+    fireEvent.click(screen.getByLabelText('green'));
+
+    expect(screen.queryByText('too_long')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText('save'));
+    expect(useSettingsStore.getState().emailKeywords.find((k) => k.id === oldId)?.color).toBe('green');
+
+    // Renaming it would make a new id, which has to fit.
+    fireEvent.click(screen.getAllByTitle('edit')[1]);
+    fireEvent.change(screen.getByDisplayValue('Old tag'), { target: { value: 'Renamed tag' } });
+    expect(screen.getByText('too_long')).toBeInTheDocument();
   });
 
   it('locks the name and the delete action of a tag that has nested tags', () => {
@@ -359,5 +408,21 @@ describe('KeywordSettings unrecognized tags', () => {
 
     expect(await screen.findByText('unrecognized.error')).toBeInTheDocument();
     expect(screen.queryByText('unrecognized.none')).not.toBeInTheDocument();
+  });
+});
+
+// SET-20: Escape cancels editing a tag, as it does for folders, calendars
+// and address books.
+describe('KeywordSettings editing', () => {
+  it('cancels the edit form on Escape without saving', () => {
+    useSettingsStore.setState({ emailKeywords: [...DEFAULT_KEYWORDS], nestedTags: false });
+    render(<KeywordSettings />);
+    fireEvent.click(screen.getAllByTitle('edit')[0]);
+    const input = screen.getByDisplayValue(DEFAULT_KEYWORDS[0].label);
+    fireEvent.change(input, { target: { value: 'Changed' } });
+    fireEvent.keyDown(input, { key: 'Escape' });
+
+    expect(screen.queryByDisplayValue('Changed')).toBeNull();
+    expect(useSettingsStore.getState().emailKeywords[0].label).toBe(DEFAULT_KEYWORDS[0].label);
   });
 });

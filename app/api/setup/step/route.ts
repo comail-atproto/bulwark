@@ -1,13 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { detectSetupState } from '@/lib/setup/state';
-import { authenticateWizardRequest } from '@/lib/setup/session';
+import { wizardSessionRefusal } from '@/lib/setup/session';
+import { configWriteErrorResponse } from '@/lib/admin/config-read-only-response';
 import { configManager } from '@/lib/admin/config-manager';
 import { CONFIG_ENV_MAP } from '@/lib/admin/types';
 import { parseJmapServers } from '@/lib/admin/jmap-servers';
-import { effectiveConsent, loadState, saveState, reschedule } from '@/lib/telemetry';
+import { effectiveConsent, updateState, reschedule } from '@/lib/telemetry';
 import { logger } from '@/lib/logger';
 
 export const dynamic = 'force-dynamic';
+
+const MIN_SESSION_SECRET_LENGTH = 32;
 
 /**
  * Mapping of wizard-friendly step keys to the config keys they update. Each
@@ -56,9 +59,8 @@ export async function POST(request: NextRequest) {
   if (detectSetupState() !== 'bootstrap') {
     return NextResponse.json({ error: 'Setup is not active' }, { status: 404 });
   }
-  if (!(await authenticateWizardRequest())) {
-    return NextResponse.json({ error: 'Wizard session required' }, { status: 401 });
-  }
+  const wizardRefused = await wizardSessionRefusal();
+  if (wizardRefused) return wizardRefused;
 
   let body: { step?: unknown; values?: unknown };
   try {
@@ -91,12 +93,12 @@ export async function POST(request: NextRequest) {
     // A BULWARK_TELEMETRY env var hard-locks the choice; don't fight it.
     const { source } = await effectiveConsent();
     if (source !== 'env') {
-      const tstate = await loadState();
-      tstate.consent = consent;
-      if (consent === 'on' && !tstate.consentedAt) {
-        tstate.consentedAt = new Date().toISOString();
-      }
-      await saveState(tstate);
+      const now = new Date().toISOString();
+      // Against the stored state, so a schedule written meanwhile stays.
+      await updateState((tstate) => {
+        tstate.consent = consent;
+        if (consent === 'on' && !tstate.consentedAt) tstate.consentedAt = now;
+      });
       await reschedule();
     }
   }
@@ -108,6 +110,14 @@ export async function POST(request: NextRequest) {
     }
     if (!(key in CONFIG_ENV_MAP)) {
       return NextResponse.json({ error: `Unknown config key: ${key}` }, { status: 400 });
+    }
+    // Admin sign-in and remember me refuse a shorter key (lib/admin/session.ts,
+    // lib/auth/crypto.ts), so saving one would break them right after setup.
+    if (key === 'sessionSecret' && (typeof value !== 'string' || value.length < MIN_SESSION_SECRET_LENGTH)) {
+      return NextResponse.json(
+        { error: `sessionSecret must be at least ${MIN_SESSION_SECRET_LENGTH} characters` },
+        { status: 400 },
+      );
     }
     if (key === 'jmapServers') {
       // Sanitize: drop entries with bad ids, dup ids, or non-HTTP URLs
@@ -134,6 +144,8 @@ export async function POST(request: NextRequest) {
     await configManager.setAdminConfig(updates);
     return NextResponse.json({ ok: true });
   } catch (error) {
+    const refused = configWriteErrorResponse(error);
+    if (refused) return refused;
     logger.error('Wizard step save failed', {
       step,
       error: error instanceof Error ? error.message : 'Unknown error',

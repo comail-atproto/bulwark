@@ -9,14 +9,67 @@ import { useSettingsStore } from '@/stores/settings-store';
 import { useTaskStore } from '@/stores/task-store';
 import { useCalendarNotificationStore } from '@/stores/calendar-notification-store';
 import { useToastStore } from '@/stores/toast-store';
-import { getPendingAlerts, getPendingTaskAlerts, buildAlertKey } from '@/lib/calendar-alerts';
+import { getPendingAlerts, getPendingTaskAlerts, getNextAlertFireTime, buildAlertKey } from '@/lib/calendar-alerts';
 import { playNotificationSound } from '@/lib/notification-sound';
+import { lastingToastDuration } from '@/lib/toast-duration';
+import { startTitleAlert } from '@/lib/title-alert';
 import { getPathPrefix } from '@/lib/browser-navigation';
 import type { CalendarEvent } from '@/lib/jmap/types';
+import type { CalendarAlertView } from '@/lib/plugin-types';
+import { calendarHooks } from '@/lib/plugin-hooks';
+import { changesAnyType, subscribePushStateChanges } from '@/lib/push-events';
 
 const CHECK_INTERVAL_MS = 60 * 1000;
 const PROACTIVE_FETCH_HOURS = 24;
 const PROACTIVE_THROTTLE_MS = CHECK_INTERVAL_MS * 5;
+// Longest single wait for the next reminder; the periodic check covers the rest.
+const MAX_WAKE_DELAY_MS = 6 * 60 * 60 * 1000;
+/** How long a reminder stays at the shortest "Notification duration". */
+export const REMINDER_TOAST_MS = 15000;
+
+/**
+ * How long a reminder toast stays: until it is closed with Visual alerts on
+ * (someone who can't hear the sound must not miss it) or with "until
+ * closed"; otherwise the "Notification duration", at least 15 seconds.
+ */
+export function reminderToastDuration(): number {
+  if (useSettingsStore.getState().visualAlerts) return 0;
+  return lastingToastDuration(REMINDER_TOAST_MS);
+}
+
+/**
+ * Whether a reminder plays its sound. Do not disturb keeps reminders on
+ * screen (they were asked for) but silent.
+ */
+function reminderSoundOn(soundSetting: boolean): boolean {
+  return soundSetting && !useSettingsStore.getState().doNotDisturb;
+}
+
+/**
+ * Visual alerts: the tab title swaps slowly to the reminder while the tab
+ * is in the background. Reminders were asked for, so Do not disturb keeps
+ * this too.
+ */
+function reminderTitleAlert(text: string): void {
+  if (useSettingsStore.getState().visualAlerts) startTitleAlert(text);
+}
+
+/**
+ * Tells plugins a reminder fired, then shows it unless a plugin takes it
+ * over (onBeforeCalendarAlert returning false), as one that shows reminders
+ * itself does. onCalendarAlert fires either way. With no plugin asked, the
+ * reminder is shown at once.
+ */
+function remind(view: CalendarAlertView, show: () => void): void {
+  void calendarHooks.onCalendarAlert.emit(view);
+  if (calendarHooks.onBeforeCalendarAlert.size === 0) {
+    show();
+    return;
+  }
+  void calendarHooks.onBeforeCalendarAlert.intercept(view).then((allowed) => {
+    if (allowed) show();
+  });
+}
 
 export function useCalendarAlerts() {
   const { isAuthenticated, client } = useAuthStore();
@@ -31,14 +84,26 @@ export function useCalendarAlerts() {
   const lastProactiveFetchRef = useRef<number>(0);
   const proactiveEventsRef = useRef<CalendarEvent[]>([]);
   const shownKeysRef = useRef<Set<string>>(new Set());
+  // Wakes the check at the next reminder's fire time (#1349).
+  const wakeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const checkAlertsRef = useRef<() => void>(() => {});
 
   const checkAlerts = useCallback(() => {
+    if (wakeTimerRef.current) {
+      clearTimeout(wakeTimerRef.current);
+      wakeTimerRef.current = null;
+    }
     if (!calendarNotificationsEnabled || !isAuthenticated) return;
 
     try {
       const now = Date.now();
       const acknowledgedKeys = new Set(Object.keys(acknowledgedAlerts));
       const allEvents = [...events, ...proactiveEventsRef.current];
+      // A minute-tick alone showed reminders up to a minute late.
+      const nextFire = getNextAlertFireTime(allEvents, enableCalendarTasks ? storeTasks : [], calendars, now);
+      if (nextFire !== null) {
+        wakeTimerRef.current = setTimeout(() => checkAlertsRef.current(), Math.min(nextFire - now, MAX_WAKE_DELAY_MS));
+      }
       const pending = getPendingAlerts(allEvents, calendars, acknowledgedKeys, now);
 
       for (const alert of pending) {
@@ -47,10 +112,6 @@ export function useCalendarAlerts() {
 
         shownKeysRef.current.add(key);
         acknowledgeAlert(key, alert.fireTimeMs);
-
-        if (calendarNotificationSound) {
-          playNotificationSound(notificationSoundChoice);
-        }
 
         const diffMs = (alert.event.utcStart ? new Date(alert.event.utcStart).getTime() : parseISO(alert.event.start).getTime()) - now;
         const diffMin = Math.round(diffMs / 60000);
@@ -63,14 +124,28 @@ export function useCalendarAlerts() {
           ? `${timeLabel} · ${alert.calendarName}`
           : timeLabel;
 
-        addToast({
-          type: 'info',
-          title: alert.event.title || t('alert_title'),
-          message,
-          duration: 15000,
-          onClick: () => {
-            window.location.href = `${getPathPrefix(locale)}/${locale}/calendar`;
-          },
+        remind({
+          id: alert.alertId,
+          eventId: alert.eventId,
+          eventTitle: alert.event.title || '',
+          triggerTime: new Date(alert.fireTimeMs).toISOString(),
+        }, () => {
+          if (reminderSoundOn(calendarNotificationSound)) {
+            playNotificationSound(notificationSoundChoice);
+          }
+          reminderTitleAlert(t('title_alert', { title: alert.event.title || t('alert_title') }));
+          addToast({
+            type: 'info',
+            title: alert.event.title || t('alert_title'),
+            message,
+            duration: reminderToastDuration(),
+            onClick: () => {
+              window.location.href = `${getPathPrefix(locale)}/${locale}/calendar`;
+            },
+            onDismiss: () => {
+              void calendarHooks.onCalendarAlertAcknowledge.emit({ alertId: alert.alertId, eventId: alert.eventId });
+            },
+          });
         });
       }
 
@@ -84,22 +159,32 @@ export function useCalendarAlerts() {
           shownKeysRef.current.add(key);
           acknowledgeAlert(key, taskAlert.fireTimeMs);
 
-          if (calendarNotificationSound) {
-            playNotificationSound(notificationSoundChoice);
-          }
-
           const taskMsg = taskAlert.calendarName
             ? `${t('task_due')} · ${taskAlert.calendarName}`
             : t('task_due');
 
-          addToast({
-            type: 'info',
-            title: taskAlert.task.title || t('alert_title'),
-            message: taskMsg,
-            duration: 15000,
-            onClick: () => {
-              window.location.href = `${getPathPrefix(locale)}/${locale}/calendar`;
-            },
+          remind({
+            id: taskAlert.alertId,
+            taskId: taskAlert.taskId,
+            taskTitle: taskAlert.task.title || '',
+            triggerTime: new Date(taskAlert.fireTimeMs).toISOString(),
+          }, () => {
+            if (reminderSoundOn(calendarNotificationSound)) {
+              playNotificationSound(notificationSoundChoice);
+            }
+            reminderTitleAlert(t('title_alert', { title: taskAlert.task.title || t('alert_title') }));
+            addToast({
+              type: 'info',
+              title: taskAlert.task.title || t('alert_title'),
+              message: taskMsg,
+              duration: reminderToastDuration(),
+              onClick: () => {
+                window.location.href = `${getPathPrefix(locale)}/${locale}/calendar`;
+              },
+              onDismiss: () => {
+                void calendarHooks.onCalendarAlertAcknowledge.emit({ alertId: taskAlert.alertId, taskId: taskAlert.taskId });
+              },
+            });
           });
         }
       }
@@ -111,12 +196,13 @@ export function useCalendarAlerts() {
     isAuthenticated, events, calendars, acknowledgedAlerts,
     acknowledgeAlert, addToast, t, locale, enableCalendarTasks, storeTasks,
   ]);
+  checkAlertsRef.current = checkAlerts;
 
-  const proactiveFetch = useCallback(async () => {
+  const proactiveFetch = useCallback(async (force = false) => {
     if (!client || !supportsCalendar || !calendarNotificationsEnabled || !isAuthenticated) return;
 
     const now = Date.now();
-    if (now - lastProactiveFetchRef.current < PROACTIVE_THROTTLE_MS) return;
+    if (!force && now - lastProactiveFetchRef.current < PROACTIVE_THROTTLE_MS) return;
 
     try {
       const start = new Date(now - 10 * 60 * 1000).toISOString();
@@ -124,6 +210,7 @@ export function useCalendarAlerts() {
       const fetched = await client.queryCalendarEvents({ after: start, before: end });
       proactiveEventsRef.current = fetched;
       lastProactiveFetchRef.current = Date.now();
+      checkAlertsRef.current();
     } catch {
       // Silently ignore proactive fetch errors
     }
@@ -155,4 +242,19 @@ export function useCalendarAlerts() {
     if (!calendarNotificationsEnabled || !isAuthenticated) return;
     checkAlerts();
   }, [events, calendarNotificationsEnabled, isAuthenticated, checkAlerts]);
+
+  // An event created or moved elsewhere can have a reminder due within the
+  // throttle window: read the next hours again when push reports a change.
+  const proactiveFetchRef = useRef(proactiveFetch);
+  proactiveFetchRef.current = proactiveFetch;
+  useEffect(() => {
+    if (!calendarNotificationsEnabled || !isAuthenticated) return;
+    return subscribePushStateChanges((change, _client, role) => {
+      if (role === 'active' && changesAnyType(change, ['CalendarEvent'])) void proactiveFetchRef.current(true);
+    });
+  }, [calendarNotificationsEnabled, isAuthenticated]);
+
+  useEffect(() => () => {
+    if (wakeTimerRef.current) clearTimeout(wakeTimerRef.current);
+  }, []);
 }

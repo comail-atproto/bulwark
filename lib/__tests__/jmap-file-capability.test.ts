@@ -1,10 +1,38 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { JMAPClient } from '../jmap/client';
-import { jmapSession } from './fixtures/jmap-session';
+
+// Session where the SERVER advertises FileNode (session.capabilities) but the
+// per-account accountCapabilities can independently include or omit it. This
+// models the #563 scenario: a Stalwart role that revokes jmap-file-node-*
+// permissions drops the capability from the account while the server still
+// advertises it globally.
+function makeSession(accountCapabilities: Record<string, unknown>, isPersonal = true) {
+  return {
+    capabilities: {
+      'urn:ietf:params:jmap:core': {},
+      'urn:ietf:params:jmap:filenode': {},
+    },
+    accounts: {
+      'acct-1': { name: 'test', isPersonal, accountCapabilities },
+    },
+    primaryAccounts: { 'urn:ietf:params:jmap:mail': 'acct-1' },
+    apiUrl: 'https://mail.example.com/jmap/api',
+    downloadUrl: 'https://mail.example.com/jmap/download/{accountId}/{blobId}/{name}',
+    uploadUrl: 'https://mail.example.com/jmap/upload/{accountId}/',
+    eventSourceUrl: 'https://mail.example.com/jmap/eventsource',
+  };
+}
+
+function mockFetchResponse(status: number, body?: unknown): Response {
+  return new Response(body ? JSON.stringify(body) : null, {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
 
 async function connect(accountCapabilities: Record<string, unknown>, isPersonal = true): Promise<JMAPClient> {
   const fetchSpy = vi.spyOn(globalThis, 'fetch');
-  fetchSpy.mockResolvedValueOnce(Response.json(jmapSession({ accountCapabilities, isPersonal, serverCapabilities: { 'urn:ietf:params:jmap:filenode': {} } })));
+  fetchSpy.mockResolvedValueOnce(mockFetchResponse(200, makeSession(accountCapabilities, isPersonal)));
   const client = new JMAPClient('https://mail.example.com', 'user@test.com', 'pass123');
   await client.connect();
   fetchSpy.mockReset();
@@ -22,13 +50,20 @@ describe('JMAPClient.supportsFiles (#563 - account-scoped capability)', () => {
     fetchSpy.mockRestore();
   });
 
-  it.each([
-    { name: 'personal account advertises files', capabilities: { 'urn:ietf:params:jmap:filenode': {} }, personal: true, supported: true },
-    { name: 'personal account omits files despite server advertisement', capabilities: { 'urn:ietf:params:jmap:mail': {} }, personal: true, supported: false },
-    { name: 'shared account inherits server support', capabilities: {}, personal: false, supported: true },
-  ])('$name', async ({ capabilities, personal, supported }) => {
-    const client = await connect(capabilities, personal);
-    expect(client.supportsFiles()).toBe(supported);
+  it('returns true when the account advertises the filenode capability', async () => {
+    const client = await connect({ 'urn:ietf:params:jmap:filenode': {} });
+    expect(client.supportsFiles()).toBe(true);
+  });
+
+  it('returns false when the server advertises filenode but the account does not (#563)', async () => {
+    // The revoked-permission case: server-wide capability present, account omits it.
+    const client = await connect({ 'urn:ietf:params:jmap:mail': {} });
+    expect(client.supportsFiles()).toBe(false);
+  });
+
+  it('treats non-personal (shared/group) accounts as capable even without per-account advertisement', async () => {
+    const client = await connect({}, /* isPersonal */ false);
+    expect(client.supportsFiles()).toBe(true);
   });
 
   it('probeFileNodeSupport does not probe (no network call) when the account is explicitly denied', async () => {

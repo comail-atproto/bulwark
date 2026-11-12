@@ -25,7 +25,8 @@ const currentGroupwareEnabled = vi.fn().mockResolvedValue(true);
 vi.mock('@/lib/groupware/access', () => ({ currentGroupwareEnabled: (...args: unknown[]) => currentGroupwareEnabled(...args) }));
 
 vi.mock('@/lib/logger', () => ({
-  logger: { debug: vi.fn() },
+  configureLogger: vi.fn(),
+  logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 
 // Env vars these tests drive. Stubbed to undefined before each test so the
@@ -40,9 +41,12 @@ const MANAGED_ENV = [
   'DOMAIN_BRANDING', 'CALENDAR_ENABLED', 'CONTACTS_ENABLED', 'FILES_ENABLED',
   'APPS_ENABLED', 'DEMO_MODE', 'BYOMC_ENABLED', 'IMAP_HOST', 'SMTP_HOST',
   'APP_PASSWORD_API_URL', 'PASSWORD_SECURITY_ENABLED', 'SMIME_ENABLED',
-  'IDENTITY_MANAGEMENT_ENABLED',
+  'IDENTITY_MANAGEMENT_ENABLED', 'INBOX_CALENDAR_BRIDGE_URL', 'RELAY_CALENDAR_BRIDGE_URL',
+  'INBOX_CONTACTS_BRIDGE_URL', 'INBOX_FILES_BRIDGE_URL', 'BULWARK_INBOX_SSO_SECRET', 'BULWARK_RELAY_SSO_SECRET',
   'LOGIN_IMPRINT_URL', 'LOGIN_PRIVACY_POLICY_URL', 'LOGIN_WEBSITE_URL', 'DOMAIN_BRANDING',
-  'JMAP_SERVERS', 'JMAP_SERVER_AUTO_PICK_BY_DOMAIN', 'SOURCE_CODE_URL',
+  'JMAP_SERVERS', 'JMAP_SERVER_AUTO_PICK_BY_DOMAIN', 'SOURCE_CODE_URL', 'LOGIN_SHOW_REMEMBER_ME',
+  'ACCESSIBILITY_STATEMENT_URL', 'ACCESSIBILITY_FEEDBACK_URL', 'HELP_URL', 'EASY_READ_URL', 'SIGN_LANGUAGE_URL',
+  'LOGIN_USERNAME_PLACEHOLDER', 'BUILDERS_WEBSITE_URL',
 ] as const;
 
 describe('config API route', () => {
@@ -99,6 +103,15 @@ describe('config API route', () => {
     return config;
   }
 
+  it('publishes the configured Builders website before sign-in', async () => {
+    vi.stubEnv('BUILDERS_WEBSITE_URL', 'https://builders.stage.test');
+    expect((await getConfig()).buildersWebsiteUrl).toBe('https://builders.stage.test');
+  });
+
+  it('publishes the default Builders website when no override is set', async () => {
+    expect((await getConfig()).buildersWebsiteUrl).toBe('https://build.comail.at');
+  });
+
   it('reads feature gates from the selected encrypted account session', async () => {
     vi.stubEnv('SESSION_SECRET', 's'.repeat(64));
     vi.stubEnv('CALENDAR_ENABLED', 'true');
@@ -111,6 +124,24 @@ describe('config API route', () => {
     const config = await (await GET(request)).json();
     expect(config.calendarEnabled).toBe(false);
     expect(config.buildersEnabled).toBe(false);
+  });
+
+  it('advertises private bridges only for an entitled account and valid operator configuration', async () => {
+    vi.stubEnv('CALENDAR_ENABLED', 'true');
+    vi.stubEnv('CONTACTS_ENABLED', 'true');
+    vi.stubEnv('FILES_ENABLED', 'true');
+    vi.stubEnv('INBOX_FILES_BRIDGE_URL', 'https://inbox.example/webmail/files/api/v1');
+    vi.stubEnv('BULWARK_INBOX_SSO_SECRET', 's'.repeat(64));
+    vi.stubEnv('INBOX_CALENDAR_BRIDGE_URL', 'https://inbox.example/webmail/calendar/api/v1');
+    vi.stubEnv('INBOX_CONTACTS_BRIDGE_URL', 'https://inbox.example/webmail/contacts/api/v1');
+    expect(await getConfig()).toMatchObject({ privateCalendarEnabled: false, privateContactsEnabled: false, privateFilesEnabled: false });
+    expect(await getConfig(undefined, true)).toMatchObject({ privateCalendarEnabled: true, privateContactsEnabled: true, privateFilesEnabled: true });
+    vi.stubEnv('INBOX_CONTACTS_BRIDGE_URL', 'https://user:password@inbox.example');
+    expect(await getConfig(undefined, true)).toMatchObject({ privateCalendarEnabled: true, privateContactsEnabled: false, privateFilesEnabled: true });
+    vi.stubEnv('INBOX_FILES_BRIDGE_URL', 'https://user:password@inbox.example');
+    expect(await getConfig(undefined, true)).toMatchObject({ privateFilesEnabled: false });
+    vi.stubEnv('BULWARK_INBOX_SSO_SECRET', 'short');
+    expect(await getConfig(undefined, true)).toMatchObject({ privateCalendarEnabled: false, privateContactsEnabled: false, privateFilesEnabled: false });
   });
 
   it('prevents caching host-specific runtime configuration', async () => {
@@ -215,6 +246,13 @@ describe('config API route', () => {
     expect(config.loginWebsiteUrl).toBe('https://acme.com');
   });
 
+  it('publishes the login email placeholder, empty when unset (#1423)', async () => {
+    expect((await getConfig()).loginUsernamePlaceholder).toBe('');
+
+    vi.stubEnv('LOGIN_USERNAME_PLACEHOLDER', 'max.mustermann@acme.example');
+    expect((await getConfig()).loginUsernamePlaceholder).toBe('max.mustermann@acme.example');
+  });
+
   it('should return atproto login URL when set', async () => {
     process.env.ATPROTO_LOGIN_URL = 'https://comail.at/webmail/login';
 
@@ -237,6 +275,31 @@ describe('config API route', () => {
       expect((await getConfig()).sourceCodeUrl).toBe('');
     },
   );
+
+  it('publishes the accessibility and help links (OP-01)', async () => {
+    vi.stubEnv('ACCESSIBILITY_STATEMENT_URL', 'https://acme.com/accessibility');
+    vi.stubEnv('ACCESSIBILITY_FEEDBACK_URL', 'barriers@acme.com');
+    vi.stubEnv('HELP_URL', 'https://acme.com/help');
+    vi.stubEnv('EASY_READ_URL', 'https://acme.com/leichte-sprache');
+    vi.stubEnv('SIGN_LANGUAGE_URL', 'javascript:alert(1)');
+
+    const config = await getConfig();
+
+    expect(config.accessibilityStatementUrl).toBe('https://acme.com/accessibility');
+    // An email address becomes a mail link; a script URL is dropped.
+    expect(config.accessibilityFeedbackUrl).toBe('mailto:barriers@acme.com');
+    expect(config.helpUrl).toBe('https://acme.com/help');
+    expect(config.easyReadUrl).toBe('https://acme.com/leichte-sprache');
+    expect(config.signLanguageUrl).toBe('');
+  });
+
+  it('leaves the accessibility and help links empty when unset', async () => {
+    const config = await getConfig();
+
+    expect(config.accessibilityStatementUrl).toBe('');
+    expect(config.accessibilityFeedbackUrl).toBe('');
+    expect(config.helpUrl).toBe('');
+  });
 
   it('should handle partial login customization', async () => {
     vi.stubEnv('LOGIN_COMPANY_NAME', 'Partial Corp');
@@ -264,6 +327,14 @@ describe('config API route', () => {
     const config = await getConfig();
 
     expect(config.rememberMeEnabled).toBe(true);
+  });
+
+  it('hides the remember-me box unless LOGIN_SHOW_REMEMBER_ME turns it on', async () => {
+    vi.stubEnv('SESSION_SECRET', 'test-secret');
+    expect((await getConfig()).loginShowRememberMe).toBe(false);
+
+    vi.stubEnv('LOGIN_SHOW_REMEMBER_ME', 'true');
+    expect((await getConfig()).loginShowRememberMe).toBe(true);
   });
 
   it('should enable settingsSync only when both SESSION_SECRET and SETTINGS_SYNC_ENABLED are set', async () => {
@@ -322,6 +393,29 @@ describe('config API route', () => {
 
       expect(config.loginCompanyName).toBe('Brand One');
       expect(config.loginWebsiteUrl).toBe('https://one.example');
+    });
+
+    it('overrides the accessibility links per domain', async () => {
+      vi.stubEnv('ACCESSIBILITY_STATEMENT_URL', 'https://default.example/accessibility');
+      vi.stubEnv('HELP_URL', 'https://default.example/help');
+      vi.stubEnv('DOMAIN_BRANDING', JSON.stringify([
+        { host: 'mail1.example.com', accessibilityStatementUrl: 'https://one.example/barrierefreiheit' },
+      ]));
+
+      const config = await getConfig({ host: 'mail1.example.com' });
+
+      expect(config.accessibilityStatementUrl).toBe('https://one.example/barrierefreiheit');
+      expect(config.helpUrl).toBe('https://default.example/help');
+    });
+
+    it('overrides the login email placeholder per domain (#1423)', async () => {
+      vi.stubEnv('LOGIN_USERNAME_PLACEHOLDER', 'name@default.example');
+      vi.stubEnv('DOMAIN_BRANDING', JSON.stringify([
+        { host: 'mail1.example.com', loginUsernamePlaceholder: 'name@one.example' },
+      ]));
+
+      expect((await getConfig({ host: 'mail1.example.com' })).loginUsernamePlaceholder).toBe('name@one.example');
+      expect((await getConfig({ host: 'other.example.com' })).loginUsernamePlaceholder).toBe('name@default.example');
     });
 
     it('falls through to the global value when the host has no entry', async () => {

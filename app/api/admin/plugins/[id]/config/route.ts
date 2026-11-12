@@ -4,6 +4,8 @@ import { getDevPlugin } from '@/lib/admin/plugin-dev';
 import { getPluginConfig, setPluginConfig, deletePluginConfigKey } from '@/lib/admin/plugin-config';
 import { requireAdminAuth } from '@/lib/admin/session';
 import { getStalwartCredentials } from '@/lib/stalwart/credentials';
+import { configReadOnlyResponse } from '@/lib/admin/config-read-only-response';
+import { storeUnavailableResponse } from '@/lib/admin/store-unavailable-response';
 
 /** Resolve a plugin from the persisted registry first, then PLUGIN_DEV_DIR. */
 async function resolvePlugin(id: string) {
@@ -34,8 +36,12 @@ export async function GET(
       return NextResponse.json({ error: 'Invalid plugin ID' }, { status: 400 });
     }
 
+    // ?public=1: only the fields any signed-in user may see, even for an
+    // admin. The plugin API uses it so a plugin never gets secrets just
+    // because the user is also signed in to the admin dashboard.
+    const publicOnly = request.nextUrl.searchParams.get('public') === '1';
     const adminAuth = await requireAdminAuth(request);
-    const isAdmin = !('error' in adminAuth);
+    const isAdmin = !publicOnly && !('error' in adminAuth);
 
     if (!isAdmin) {
       const creds = await getStalwartCredentials(request);
@@ -69,7 +75,9 @@ export async function GET(
     return NextResponse.json(response, {
       headers: { 'Cache-Control': 'no-store' },
     });
-  } catch {
+  } catch (error) {
+    const unavailable = storeUnavailableResponse(error);
+    if (unavailable) return unavailable;
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }
@@ -124,7 +132,9 @@ export async function PUT(
 
     await setPluginConfig(id, body.key, body.value);
     return NextResponse.json({ ok: true });
-  } catch {
+  } catch (error) {
+    const readOnly = configReadOnlyResponse(error);
+    if (readOnly) return readOnly;
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }
@@ -161,7 +171,9 @@ export async function DELETE(
 
     await deletePluginConfigKey(id, body.key);
     return NextResponse.json({ ok: true });
-  } catch {
+  } catch (error) {
+    const readOnly = configReadOnlyResponse(error);
+    if (readOnly) return readOnly;
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }

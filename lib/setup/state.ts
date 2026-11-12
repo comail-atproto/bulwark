@@ -1,6 +1,5 @@
-import { existsSync } from 'node:fs';
 import { configManager } from '@/lib/admin/config-manager';
-import { getConfigPath, isConfigReadOnly } from '@/lib/admin/paths';
+import { isConfigReadOnly } from '@/lib/admin/paths';
 
 /**
  * The three lifecycle states for the running container.
@@ -11,8 +10,9 @@ import { getConfigPath, isConfigReadOnly } from '@/lib/admin/paths';
  *   configured   - setup wizard finished (admin override config.json carries
  *                  setupComplete=true). Normal app; /setup returns 404.
  *   env-managed  - JMAP_SERVER_URL is set in the environment, so the
- *                  operator is configuring via .env (legacy / CI path). The
- *                  wizard stays disabled.
+ *                  operator is configuring via .env (legacy / CI path), or
+ *                  demo mode is on (DEMO_MODE=true), which needs no mail
+ *                  server at all. The wizard stays disabled.
  */
 export type SetupState = 'bootstrap' | 'configured' | 'env-managed';
 
@@ -26,28 +26,14 @@ export function detectSetupState(): SetupState {
   if (process.env.JMAP_SERVER_URL && process.env.JMAP_SERVER_URL.trim() !== '') {
     return 'env-managed';
   }
+  // Demo mode signs everyone into built-in sample data; there is nothing for
+  // the wizard to set up. Read through the config manager so an admin
+  // override of demoMode wins over DEMO_MODE, as everywhere else.
+  if (configManager.get<boolean>('demoMode', false) === true) return 'env-managed';
   // Read-only config dir + no setupComplete flag means the volume was
   // mounted :ro before the wizard ran. Fall through to bootstrap so the
   // failure (write attempt during wizard) surfaces with a clear error
   // rather than silently 404'ing /setup.
   if (isConfigReadOnly()) return 'bootstrap';
   return 'bootstrap';
-}
-
-/**
- * Whether the wizard's UI and APIs should be reachable.
- */
-export function isSetupActive(): boolean {
-  return detectSetupState() === 'bootstrap';
-}
-
-/**
- * The persisted `.config-locked` marker the wizard drops when the operator
- * checks "lock configuration after setup" on the review screen. Purely
- * advisory - the actual locking is the operator's `:ro` mount or the
- * ADMIN_CONFIG_READONLY env var. This file is what the admin UI uses to
- * remind the operator that they intended to lock.
- */
-export function lockMarkerExists(): boolean {
-  return existsSync(getConfigPath('.config-locked'));
 }

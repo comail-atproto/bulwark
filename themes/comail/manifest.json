@@ -1,0 +1,14 @@
+{
+  "id": "builtin-comail",
+  "name": "comail",
+  "version": "1.0.1",
+  "author": "Built-in",
+  "description": "comail brand theme \u2014 sage paper, Cammie teal, warm serif wordmark. Accessible light & dark variants.",
+  "variants": [
+    "light",
+    "dark"
+  ],
+  "type": "theme",
+  "apiVersion": 2,
+  "minAppVersion": "1.14.2"
+}

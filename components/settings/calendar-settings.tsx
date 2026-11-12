@@ -3,13 +3,14 @@
 import { useEffect } from 'react';
 import { useTranslations } from 'next-intl';
 import { useCalendarStore, CalendarViewMode } from '@/stores/calendar-store';
-import { useSettingsStore } from '@/stores/settings-store';
+import { useSettingsStore, type MonthTimedEventStyle } from '@/stores/settings-store';
 import { usePolicyStore } from '@/stores/policy-store';
 import { useAuthStore } from '@/stores/auth-store';
 import { toast } from '@/stores/toast-store';
 import { SettingsSection, SettingItem, Select, ToggleSwitch } from './settings-section';
 import { cn } from '@/lib/utils';
 import { formatDisplayHour } from '@/lib/calendar-display-range';
+import { FreeBusyShareSetting } from './free-busy-share-setting';
 
 // Indexed by Date.getDay(), which is how calendarWorkingDays stores days.
 const DAY_KEYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'] as const;
@@ -34,6 +35,8 @@ export function CalendarSettings() {
   const defaultIdentityId = participantIdentities.find((i) => i.isDefault)?.id ?? participantIdentities[0]?.id ?? '';
   const {
     showTimeInMonthView,
+    calendarTintedEvents,
+    calendarMonthTimedEvents,
     showWeekNumbers,
     calendarFreeScroll,
     enableCalendarTasks,
@@ -45,6 +48,7 @@ export function CalendarSettings() {
     calendarDayEndHour,
     calendarHideNonWorkingDays,
     calendarWorkingDays,
+    calendarInvitationParsingEnabled,
     timeFormat,
     firstDayOfWeek,
     updateSetting,
@@ -79,7 +83,7 @@ export function CalendarSettings() {
   };
 
   return (
-    <SettingsSection title={t('title')}>
+    <SettingsSection id="calendar" title={t('title')}>
       <SettingItem label={t('default_view')}>
         <Select
           value={viewMode}
@@ -113,6 +117,17 @@ export function CalendarSettings() {
         </SettingItem>
       )}
 
+      {/* Not a notification: whether .ics attachments get calendar actions. Was under Notifications. */}
+      <SettingItem
+        label={t('invitation_parsing')}
+        description={t('invitation_parsing_desc')}
+      >
+        <ToggleSwitch
+          checked={calendarInvitationParsingEnabled}
+          onChange={(checked) => updateSetting('calendarInvitationParsingEnabled', checked)}
+        />
+      </SettingItem>
+
       <SettingItem
         label={t('show_time_in_month_view')}
         description={t('show_time_in_month_view_desc')}
@@ -120,6 +135,31 @@ export function CalendarSettings() {
         <ToggleSwitch
           checked={showTimeInMonthView}
           onChange={(checked) => updateSetting('showTimeInMonthView', checked)}
+        />
+      </SettingItem>
+
+      <SettingItem
+        label={t('tinted_events')}
+        description={t('tinted_events_desc')}
+      >
+        <ToggleSwitch
+          checked={calendarTintedEvents}
+          onChange={(checked) => updateSetting('calendarTintedEvents', checked)}
+        />
+      </SettingItem>
+
+      <SettingItem
+        label={t('month_timed_events')}
+        description={t('month_timed_events_desc')}
+      >
+        <Select
+          value={calendarMonthTimedEvents}
+          onChange={(value) => updateSetting('calendarMonthTimedEvents', value as MonthTimedEventStyle)}
+          options={[
+            { value: 'bar', label: t('month_timed_events_bar') },
+            { value: 'text', label: t('month_timed_events_text') },
+            { value: 'dot', label: t('month_timed_events_dot') },
+          ]}
         />
       </SettingItem>
 
@@ -237,6 +277,8 @@ export function CalendarSettings() {
           onChange={(checked) => updateSetting('showBirthdayCalendar', checked)}
         />
       </SettingItem>
+
+      <FreeBusyShareSetting />
 
       {isFeatureEnabled('calendarTasksEnabled') && (
       <>

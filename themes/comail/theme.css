@@ -1,0 +1,87 @@
+
+:root {
+  --color-border: #c4c6a0;
+  --color-input: #ffffff;
+  --color-ring: #1a5e6f;
+  --color-background: #dfe0c0;
+  --color-foreground: #012102;
+  /* Primary button = darkestBlue fill, white bold label (mock "Continue"). */
+  --color-primary: #012102;
+  --color-primary-foreground: #ffffff;
+  /* Secondary = deep teal used for the sidebar column (cream text on it). */
+  --color-secondary: #02413c;
+  --color-secondary-foreground: #ecefcf;
+  --color-muted: #c8caac;
+  --color-muted-foreground: #4a544e;
+  --color-accent: #cfe6ec;
+  --color-accent-foreground: #02413c;
+  --color-destructive: #b23b30;
+  --color-destructive-foreground: #ffffff;
+  --color-popover: #f5f5e0;
+  --color-popover-foreground: #012102;
+  /* Sidebar (folder list) mirrors the hero: deep teal, cream text. */
+  --color-sidebar: #02413c;
+  --color-sidebar-foreground: #ecefcf;
+  --color-sidebar-border: #0a5249;
+  --color-sidebar-accent: #1a5466;
+  --color-sidebar-accent-foreground: #ecefcf;
+  --color-card: #f5f5e0;
+  --color-card-foreground: #012102;
+  --color-success: #2f7d3a;
+  --color-success-foreground: #ffffff;
+  --color-warning: #b9841a;
+  --color-warning-foreground: #012102;
+  --color-info: #1a5e6f;
+  --color-info-foreground: #ffffff;
+  --color-selection: #cfe6ec;
+  --color-selection-foreground: #02413c;
+  --color-unread: #1a5e6f;
+  --color-chart-1: #3fa1c0;
+  --color-chart-2: #2f7d3a;
+  --color-chart-3: #e1c240;
+  --color-chart-4: #b23b30;
+  --color-chart-5: #02413c;
+}
+/* Dark mode uses the docs charcoal surfaces and off-white text. Inputs
+   share the card surface; brand cyan remains on actions and focus rings,
+   with lighter cyan for accent text. */
+.dark {
+  --color-border: #2e3138;
+  --color-input: #2a2d33;
+  --color-ring: #3fa1c0;
+  --color-background: #1c1f24;
+  --color-foreground: #e7e9ea;
+  --color-primary: #3fa1c0;
+  --color-primary-foreground: #012102;
+  --color-secondary: #2a2d33;
+  --color-secondary-foreground: #e7e9ea;
+  --color-muted: #25282e;
+  --color-muted-foreground: #a8acb1;
+  --color-accent: #2a2d33;
+  --color-accent-foreground: #6dbfd6;
+  --color-destructive: #e0675a;
+  --color-destructive-foreground: #1c1f24;
+  --color-popover: #16181d;
+  --color-popover-foreground: #e7e9ea;
+  --color-sidebar: #16181d;
+  --color-sidebar-foreground: #e7e9ea;
+  --color-sidebar-border: #3a3d44;
+  --color-sidebar-accent: #2a2d33;
+  --color-sidebar-accent-foreground: #6dbfd6;
+  --color-card: #2a2d33;
+  --color-card-foreground: #f1f2f3;
+  --color-success: #4caf61;
+  --color-success-foreground: #1c1f24;
+  --color-warning: #e1c240;
+  --color-warning-foreground: #1c1f24;
+  --color-info: #6dbfd6;
+  --color-info-foreground: #1c1f24;
+  --color-selection: rgba(63, 161, 192, 0.22);
+  --color-selection-foreground: #6dbfd6;
+  --color-unread: #6dbfd6;
+  --color-chart-1: #3fa1c0;
+  --color-chart-2: #4caf61;
+  --color-chart-3: #e1c240;
+  --color-chart-4: #e0675a;
+  --color-chart-5: #5cc0d6;
+}

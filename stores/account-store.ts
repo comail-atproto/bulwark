@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { generateAccountId, generateAvatarColor, getMaxAccounts } from '@/lib/account-utils';
+import { authHooks } from '@/lib/plugin-hooks';
 
 export interface AccountEntry {
   /** Unique key: `${username}@${serverHostname}` */
@@ -48,6 +49,12 @@ export interface AccountEntry {
   did?: string;
   /** Timestamp of last successful login */
   lastLoginAt: number;
+  /**
+   * When the user last signed in to it with a password, token or provider
+   * login (not a restore). The organisation's maximum session length counts
+   * from here. `undefined` = signed in before this was recorded.
+   */
+  signedInAt?: number;
   /** Whether this account is currently connected */
   isConnected: boolean;
   /** Whether this account had a connection error */
@@ -55,6 +62,16 @@ export interface AccountEntry {
   errorMessage?: string;
   /** Whether this is the default account (loaded on app start) */
   isDefault: boolean;
+  /**
+   * Brought back from the account list backup and not signed in on this
+   * device yet. Kept across reloads, and opening it leads to the sign-in form.
+   */
+  awaitingSignIn?: boolean;
+  /**
+   * Opened by an admin through an impersonation handoff rather than by the
+   * mailbox owner. The server says so each time the session is restored.
+   */
+  impersonated?: boolean;
 }
 
 interface AccountState {
@@ -100,6 +117,8 @@ export const useAccountStore = create<AccountState>()(
                     lastLoginAt: entry.lastLoginAt,
                     authMode: entry.authMode,
                     did: entry.did ?? a.did,
+                    // Any sign-in ends the wait, whichever way it went.
+                    awaitingSignIn: entry.awaitingSignIn,
                   }
                 : a
             ),
@@ -130,11 +149,13 @@ export const useAccountStore = create<AccountState>()(
           activeAccountId: s.activeAccountId ?? id,
           defaultAccountId: isDefault ? id : s.defaultAccountId,
         }));
+        void authHooks.onAccountAdd.emit({ accountId: id });
 
         return id;
       },
 
       removeAccount: (accountId) => {
+        if (!get().accounts.some((a) => a.id === accountId)) return;
         set((s) => {
           const remaining = s.accounts.filter((a) => a.id !== accountId);
           const wasDefault = s.defaultAccountId === accountId;
@@ -158,6 +179,7 @@ export const useAccountStore = create<AccountState>()(
             defaultAccountId: newDefault,
           };
         });
+        void authHooks.onAccountRemove.emit({ accountId });
       },
 
       setActiveAccount: (accountId) => {

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useEmailStore } from '../email-store';
+import { emailKeyFor } from '@/lib/thread-utils';
 import { useSettingsStore } from '../settings-store';
 import { useAuthStore } from '../auth-store';
 import { useMessageListTabsStore } from '../message-list-tabs-store';
@@ -111,6 +112,21 @@ describe('tag view across the own and group accounts (#1038)', () => {
     expect(client.getEmails).toHaveBeenCalledWith(undefined, 'group', 50, 0, keyword, true, undefined, []);
   });
 
+  it('lists the group account only for a tag picked from its shared tags', async () => {
+    useEmailStore.setState({ selectedMailbox: ownInbox.id });
+    useEmailStore.getState().selectKeyword(label, 'group');
+
+    await useEmailStore.getState().fetchEmails(client);
+
+    expect(useEmailStore.getState().emails.map(e => e.id)).toEqual(['grp-1']);
+    expect(client.getEmails).toHaveBeenCalledTimes(1);
+    expect(client.getEmails).toHaveBeenCalledWith(undefined, 'group', 50, 0, keyword, true, undefined, []);
+
+    // A tag from the own list spans every account again.
+    useEmailStore.getState().selectKeyword(label);
+    expect(useEmailStore.getState().selectedKeywordAccountId).toBeNull();
+  });
+
   it('lists the same set while an own folder is selected', async () => {
     useEmailStore.setState({ selectedMailbox: ownInbox.id });
     useEmailStore.getState().selectKeyword(label);
@@ -137,7 +153,10 @@ describe('tag view across the own and group accounts (#1038)', () => {
     useEmailStore.setState({ selectedMailbox: groupInbox.id });
     useEmailStore.getState().selectKeyword(label);
     await useEmailStore.getState().fetchEmails(client);
-    useEmailStore.setState({ selectedEmailIds: new Set(['own-1', 'grp-1']) });
+    // Keyed by owning account: in this very view 'own-1' and 'grp-1' could be
+    // the same bare id in two accounts.
+    const picked = useEmailStore.getState().emails.filter(e => ['own-1', 'grp-1'].includes(e.id));
+    useEmailStore.setState({ selectedEmailKeys: new Set(picked.map(emailKeyFor)) });
 
     await useEmailStore.getState().batchMarkAsRead(client, true);
 

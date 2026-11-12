@@ -1,0 +1,521 @@
+/*
+ * Settings > Accessibility, the CSS half (lib/accessibility-settings.ts writes
+ * the data attributes on <html>).
+ *
+ * Each "follow the system" option has two parts: a media query that applies
+ * unless the user overrode it (`:root:not([data-x="..."])`), and an attribute
+ * rule for an explicit choice. Overrides use `:root[...]`, which outranks the
+ * `:root` and `.dark` blocks themes compile to (lib/theme-compiler.ts).
+ */
+
+/* ---------- Bundled fonts (SIL Open Font License, see NOTICE) ---------- */
+
+@font-face {
+  font-family: "Atkinson Hyperlegible Next";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 200 800;
+  src: url("./fonts/atkinson-hyperlegible-next-latin-ext-wght-normal.woff2") format("woff2-variations");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Atkinson Hyperlegible Next";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 200 800;
+  src: url("./fonts/atkinson-hyperlegible-next-latin-wght-normal.woff2") format("woff2-variations");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Lexend";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url("./fonts/lexend-latin-ext-wght-normal.woff2") format("woff2-variations");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Lexend";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url("./fonts/lexend-latin-wght-normal.woff2") format("woff2-variations");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "OpenDyslexic";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url("./fonts/opendyslexic-latin-400-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "OpenDyslexic";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 700;
+  src: url("./fonts/opendyslexic-latin-700-normal.woff2") format("woff2");
+}
+
+/* The fonts cover Latin script; other scripts fall through to the stack. */
+:root[data-app-font="atkinson"] {
+  --font-sans: "Atkinson Hyperlegible Next", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+}
+:root[data-app-font="lexend"] {
+  --font-sans: "Lexend", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+}
+:root[data-app-font="opendyslexic"] {
+  --font-sans: "OpenDyslexic", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+}
+:root[data-app-font] body {
+  font-family: var(--font-sans);
+}
+
+/* ---------- Text spacing (WCAG 1.4.8, 1.4.12) ---------- */
+
+:root[data-line-spacing="relaxed"] { --a11y-line-height: 1.6; }
+:root[data-line-spacing="loose"] { --a11y-line-height: 1.9; }
+:root[data-line-spacing] body *:not(svg, svg *) {
+  line-height: var(--a11y-line-height) !important;
+}
+:root[data-letter-spacing="wide"] { --a11y-letter-spacing: 0.05em; }
+:root[data-letter-spacing="wider"] { --a11y-letter-spacing: 0.12em; }
+:root[data-letter-spacing] body *:not(svg, svg *) {
+  letter-spacing: var(--a11y-letter-spacing) !important;
+}
+:root[data-word-spacing="wide"] body *:not(svg, svg *) {
+  word-spacing: 0.16em !important;
+}
+:root[data-paragraph-spacing="wide"] body p {
+  margin-block-end: 1.5em !important;
+}
+
+/* ---------- Links ---------- */
+
+:root[data-underline-links="on"] a[href]:not([role]),
+:root[data-underline-links="on"] .a11y-link {
+  text-decoration-line: underline !important;
+  text-underline-offset: 0.15em;
+}
+
+/* ---------- Focus (WCAG 2.4.7, 2.4.11, 2.4.13) ----------
+ *
+ * One outline for every focusable element, drawn as a real outline rather
+ * than a box-shadow ring: forced-colors mode removes box-shadows, and an
+ * outline also keeps its width at any zoom. It outranks the utilities that
+ * used to switch the outline off (outline-none plus a ring).
+ *
+ * Containers that only take focus from script (tabindex="-1" on a list, a
+ * pane, a dialog, <main>, a heading focused after navigation) skip it: the
+ * focus there is a starting point, not a control. Controls with tabindex="-1"
+ * keep it, because roving-focus widgets (menu items, options, grid cells,
+ * tabs, rows) are focused while their tabindex is -1.
+ */
+:root {
+  --focus-ring-width: 2px;
+  --focus-ring-offset: 2px;
+  --focus-ring-color: var(--color-ring);
+}
+:root[data-focus-ring="thick"] {
+  --focus-ring-width: 3px;
+}
+:root[data-focus-ring="extra"] {
+  --focus-ring-width: 5px;
+  --focus-ring-offset: 3px;
+}
+:focus-visible:not([tabindex="-1"]:not(a[href], button, input, select, textarea, summary, [contenteditable="true"], [role="button"], [role="link"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="option"], [role="gridcell"], [role="row"], [role="treeitem"], [role="tab"], [role="radio"], [role="checkbox"], [role="switch"], [role="slider"], [role="spinbutton"], [role="columnheader"], [role="rowheader"])),
+:root[data-focus-always="on"] :focus:not([tabindex="-1"]:not(a[href], button, input, select, textarea, summary, [contenteditable="true"], [role="button"], [role="link"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="option"], [role="gridcell"], [role="row"], [role="treeitem"], [role="tab"], [role="radio"], [role="checkbox"], [role="switch"], [role="slider"], [role="spinbutton"], [role="columnheader"], [role="rowheader"])) {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color) !important;
+  outline-offset: var(--focus-ring-offset) !important;
+}
+/* Inside a scroll container a positive offset is clipped; draw it inside.
+   `focus-inset` does the same for any control that sits flush against the
+   edge of a clipping container. */
+:is([role="option"], [role="row"], [role="treeitem"], [role="gridcell"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], .focus-inset):focus-visible {
+  outline-offset: calc(var(--focus-ring-width) * -1) !important;
+}
+/* The focused element scrolls clear of sticky headers and the bottom bar,
+   in the page and inside the panes, which scroll on their own (scroll
+   padding belongs to the scrolling box, so the root's alone did nothing
+   there). :where() keeps the panes' rule overridable. */
+:root {
+  scroll-padding-block: 4rem;
+}
+:where(.overflow-y-auto, .overflow-auto, .overflow-y-scroll, .overflow-scroll) {
+  scroll-padding-block: 3rem;
+}
+
+/* ---------- Large text in narrow panes (WCAG 1.4.4, 1.4.10) ----------
+ *
+ * The folder list and the settings navigation keep their width in px while
+ * the text grows with the text size setting, so at 200% their labels were
+ * cut to a few letters ("Inb..."). Both are size containers; once one is
+ * narrower than 14rem of the current text size (224px at 100%, so never at
+ * the default width), labels wrap instead of being cut. Anywhere else, a
+ * cut label shows in full while its button, link, menu item, tab or tree
+ * item has the keyboard focus (not list rows, whose height must not jump).
+ */
+nav:is([data-tour="sidebar"], [data-tour="settings-tabs"]) {
+  container: a11y-nav / inline-size;
+}
+@container a11y-nav (width < 14rem) {
+  .truncate {
+    overflow: visible;
+    text-overflow: clip;
+    white-space: normal;
+    overflow-wrap: break-word;
+    hyphens: auto;
+  }
+}
+:is(button, a[href], [role="menuitem"], [role="tab"], [role="treeitem"]):focus-visible:is(.truncate),
+:is(button, a[href], [role="menuitem"], [role="tab"], [role="treeitem"]):focus-visible .truncate {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: break-word;
+  hyphens: auto;
+}
+
+/* ---------- More contrast (WCAG 1.4.6 as a setting) ---------- */
+
+@media (prefers-contrast: more) {
+  :root:not([data-contrast="normal"]) {
+    --color-foreground: #000000;
+    --color-muted-foreground: #1f2937;
+    --color-border: #4b5563;
+    --color-input: #4b5563;
+    --color-ring: #000000;
+    --color-sidebar-border: #4b5563;
+    --color-primary: #1d4ed8;
+    --color-unread: #1d4ed8;
+    --color-destructive: #b91c1c;
+    --color-accent-foreground: #1e3a8a;
+    --color-selection-foreground: #1e3a8a;
+    --color-popover-foreground: #000000;
+    --color-card-foreground: #000000;
+    --color-sidebar-foreground: #000000;
+    --focus-ring-color: #000000;
+  }
+  .dark:not([data-contrast="normal"]) {
+    --color-foreground: #ffffff;
+    --color-muted-foreground: #e5e7eb;
+    --color-border: #9ca3af;
+    --color-input: #9ca3af;
+    --color-ring: #ffffff;
+    --color-sidebar-border: #9ca3af;
+    --color-primary: #93c5fd;
+    --color-primary-foreground: #000000;
+    --color-unread: #93c5fd;
+    --color-destructive: #fca5a5;
+    --color-accent-foreground: #dbeafe;
+    --color-selection-foreground: #dbeafe;
+    --color-popover-foreground: #ffffff;
+    --color-card-foreground: #ffffff;
+    --color-sidebar-foreground: #ffffff;
+    --focus-ring-color: #ffffff;
+  }
+  :root:not([data-contrast="normal"]) a[href]:not([role]) {
+    text-decoration-line: underline;
+  }
+}
+:root[data-contrast="more"] {
+  --color-foreground: #000000;
+  --color-muted-foreground: #1f2937;
+  --color-border: #4b5563;
+  --color-input: #4b5563;
+  --color-ring: #000000;
+  --color-sidebar-border: #4b5563;
+  --color-primary: #1d4ed8;
+  --color-unread: #1d4ed8;
+  --color-destructive: #b91c1c;
+  --color-accent-foreground: #1e3a8a;
+  --color-selection-foreground: #1e3a8a;
+  --color-popover-foreground: #000000;
+  --color-card-foreground: #000000;
+  --color-sidebar-foreground: #000000;
+  --focus-ring-color: #000000;
+}
+html.dark[data-contrast="more"] {
+  --color-foreground: #ffffff;
+  --color-muted-foreground: #e5e7eb;
+  --color-border: #9ca3af;
+  --color-input: #9ca3af;
+  --color-ring: #ffffff;
+  --color-sidebar-border: #9ca3af;
+  --color-primary: #93c5fd;
+  --color-primary-foreground: #000000;
+  --color-unread: #93c5fd;
+  --color-destructive: #fca5a5;
+  --color-accent-foreground: #dbeafe;
+  --color-selection-foreground: #dbeafe;
+  --color-popover-foreground: #ffffff;
+  --color-card-foreground: #ffffff;
+  --color-sidebar-foreground: #ffffff;
+  --focus-ring-color: #ffffff;
+}
+:root[data-contrast="more"] a[href]:not([role]) {
+  text-decoration-line: underline;
+}
+/* Proofreading underlines: darker in light mode, lighter in dark mode. */
+@media (prefers-contrast: more) {
+  :root:not([data-contrast="normal"]) {
+    --text-issue-grammar: #1d4ed8;
+    --text-issue-style: #92400e;
+    --text-issue-other: #374151;
+  }
+  .dark:not([data-contrast="normal"]) {
+    --text-issue-grammar: #93c5fd;
+    --text-issue-style: #fcd34d;
+    --text-issue-other: #e5e7eb;
+  }
+}
+:root[data-contrast="more"] {
+  --text-issue-grammar: #1d4ed8;
+  --text-issue-style: #92400e;
+  --text-issue-other: #374151;
+}
+html.dark[data-contrast="more"] {
+  --text-issue-grammar: #93c5fd;
+  --text-issue-style: #fcd34d;
+  --text-issue-other: #e5e7eb;
+}
+
+/* ---------- Reduced transparency ---------- */
+
+@media (prefers-reduced-transparency: reduce) {
+  :root:not([data-transparency="full"]) * {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+  :root:not([data-transparency="full"]) :is([class*="bg-background/"], [class*="bg-card/"], [class*="bg-popover/"], [class*="bg-sidebar/"], [class*="bg-muted/"]) {
+    background-color: var(--color-background) !important;
+  }
+}
+:root[data-transparency="reduce"] * {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+:root[data-transparency="reduce"] :is([class*="bg-background/"], [class*="bg-card/"], [class*="bg-popover/"], [class*="bg-sidebar/"], [class*="bg-muted/"]) {
+  background-color: var(--color-background) !important;
+}
+
+/* Aurora Glass draws its surfaces as tints that let the gradient behind
+   them show through. With less transparency they take the same tint laid
+   over the page colour, as solid colours. */
+@media (prefers-reduced-transparency: reduce) {
+  :root:not([data-transparency="full"]) body[data-theme-skin="builtin-aurora-glass"] {
+  --color-sidebar-accent: #e1e2fb;
+  --color-selection: #dcdcfc;
+  }
+  :root.dark:not([data-transparency="full"]) body[data-theme-skin="builtin-aurora-glass"] {
+  --color-secondary: #15161d;
+  --color-muted: #12131b;
+  --color-card: #101119;
+  --color-accent: #1b1a35;
+  --color-sidebar-accent: #1e1c3a;
+  --color-selection: #232144;
+  }
+}
+:root[data-transparency="reduce"] body[data-theme-skin="builtin-aurora-glass"] {
+  --color-sidebar-accent: #e1e2fb;
+  --color-selection: #dcdcfc;
+}
+:root.dark[data-transparency="reduce"] body[data-theme-skin="builtin-aurora-glass"] {
+  --color-secondary: #15161d;
+  --color-muted: #12131b;
+  --color-card: #101119;
+  --color-accent: #1b1a35;
+  --color-sidebar-accent: #1e1c3a;
+  --color-selection: #232144;
+}
+
+/* Its glass panes, menus and dialogs, which the skin tints with !important. */
+@media (prefers-reduced-transparency: reduce) {
+  :root:not([data-transparency="full"]) body[data-theme-skin="builtin-aurora-glass"] :is(.bg-card, .bg-popover, [role="menu"], [role="dialog"], [role="listbox"]) {
+    background-color: var(--color-popover) !important;
+  }
+  :root:not([data-transparency="full"]) body[data-theme-skin="builtin-aurora-glass"] :is(.w-14.bg-secondary, .bg-secondary.border-r) {
+    background-color: var(--color-sidebar) !important;
+  }
+}
+:root[data-transparency="reduce"] body[data-theme-skin="builtin-aurora-glass"] :is(.bg-card, .bg-popover, [role="menu"], [role="dialog"], [role="listbox"]) {
+  background-color: var(--color-popover) !important;
+}
+:root[data-transparency="reduce"] body[data-theme-skin="builtin-aurora-glass"] :is(.w-14.bg-secondary, .bg-secondary.border-r) {
+  background-color: var(--color-sidebar) !important;
+}
+
+/* ---------- Large targets (WCAG 2.5.5) ----------
+ *
+ * On a touch screen the components already size themselves (TOUCH_HIT_AREA
+ * and the pointer-coarse: utilities, through the large-targets variant in
+ * theme-inline.css). With "On" and a mouse, the rules below do the same
+ * for controls that carry no such class: buttons, menu items, options,
+ * tabs, tree items and list rows grow to 44px, switches keep their drawn
+ * size and get a 44px hit area around them, checkboxes and radios grow to
+ * 24px and take the rest from their label.
+ */
+:root[data-large-targets="on"] {
+  --touch-row-min-h: 44px;
+}
+:root[data-large-targets="on"] :is(button, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="option"], [role="tab"], [role="treeitem"], [role="row"], [role="checkbox"]:not(input), summary, select):not([role="switch"], [role="separator"], [aria-hidden="true"], [disabled]) {
+  min-height: 44px;
+}
+:root[data-large-targets="on"] :is(button, [role="button"], [role="checkbox"]:not(input)):not([role="switch"], [role="separator"], [aria-hidden="true"]) {
+  min-width: 44px;
+}
+:root[data-large-targets="on"] [role="switch"] {
+  position: relative;
+}
+:root[data-large-targets="on"] [role="switch"]::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: max(100%, 44px);
+  height: max(100%, 44px);
+  transform: translate(-50%, -50%);
+}
+:root[data-large-targets="on"] input:is([type="checkbox"], [type="radio"]) {
+  min-width: 24px;
+  min-height: 24px;
+}
+
+/* ---------- Large cursor ---------- */
+
+:root[data-large-cursor="on"],
+:root[data-large-cursor="on"] body {
+  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40' viewBox='0 0 40 40'%3E%3Cpath d='M4 2 L4 32 L12 25 L18 38 L24 35 L18 23 L29 23 Z' fill='black' stroke='white' stroke-width='2.5' stroke-linejoin='round'/%3E%3C/svg%3E") 4 2, auto;
+}
+:root[data-large-cursor="on"] :is(a[href], button:not(:disabled), [role="button"], [role="link"], [role="tab"], [role="menuitem"], [role="option"], [role="switch"], [role="checkbox"], label, summary, select) {
+  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40' viewBox='0 0 40 40'%3E%3Cpath d='M13 3 a3 3 0 0 1 6 0 V17 l1-1 a3 3 0 0 1 5 2 l1-1 a3 3 0 0 1 5 2 l1-1 a3 3 0 0 1 5 2 V28 c0 5-4 10-10 10 h-5 c-4 0-6-2-8-5 L6 25 a3 3 0 0 1 5-4 l2 2 Z' fill='white' stroke='black' stroke-width='2.5' stroke-linejoin='round'/%3E%3C/svg%3E") 15 2, pointer;
+}
+:root[data-large-cursor="on"] :is(input:not([type="checkbox"], [type="radio"], [type="range"], [type="button"], [type="submit"]), textarea, [contenteditable="true"]) {
+  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40' viewBox='0 0 40 40'%3E%3Cpath d='M14 4 h12 M20 4 V36 M14 36 h12' fill='none' stroke='white' stroke-width='7' stroke-linecap='round'/%3E%3Cpath d='M14 4 h12 M20 4 V36 M14 36 h12' fill='none' stroke='black' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E") 20 20, text;
+}
+
+/* ---------- Forced colours (Windows contrast themes) ----------
+ *
+ * Forced colours replace every background with Canvas and drop box-shadows,
+ * so state drawn only as a tint or a ring disappears. Each state gets a
+ * system colour here instead: selected, pressed and current items take
+ * Highlight with HighlightText (and so does everything inside them, whose own
+ * colours would otherwise be forced back to CanvasText on Highlight), today
+ * gets a frame, switches a border and a solid knob, dots CanvasText. A colour
+ * swatch keeps its own colour (forced-color-adjust on the swatch only),
+ * because the colour is what it shows.
+ */
+@media (forced-colors: active) {
+  :focus-visible:not([tabindex="-1"]:not(a[href], button, input, select, textarea, summary, [contenteditable="true"], [role="button"], [role="link"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="option"], [role="gridcell"], [role="row"], [role="treeitem"], [role="tab"], [role="radio"], [role="checkbox"], [role="switch"], [role="slider"], [role="spinbutton"], [role="columnheader"], [role="rowheader"])) {
+    outline-color: Highlight !important;
+  }
+
+  :is(
+    [aria-selected="true"]:not([role="gridcell"]:has(> button)),
+    [role="gridcell"][aria-selected="true"] > button,
+    [aria-pressed="true"],
+    [aria-current="page"],
+    [aria-current="true"],
+    [aria-current="step"],
+    [aria-current="location"],
+    [data-selected="true"],
+    [data-active="true"],
+    [role="menuitemradio"][aria-checked="true"],
+    [role="radio"][aria-checked="true"]:not(input)
+  ) {
+    /* Not forced, so text inside gets no Canvas backplate; the rules here
+       and below set every colour instead. */
+    forced-color-adjust: none;
+    background-color: Highlight !important;
+    color: HighlightText !important;
+    border-color: HighlightText !important;
+  }
+  :is(
+    [aria-selected="true"]:not([role="gridcell"]:has(> button)),
+    [role="gridcell"][aria-selected="true"] > button,
+    [aria-pressed="true"],
+    [aria-current="page"],
+    [aria-current="true"],
+    [aria-current="step"],
+    [aria-current="location"],
+    [data-selected="true"],
+    [data-active="true"],
+    [role="menuitemradio"][aria-checked="true"],
+    [role="radio"][aria-checked="true"]:not(input)
+  ) *:not(svg *) {
+    color: HighlightText !important;
+    background-color: transparent !important;
+    border-color: HighlightText !important;
+    fill: currentColor;
+  }
+
+  /* Today, this month, this year: a frame, so it stays apart from the
+     selection. */
+  [aria-current="date"] {
+    outline: 2px solid CanvasText;
+    outline-offset: -2px;
+  }
+
+  /* Switches: a track border, and a knob that keeps its fill. On is
+     Highlight with a HighlightText knob on the far side. */
+  [role="switch"] {
+    border: 1px solid ButtonText !important;
+  }
+  [role="switch"] > span {
+    forced-color-adjust: none;
+    background-color: ButtonText !important;
+  }
+  [role="switch"][aria-checked="true"] {
+    background-color: Highlight !important;
+    border-color: Highlight !important;
+  }
+  [role="switch"][aria-checked="true"] > span {
+    background-color: HighlightText !important;
+  }
+
+  /* Unread and status dots, drawn as an empty tinted circle or a filled
+     icon. */
+  .rounded-full:empty:is(.bg-primary, .bg-unread, .bg-success, .bg-destructive, .bg-warning, .bg-info, [class*="bg-red-"], [class*="bg-green-"], [class*="bg-amber-"], [class*="bg-emerald-"], [class*="bg-blue-"], [class*="bg-yellow-"], [class*="bg-orange-"]) {
+    forced-color-adjust: none;
+    background-color: CanvasText !important;
+  }
+  :is(.fill-unread, .fill-primary, .fill-current) {
+    fill: CanvasText;
+  }
+
+  /* Colour swatches: an empty element whose colour is set inline (calendar,
+     tag and theme colours). */
+  :is(span, div, i):empty[style*="background"] {
+    forced-color-adjust: none;
+  }
+
+  /* Calendar events lose their fill; a frame keeps each one apart. */
+  [data-calendar-event] {
+    outline: 1px solid CanvasText;
+    outline-offset: -1px;
+  }
+
+  /* Count badges drawn as a tinted pill (the rail's unread count). */
+  .rounded-full:not(:empty):is(.bg-primary, .bg-destructive, [class*="bg-red-"]) {
+    border: 1px solid CanvasText;
+  }
+}
+
+/* ---------- Simple mode: no side panels ---------- */
+
+:root[data-simple-mode="on"] [data-simple-hide] {
+  display: none !important;
+}
+
+/* Proofreading underlines in forced colours: one colour, so the line styles tell the kinds apart. */
+@media (forced-colors: active) {
+  .tiptap .text-issue {
+    text-decoration-color: CanvasText;
+    text-decoration-thickness: 2px;
+  }
+  .tiptap .text-issue-active {
+    forced-color-adjust: none;
+    background-color: Highlight;
+    color: HighlightText;
+  }
+}

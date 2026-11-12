@@ -1,10 +1,12 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import React from 'react';
 import { EmailComposer } from '../email-composer';
 import { useSettingsStore } from '@/stores/settings-store';
 import { useAuthStore } from '@/stores/auth-store';
 import { useAccountStore } from '@/stores/account-store';
+import { useIdentityStore } from '@/stores/identity-store';
+import { usePolicyStore } from '@/stores/policy-store';
 
 // ─── Heavy component mocks (mirrors recipient-paste.test.tsx) ─────────────────
 
@@ -158,6 +160,14 @@ vi.mock('@/stores/toast-store', () => ({
 }));
 
 vi.mock('@/lib/plugin-hooks', () => ({
+  identityHooks: {
+    onSignatureRender: { size: 0, transform: async (value: unknown) => value },
+    onIdentitySelect: { size: 0, emit: async () => {} },
+  },
+  templateHooks: {
+    onTemplateRender: { size: 0, transform: async (value: unknown) => value },
+    onTemplateApply: { size: 0, emit: async () => {} },
+  },
   emailHooks: {
     onComposerOpen: { call: async () => [] },
     onRecipientChange: { call: async () => [] },
@@ -334,6 +344,45 @@ describe('composer reply addressing', () => {
     }
   });
 
+  // #1353: a GitHub notification names the repo in To; the catch-all alias
+  // it went to is only in Delivered-To.
+  it('rewrites From to the catch-all address the message was delivered to', () => {
+    setAutoSelect(true);
+    try {
+      render(<EmailComposer mode="reply" replyTo={{
+        from: [{ email: 'notifications@github.com', name: 'GitHub' }],
+        to: [{ email: 'repo@noreply.github.com', name: 'owner/repo' }],
+        deliveredTo: ['github@example.com'],
+        subject: 'New issue',
+      }} />);
+      expect(screen.getByDisplayValue('github@example.com')).toBeTruthy();
+    } finally {
+      setAutoSelect(false);
+    }
+  });
+
+  // Stalwart's Delivered-To names the mailbox; the catch-all address in To
+  // is the one the sender wrote to and must keep winning.
+  it('keeps the catch-all address in To ahead of the delivery address', () => {
+    setAutoSelect(true);
+    try {
+      render(<EmailComposer mode="reply" replyTo={{ ...RECEIVED_CATCH_ALL, deliveredTo: ['me@example.com'] }} />);
+      expect(screen.getByDisplayValue('colleague@example.com')).toBeTruthy();
+    } finally {
+      setAutoSelect(false);
+    }
+  });
+
+  it('replies from an identity in Delivered-To while the setting is off', () => {
+    render(<EmailComposer mode="reply" replyTo={{
+      from: [{ email: 'bob@other.com', name: 'Bob' }],
+      to: [{ email: 'list@lists.other.com', name: 'List' }],
+      deliveredTo: ['info@example.com'],
+      subject: 'List mail',
+    }} />);
+    expect(identitySelect().value).toBe('id-info');
+  });
+
   // #1000: on a domain whose other addresses are distribution lists rather
   // than catch-all aliases, the setting can stay on but limited to configured
   // identities, so a reply to list@ gets no From override.
@@ -346,6 +395,24 @@ describe('composer reply addressing', () => {
       expect(identitySelect().value).toBe('id-me');
     } finally {
       settings.setState({ autoSelectReplyIdentity: false, replyIdentityMatch: 'domain' });
+    }
+  });
+
+  // The admin's custom From gate takes the rewrite away even when the user
+  // asked for domain matching.
+  it('does not rewrite From when the admin turned custom From off', () => {
+    const setCustomFrom = (on: boolean) => usePolicyStore.setState((state) => ({
+      policy: { ...state.policy, features: { ...state.policy.features, customFromEnabled: on } },
+    }));
+    setAutoSelect(true);
+    setCustomFrom(false);
+    try {
+      render(<EmailComposer mode="reply" replyTo={RECEIVED_CATCH_ALL} />);
+      expect(screen.queryByDisplayValue('colleague@example.com')).toBeNull();
+      expect(identitySelect().value).toBe('id-me');
+    } finally {
+      setAutoSelect(false);
+      setCustomFrom(true);
     }
   });
 
@@ -461,6 +528,77 @@ describe('composer reply addressing', () => {
       render(<EmailComposer mode="reply" replyTo={{ ...TO_ALIAS, to: [{ email: 'info@example.com' }], accountId: 'owner-jmap-id' }} />);
       expect(identitySelect().value).toBe('local-1::id-info');
     });
+
+    // Mail one connected account sent to another was received by the second:
+    // the reply goes back to the sender, from the address that received it.
+    it('answers mail another connected account sent here like received mail', () => {
+      render(
+        <EmailComposer
+          mode="reply"
+          replyTo={{
+            from: [{ email: 'login@elsewhere.net', name: 'Login' }],
+            to: [{ email: 'info@example.com', name: 'Info' }],
+            subject: 'Booking',
+            accountId: 'local-1',
+          }}
+        />,
+      );
+      expect(toChips()).toEqual(['Login (login@elsewhere.net)']);
+      expect(identitySelect().value).toBe('local-1::id-info');
+    });
+  });
+});
+
+// #803: identities load from the server after the app starts and aren't
+// persisted. A reply-all opened before they arrive used to keep our own
+// address in To, and nothing fixed it once they loaded.
+describe('reply-all before identities have loaded', () => {
+  const identityStore = useIdentityStore as unknown as {
+    getState: () => { identities: unknown[] };
+    setState: (p: Record<string, unknown>) => void;
+  };
+  const accountStore = useAccountStore as unknown as { setState: (p: Record<string, unknown>) => void };
+  const authStore = useAuthStore as unknown as { setState: (p: Record<string, unknown>) => void };
+  let loaded: unknown[];
+
+  beforeEach(() => {
+    loaded = identityStore.getState().identities;
+    identityStore.setState({ identities: [] });
+  });
+
+  afterEach(() => {
+    identityStore.setState({ identities: loaded });
+    accountStore.setState({ accounts: [] });
+    authStore.setState({ activeAccountId: null });
+  });
+
+  it('drops our own address using the account address', () => {
+    accountStore.setState({
+      accounts: [{ id: 'local-1', email: 'me@example.com', username: 'me@example.com', isConnected: true }],
+    });
+    authStore.setState({ activeAccountId: 'local-1' });
+    render(<EmailComposer mode="replyAll" replyTo={RECEIVED} />);
+    expect(toChips()).toEqual(['Bob (bob@other.com)', 'Carol (carol@other.com)']);
+  });
+
+  it('drops our own address once the identities arrive', () => {
+    const { rerender } = render(<EmailComposer mode="replyAll" replyTo={RECEIVED} />);
+    expect(toChips()).toContain('Me (me@example.com)');
+    identityStore.setState({ identities: loaded });
+    rerender(<EmailComposer mode="replyAll" replyTo={RECEIVED} />);
+    expect(toChips()).toEqual(['Bob (bob@other.com)', 'Carol (carol@other.com)']);
+    expect(ccChips()).toEqual(['Dave (dave@other.com)']);
+  });
+
+  it('leaves the recipients alone once the user has changed them', () => {
+    const { rerender } = render(<EmailComposer mode="replyAll" replyTo={RECEIVED} />);
+    const carol = Array.from(screen.getByTestId('composer-to').querySelectorAll('[draggable]'))
+      .find((el) => el.textContent?.includes('carol@other.com')) as HTMLElement;
+    fireEvent.click(carol.querySelector('button') as HTMLElement);
+    expect(toChips()).toEqual(['Bob (bob@other.com)', 'Me (me@example.com)']);
+    identityStore.setState({ identities: loaded });
+    rerender(<EmailComposer mode="replyAll" replyTo={RECEIVED} />);
+    expect(toChips()).toEqual(['Bob (bob@other.com)', 'Me (me@example.com)']);
   });
 });
 

@@ -9,6 +9,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 const isString: Validator<string> = (value): value is string => typeof value === 'string';
+const isOptionalString: Validator<string | undefined> = (value): value is string | undefined => value === undefined || typeof value === 'string';
+const isOptionalBoolean: Validator<boolean | undefined> = (value): value is boolean | undefined => value === undefined || typeof value === 'boolean';
 const isBoolean: Validator<boolean> = (value): value is boolean => typeof value === 'boolean';
 
 function isJmapServers(value: unknown): value is PublicJmapServerEntry[] {
@@ -29,6 +31,9 @@ function isJmapServers(value: unknown): value is PublicJmapServerEntry[] {
 const configValidators = {
   identityManagementEnabled: isBoolean,
   calendarEnabled: isBoolean,
+  privateCalendarEnabled: isOptionalBoolean,
+  privateContactsEnabled: isOptionalBoolean,
+  privateFilesEnabled: isOptionalBoolean,
   contactsEnabled: isBoolean,
   filesEnabled: isBoolean,
   appsEnabled: isBoolean,
@@ -47,6 +52,7 @@ const configValidators = {
   oauthClientId: isString,
   oauthIssuerUrl: isString,
   oauthScopes: isString,
+  oauthResource: isString,
   rememberMeEnabled: isBoolean,
   settingsSyncEnabled: isBoolean,
   stalwartFeaturesEnabled: isBoolean,
@@ -61,12 +67,16 @@ const configValidators = {
   loginImprintUrl: isString,
   loginPrivacyPolicyUrl: isString,
   loginWebsiteUrl: isString,
+  buildersWebsiteUrl: isOptionalString,
+  loginUsernamePlaceholder: isString,
+  hostedInboxLogoutDestination: isOptionalString,
   loginLogoMaxHeight: isString,
   loginLogoMaxWidth: isString,
   loginShowHeading: isBoolean,
   loginShowSubtitle: isBoolean,
   loginShowTotp: isBoolean,
   loginShowTokenLogin: isBoolean,
+  loginShowRememberMe: isBoolean,
   loginShowVersion: isBoolean,
   demoMode: isBoolean,
   autoSsoEnabled: isBoolean,
@@ -76,6 +86,22 @@ const configValidators = {
   embeddedMode: isBoolean,
   parentOrigin: isString,
   sourceCodeUrl: isString,
+  accessibilityStatementUrl: isString,
+  accessibilityFeedbackUrl: isString,
+  helpUrl: isString,
+  easyReadUrl: isString,
+  signLanguageUrl: isString,
+  noThirdPartyTraffic: isBoolean,
+  // Lite only (lib/lite-config.ts); the server's response leaves it out.
+  oauthRevokeOnSignOut: (value): value is boolean | undefined => value === undefined || typeof value === 'boolean',
+  // Absent from Lite's config and from servers before 1.20.
+  errorReporting: (value): value is ConfigData['errorReporting'] => value === undefined || (
+    isRecord(value)
+    && typeof value.dsn === 'string'
+    && typeof value.sampleRate === 'number'
+    && typeof value.environment === 'string'
+    && typeof value.collect === 'boolean'
+  ),
 } satisfies Validators<ConfigData>;
 
 /**
@@ -91,6 +117,24 @@ export function httpUrlOrEmpty(value: unknown): string {
   } catch {
     return '';
   }
+}
+
+const EMAIL_RE = /^[^\s@<>()"',;:\\/?#]+@[^\s@<>()"',;:\\/?#]+\.[^\s@<>()"',;:\\/?#]+$/;
+
+/**
+ * An absolute http(s) URL, a mailto: link, or an email address made into
+ * one; '' for anything else. For links that may point at a mailbox, such
+ * as the accessibility feedback address.
+ */
+export function httpOrMailtoOrEmpty(value: unknown): string {
+  const url = httpUrlOrEmpty(value);
+  if (url || typeof value !== 'string') return url;
+  const trimmed = value.trim();
+  if (/^mailto:/i.test(trimmed)) {
+    const address = trimmed.slice('mailto:'.length).split('?')[0];
+    return EMAIL_RE.test(address) ? trimmed : '';
+  }
+  return EMAIL_RE.test(trimmed) ? `mailto:${trimmed}` : '';
 }
 
 /** Validate the server's complete response without rewriting configured values. */

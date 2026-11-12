@@ -1,6 +1,7 @@
 import { isValidEmail } from "@/lib/validation";
 import { splitMailbox } from "@/lib/rfc5322-mailbox";
 import { htmlToPlainText } from "@/lib/html-to-text";
+import { hasMeaningfulHtmlBody } from "@/lib/signature-utils";
 import { emailHooks } from "@/lib/plugin-hooks";
 import { Ellipsis, Lock, TriangleAlert } from "@/components/icons";
 import type { Email } from "@/lib/jmap/types";
@@ -48,9 +49,14 @@ export function getQuoteBodies(
   const body = textValue
     ? (textPartIsHtml ? htmlToPlainText(textValue, { paragraphSpacing: true }) : textValue)
     : (email.preview || "");
+  // Like the viewer (getRenderableHtmlBody): an HTML part that is only a bare
+  // wrapper around the text, next to a real text part, often has no <br>, so
+  // quoting it would run every line together. Quote the text part instead.
+  const bareHtmlBesideText = !!htmlValue && !!textValue && !textPartIsHtml
+    && textPart?.partId !== htmlPart?.partId && !hasMeaningfulHtmlBody(htmlValue);
   return {
     body,
-    htmlBody: htmlPartIsHtml ? htmlValue || undefined : undefined,
+    htmlBody: htmlPartIsHtml && !bareHtmlBesideText ? htmlValue || undefined : undefined,
   };
 }
 
@@ -383,9 +389,9 @@ export function parseRecipient(s: string): Recipient {
       const members = splitRecipients(trimmed.slice(colon + 1, -1))
         .map(parseRecipient)
         .filter((m) => m.email && !m.group);
-      // Only accept the group form when it actually carries members - typed
-      // garbage like "Subject: hello;" stays a plain (invalid) recipient.
-      if (members.length > 0) {
+      // Only accept the group form when at least one member is an address -
+      // typed garbage like "Subject: hello;" stays a plain (invalid) recipient.
+      if (members.some((m) => isValidEmail(m.email))) {
         return { name: unquoteName(trimmed.slice(0, colon)), email: '', group: { members } };
       }
     }
@@ -395,6 +401,24 @@ export function parseRecipient(s: string): Recipient {
     return { name: unquoteName(angleMatch[1]), email: angleMatch[2].trim() };
   }
   return { email: trimmed };
+}
+
+/**
+ * The autocomplete suggestion Enter or Tab takes when the user has not moved
+ * the highlight with the arrow keys. A complete address the user typed wins:
+ * its own suggestion when one matches (so the display name comes along),
+ * otherwise -1, meaning "add what was typed". Anything else takes the top
+ * suggestion, so "user" + Enter never becomes a recipient called "user".
+ */
+export function defaultSuggestionIndex(input: string, suggestions: Array<{ email: string }>): number {
+  const typed = input.trim();
+  if (!typed || suggestions.length === 0) return -1;
+  const { email } = parseRecipient(typed);
+  if (isValidEmail(email)) {
+    const lower = email.toLowerCase();
+    return suggestions.findIndex((s) => s.email.toLowerCase() === lower);
+  }
+  return 0;
 }
 
 /** Parses a serialized comma-separated recipient string into an array. */
@@ -442,6 +466,18 @@ export function expandRecipients(recipients: Recipient[]): Recipient[] {
     }
   }
   return out;
+}
+
+/**
+ * The entries of `recipients` that are not email addresses, group members
+ * included. Sending any of them puts a malformed mailbox into the header,
+ * which relays reject only after the whole message went through (#795).
+ */
+export function invalidRecipientAddresses(recipients: Recipient[]): string[] {
+  return recipients
+    .flatMap((r) => (r.group ? r.group.members : [r]))
+    .filter((r) => !isValidEmail(r.email))
+    .map((r) => r.email);
 }
 
 /**

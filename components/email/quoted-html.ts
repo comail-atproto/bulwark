@@ -2,11 +2,14 @@
 
 import { Node as TiptapNode, mergeAttributes } from "@tiptap/core";
 import { DOMSerializer } from "@tiptap/pm/model";
+import { NodeSelection, Plugin, PluginKey, Selection, TextSelection } from "@tiptap/pm/state";
 import type { Editor } from "@tiptap/react";
 
+import { addParagraphSpacing, addTrailingParagraphBreaks } from "@/components/email/paragraph-breaks";
 import { buildSignatureBlock } from "@/components/email/signature-block";
-import { parkRemoteResources, restoreRemoteResources } from "@/lib/email-sanitization";
+import { parkRemoteResources, restoreRemoteResources, sanitizeComposerIslandHtml } from "@/lib/email-sanitization";
 import { useSettingsStore } from "@/stores/settings-store";
+import { remoteContentHeldBackAnywhere } from "@/hooks/use-third-party-mode";
 
 // Marker attribute that identifies the quoted-original wrapper in serialized
 // HTML, so parseHTML can recognise it on the way back in.
@@ -17,9 +20,19 @@ export const QUOTED_HTML_MARKER = "data-quoted-html";
 // serializeEditorContent never emits it.
 const QUOTED_REMOTE_ALLOWED_ATTR = "data-quoted-remote";
 
+// Atom blocks typing must never replace just because they were left selected.
+const ATOM_BLOCKS = new Set(["quotedHtml", "signatureBlock"]);
+
 // Reusable style for the quote bar when quoting email text (like in a reply).
 const QUOTE_BAR_STYLE =
   "border-left:2px solid #c5c5c5;padding-left:12px;margin-top:8px;";
+
+// Editor-only, never serialized into the sent mail: the quoted original is a
+// sender's HTML rendered in the app document (the shadow root isolates its
+// styles, not its layout), so a `position:fixed` element in it would cover
+// the composer and the app with whatever the sender drew. `contain:paint`
+// with a positioned, clipping box confines painting to the quote's own box.
+const QUOTE_ISLAND_CONTAINMENT_STYLE = "position:relative;overflow:hidden;contain:paint;";
 
 /**
  * QuotedHtml — an atomic block node that carries the *verbatim* HTML of a
@@ -49,12 +62,18 @@ export const QuotedHtml = TiptapNode.create({
 
   addAttributes() {
     return {
+      showQuoteBorder: {
+        default: true,
+        parseHTML: (el) => el.getAttribute("data-quote-border") !== "false",
+        renderHTML: (attrs) => attrs.showQuoteBorder === false ? { "data-quote-border": "false" } : {},
+      },
       html: {
         default: "",
         // Capture the verbatim inner HTML when parsing. Because the node is
         // an atom, ProseMirror does NOT descend into the children, so they
-        // never hit the schema.
-        parseHTML: (el) => el.innerHTML,
+        // never hit the schema - nor its attribute allowlist, so sanitize
+        // here: a re-opened draft hands this wrapper in unsanitized.
+        parseHTML: (el) => sanitizeComposerIslandHtml(el.innerHTML),
         // Not rendered as an attribute - the real content round-trips via the
         // custom serializer. renderHTML below only needs the wrapper.
         renderHTML: () => ({}),
@@ -71,6 +90,47 @@ export const QuotedHtml = TiptapNode.create({
     return [{ tag: `div[${QUOTED_HTML_MARKER}]` }];
   },
 
+  addProseMirrorPlugins() {
+    // Set once the user put the caret somewhere (click, tap) or the editor
+    // already had focus, so later focus keeps that position.
+    let placedByUser = false;
+    const markPlaced = () => {
+      placedByUser = true;
+      return false;
+    };
+    return [
+      new Plugin({
+        key: new PluginKey("quotedHtmlFocus"),
+        props: {
+          handleDOMEvents: {
+            mousedown: markPlaced,
+            touchstart: markPlaced,
+            // Where the editor's selection rests before the user touched it
+            // is an accident of how the body was built: on the quote (or
+            // signature) as a node in a reply, where the first key typed
+            // replaced the whole block, or after the signature in a new
+            // message. Focus from the keyboard puts the caret at the start
+            // instead; a click still lands where it was aimed, because
+            // ProseMirror handles the click after the focus event.
+            focus: (view) => {
+              const { selection, doc } = view.state;
+              const onAtom = selection instanceof NodeSelection
+                && ATOM_BLOCKS.has(selection.node.type.name);
+              if (onAtom || !placedByUser) {
+                const start = Selection.atStart(doc);
+                if (start instanceof TextSelection && !start.eq(selection)) {
+                  view.dispatch(view.state.tr.setSelection(start));
+                }
+              }
+              placedByUser = true;
+              return false;
+            },
+          },
+        },
+      }),
+    ];
+  },
+
   renderHTML({ HTMLAttributes }) {
     // Only used for ProseMirror's internal/clipboard round-trip. The send /
     // draft path uses serializeEditorContent() which inlines attrs.html.
@@ -84,7 +144,11 @@ export const QuotedHtml = TiptapNode.create({
       const dom = document.createElement("div");
       dom.setAttribute(QUOTED_HTML_MARKER, "");
       dom.className = "quoted-html-island";
-      dom.style.cssText = QUOTE_BAR_STYLE;
+      const updateQuoteStyle = (showBorder: boolean) => {
+        dom.style.cssText = (showBorder ? QUOTE_BAR_STYLE : "margin-top:8px;")
+          + QUOTE_ISLAND_CONTAINMENT_STYLE;
+      };
+      updateQuoteStyle(node.attrs.showQuoteBorder !== false);
 
       // CRITICAL: render the quoted email inside a Shadow Root. The app's
       // global CSS (Tailwind preflight, .tiptap table/td rules, box-sizing
@@ -103,8 +167,13 @@ export const QuotedHtml = TiptapNode.create({
       // content, its images and backgrounds are parked so opening a reply
       // doesn't fire the trackers the viewer held back. Parking is
       // display-only - the html attribute (what gets sent) keeps them.
-      const blockRemote =
-        !node.attrs.remoteAllowed && useSettingsStore.getState().externalContentPolicy !== "allow";
+      // A draft re-opened after the organisation blocked remote content (or
+      // before its policy loaded) keeps its quote parked, whatever the
+      // wrapper remembered from when the draft was started.
+      // The draft doesn't say which account it quotes: held back in any
+      // signed-in account keeps it parked.
+      const blockRemote = remoteContentHeldBackAnywhere()
+        || (!node.attrs.remoteAllowed && useSettingsStore.getState().externalContentPolicy !== "allow");
       let renderedHtml = "";
       const render = (html: string) => {
         renderedHtml = html;
@@ -164,6 +233,7 @@ export const QuotedHtml = TiptapNode.create({
         },
         update: (updatedNode) => {
           if (updatedNode.type.name !== "quotedHtml") return false;
+          updateQuoteStyle(updatedNode.attrs.showQuoteBorder !== false);
           // Don't clobber the caret while the user is redacting inside.
           if (!focused && (updatedNode.attrs.html || "") !== renderedHtml) {
             render(updatedNode.attrs.html || "");
@@ -189,13 +259,24 @@ export const QuotedHtml = TiptapNode.create({
  */
 export function serializeEditorContent(editor: Editor): string {
   const serializer = DOMSerializer.fromSchema(editor.schema);
+  // Built in an inert document: an <img> made in the app document starts
+  // loading at once, so serialising (on every change) fired every remote
+  // image of the content, also while remote content is blocked.
+  const inert = document.implementation.createHTMLDocument("");
   const parts: string[] = [];
-  editor.state.doc.forEach((node) => {
+  // Empty paragraphs at the very end (the editor keeps one after a quote)
+  // stay invisible; every other empty line gets a <br> so it keeps its
+  // height in the recipient's client (#1015).
+  let lastLine = -1;
+  editor.state.doc.forEach((node, _offset, index) => {
+    if (node.type.name !== "paragraph" || node.childCount > 0) lastLine = index;
+  });
+  editor.state.doc.forEach((node, _offset, index) => {
     if (node.type.name === "quotedHtml") {
       // Emit the SAME wrapper buildQuotedHtmlBlock produces, so a saved draft
       // round-trips: re-opening parses this back into a QuotedHtml node
       // instead of letting the schema mangle the raw table layout again.
-      parts.push(buildQuotedHtmlBlock((node.attrs.html as string) || ""));
+      parts.push(buildQuotedHtmlBlock((node.attrs.html as string) || "", { showQuoteBorder: node.attrs.showQuoteBorder !== false }));
       return;
     }
     if (node.type.name === "signatureBlock") {
@@ -205,9 +286,11 @@ export function serializeEditorContent(editor: Editor): string {
       parts.push(buildSignatureBlock((node.attrs.html as string) || ""));
       return;
     }
-    const fragment = serializer.serializeNode(node);
-    const tmp = document.createElement("div");
+    const fragment = serializer.serializeNode(node, { document: inert });
+    const tmp = inert.createElement("div");
     tmp.appendChild(fragment);
+    if (index <= lastLine) addTrailingParagraphBreaks(tmp);
+    addParagraphSpacing(tmp);
     parts.push(tmp.innerHTML);
   });
   return parts.join("");
@@ -223,8 +306,32 @@ export function serializeEditorContent(editor: Editor): string {
  */
 export function buildQuotedHtmlBlock(
   sanitizedInnerHtml: string,
-  opts: { remoteAllowed?: boolean } = {},
+  opts: { remoteAllowed?: boolean; showQuoteBorder?: boolean } = {},
 ): string {
+  const showQuoteBorder = opts.showQuoteBorder !== false;
+  let html = sanitizedInnerHtml;
+  if (!showQuoteBorder) {
+    // Outlook-style replies flatten quote levels, including earlier replies.
+    // Work on sanitized DOM so tables, links and signatures remain intact.
+    // A template's content is inert: parsed into a plain div, the original's
+    // remote images would load here, past the parking the island does.
+    const container = document.createElement("template");
+    container.innerHTML = html;
+    const content = container.content;
+    content.querySelectorAll("blockquote").forEach((quote) => {
+      const block = content.ownerDocument.createElement("div");
+      block.append(...Array.from(quote.childNodes));
+      quote.replaceWith(block);
+    });
+    content.querySelectorAll<HTMLElement>(`[${QUOTED_HTML_MARKER}]`).forEach((quote) => {
+      quote.setAttribute("data-quote-border", "false");
+      quote.style.borderLeft = "none";
+      quote.style.paddingLeft = "0";
+    });
+    html = container.innerHTML;
+  }
   const remote = opts.remoteAllowed ? ` ${QUOTED_REMOTE_ALLOWED_ATTR}="allowed"` : "";
-  return `<div ${QUOTED_HTML_MARKER}${remote} style="${QUOTE_BAR_STYLE}">${sanitizedInnerHtml}</div>`;
+  const borderAttribute = showQuoteBorder ? "" : ' data-quote-border="false"';
+  const style = showQuoteBorder ? QUOTE_BAR_STYLE : "margin-top:8px;";
+  return `<div ${QUOTED_HTML_MARKER}${remote}${borderAttribute} style="${style}">${html}</div>`;
 }

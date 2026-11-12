@@ -2,13 +2,18 @@
 
 import { useState, useCallback, useMemo, useEffect } from "react";
 import { cn } from "@/lib/utils";
+import { ShieldAlert } from "@/components/icons";
+import { getLuminance, parseColor } from "@/lib/color-transform";
 import { useSettingsStore } from "@/stores/settings-store";
-import { useContactStore, getContactPhotoUri } from "@/stores/contact-store";
+import { useContactStore, getContactPhotoIndex, type ContactPhotoRef } from "@/stores/contact-store";
 import { useConfig } from "@/hooks/use-config";
+import { useContactPhotoSrc } from "@/hooks/use-contact-photo";
 import { avatarHooks } from "@/lib/plugin-hooks";
 import { withBasePath } from "@/lib/browser-navigation";
-import { resolveAtprotoAvatar } from "@/lib/atproto-avatar";
 import { IS_LITE } from "@/lib/lite";
+import { avatarUrlAllowed, sampleAvatarsAllowed, senderFaviconsAllowed } from "@/lib/outgoing-hosts";
+import { useNoThirdPartyTraffic } from "@/hooks/use-third-party-mode";
+import { useFaviconRefreshStore, failedFaviconDomains, failedBrandDomains } from "@/stores/favicon-refresh-store";
 
 const IS_DEV = process.env.NODE_ENV !== "production";
 
@@ -64,9 +69,6 @@ function getRootDomain(domain: string): string {
   return parts.slice(-2).join(".");
 }
 
-// Module-level cache of domains whose favicons failed to load.
-// Shared across all Avatar instances to avoid re-requesting known-bad domains.
-const failedFaviconDomains = new Set<string>();
 // Personal email domains where the favicon is the mail provider logo, not the sender
 const PERSONAL_DOMAINS = new Set([
   "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com",
@@ -125,39 +127,28 @@ const CUSTOM_AVATARS: Record<string, string> = IS_DEV ? {
   "carol@example.com": "https://randomuser.me/api/portraits/thumb/women/68.jpg",
 } : {};
 
-// Mock-server-only: for personal-domain emails, deterministically pick a
-// randomuser.me portrait. Returns null for ~30% of addresses so not everyone
-// has a photo.
-//
-// The randomuser.me literal is wrapped in an IS_DEV ternary (not just the
-// runtime `devMode` guard) so that a production build folds the whole
-// expression to `null` and strips the external URL from the bundle — no
-// external call to randomuser.me survives in prod (issue #1768).
+// Mock-server-only: for personal-domain emails, deterministically pick a randomuser.me portrait.
+// Returns null for ~30% of addresses so not everyone has a photo.
 function getProfilePictureUrl(email: string, domain: string, devMode: boolean, name?: string): string | null {
-  if (!devMode) return null;
+  if (!devMode || !sampleAvatarsAllowed()) return null;
   if (!PERSONAL_DOMAINS.has(domain)) return null;
   const h = emailHash(email);
   if (h % 10 < 3) return null; // ~30% get no photo
   const gender = inferGender(name, h);
   const id = h % 100;
-  // IS_DEV gates the randomuser.me literal on the same line so the bundler's
-  // dead-code elimination folds it away in production (issue #1768). Keeping
-  // the ternary on one line lets the prod-bundle test's line-walk find the
-  // `IS_DEV ?` opener above the host reference.
+  // Remove sample portrait URLs from production bundles.
   return IS_DEV ? `https://randomuser.me/api/portraits/thumb/${gender}/${id}.jpg` : null;
 }
 
 interface AvatarProps {
   name?: string;
   email?: string;
-  contactPhotoUri?: string;
   /**
-   * atproto DID of the account this avatar represents. When present (and not in
-   * demo mode) the member's Bluesky profile photo is resolved from the public
-   * appview and used as the default account avatar, ahead of every other image
-   * source. Fetch failures fall through to the rest of the chain / initials.
+   * The photo of the contact this avatar stands for (see getContactPhotoRef).
+   * Left undefined, the email is looked up among the contacts; null means the
+   * contact has no photo, so no other card's photo is borrowed.
    */
-  did?: string;
+  contactPhoto?: ContactPhotoRef | null;
   size?: "sm" | "md" | "lg";
   className?: string;
   /** When true, suppress all image sources (favicons, plugin avatars, profile pics, contact photos) and render initials only. */
@@ -166,17 +157,47 @@ interface AvatarProps {
   disableFavicon?: boolean;
   /** Background color used when no image source resolves. Overrides the hash-based default. */
   fallbackColor?: string;
+  /**
+   * The message's sender check failed (see useSenderWarning): show a warning
+   * shield with this label instead of any image or the initials, so a forged
+   * From doesn't get the real sender's logo or photo (#1439).
+   */
+  senderWarning?: string;
+  /**
+   * The From domain of a message that passed DMARC for it (see
+   * brandIndicatorDomain): its BIMI logo, when it publishes one, comes before
+   * every source but a contact photo.
+   */
+  brandDomain?: string;
 }
 
-export function Avatar({ name, email, contactPhotoUri, did, size = "md", className, disableImages = false, disableFavicon = false, fallbackColor }: AvatarProps) {
+/**
+ * White or black initials, whichever contrasts more with the background.
+ * One of the two always reaches 4.58:1, so the initials pass 4.5:1 on every
+ * generated colour (white alone failed on yellows and greens).
+ */
+function initialsColor(background: string): string {
+  const rgb = parseColor(background);
+  if (!rgb) return '#ffffff';
+  const l = getLuminance(rgb.r, rgb.g, rgb.b);
+  return 1.05 / (l + 0.05) >= (l + 0.05) / 0.05 ? '#ffffff' : '#000000';
+}
+
+export function Avatar({ name, email, contactPhoto, size = "md", className, disableImages = false, disableFavicon = false, fallbackColor, senderWarning, brandDomain }: AvatarProps) {
   const [imgError, setImgError] = useState(false);
+  // The BIMI logo of this domain answered with no logo (or didn't load).
+  const [failedBrand, setFailedBrand] = useState<string | null>(null);
   const [pluginAvatarUrl, setPluginAvatarUrl] = useState<string | null>(null);
   const [pluginAvatarFailed, setPluginAvatarFailed] = useState(false);
-  const [atprotoAvatarUrl, setAtprotoAvatarUrl] = useState<string | null>(null);
-  const [atprotoAvatarFailed, setAtprotoAvatarFailed] = useState(false);
+  // A contact photo that downloaded but would not render (an SVG made inert,
+  // corrupt bytes) falls through to the next source instead of an empty circle.
+  const [failedContactPhoto, setFailedContactPhoto] = useState<string | null>(null);
   const senderFavicons = useSettingsStore((s) => s.senderFavicons);
+  const faviconRefreshedAt = useFaviconRefreshStore((s) => s.refreshedAt);
   const contacts = useContactStore((s) => s.contacts);
-  const { devMode, demoMode } = useConfig();
+  const { devMode } = useConfig();
+  // Re-render when the config arrives: until then nothing outside is asked (#903).
+  useNoThirdPartyTraffic();
 
   // Ask plugins (e.g. Gravatar) to resolve an avatar URL for this email address.
   // Runs whenever email or name changes; resets plugin avatar state on each change.
@@ -185,48 +206,27 @@ export function Avatar({ name, email, contactPhotoUri, did, size = "md", classNa
     setPluginAvatarFailed(false);
     if (!email || avatarHooks.onAvatarResolve.size === 0) return;
     let cancelled = false;
-    avatarHooks.onAvatarResolve
-      .transform(null as string | null, { email, name })
+    avatarHooks.onAvatarResolve.transform(null as string | null, { email, name })
       .then((url) => { if (!cancelled) setPluginAvatarUrl(url); })
       .catch(() => { if (!cancelled) setPluginAvatarFailed(true); });
     return () => { cancelled = true; };
   }, [email, name]);
 
-  // Resolve the member's atproto (Bluesky) profile photo from the public
-  // appview when a DID is supplied. Non-blocking and fail-open: on any error
-  // (or absent avatar) we mark it failed and fall through to the rest of the
-  // chain. Skipped entirely in demo mode so the demo never hits the appview.
-  // The resolver caches per-DID, so this does not refetch on every render.
-  useEffect(() => {
-    setAtprotoAvatarUrl(null);
-    setAtprotoAvatarFailed(false);
-    if (!did || demoMode) return;
-    let cancelled = false;
-    resolveAtprotoAvatar(did)
-      .then((url) => {
-        if (cancelled) return;
-        if (url) setAtprotoAvatarUrl(url);
-        else setAtprotoAvatarFailed(true);
-      })
-      .catch(() => { if (!cancelled) setAtprotoAvatarFailed(true); });
-    return () => { cancelled = true; };
-  }, [did, demoMode]);
+  // The caller's contact photo, else the photo of a contact with this address.
+  const photoRef = useMemo(() => {
+    if (disableImages) return null;
+    if (contactPhoto !== undefined) return contactPhoto;
+    if (!email) return null;
+    return getContactPhotoIndex(contacts).get(email.toLowerCase()) ?? null;
+  }, [disableImages, contactPhoto, email, contacts]);
+  const { src: contactPhotoSrc, observe } = useContactPhotoSrc(photoRef);
+  const resolvedContactPhoto = contactPhotoSrc && contactPhotoSrc !== failedContactPhoto && avatarUrlAllowed(contactPhotoSrc) ? contactPhotoSrc : undefined;
 
-  // Look up contact photo by email from the contact store
-  const resolvedContactPhoto = useMemo(() => {
-    if (contactPhotoUri) return contactPhotoUri;
-    if (!email) return undefined;
-    const lowerEmail = email.toLowerCase();
-    for (const contact of contacts) {
-      if (!contact.emails) continue;
-      for (const e of Object.values(contact.emails)) {
-        if (e.address.toLowerCase() === lowerEmail) {
-          return getContactPhotoUri(contact);
-        }
-      }
-    }
-    return undefined;
-  }, [contactPhotoUri, email, contacts]);
+  // A refresh of the sender icons gives a failed favicon another chance.
+  useEffect(() => {
+    setImgError(false);
+    setFailedBrand(null);
+  }, [faviconRefreshedAt]);
 
   const domain = email?.split("@")[1]?.toLowerCase();
   // Use root domain for favicon lookups (e.g. newsletter.example.com → example.com)
@@ -269,29 +269,42 @@ export function Avatar({ name, email, contactPhotoUri, did, size = "md", classNa
     md: "w-10 h-10 text-sm",
     lg: "w-12 h-12 text-base",
   };
+  const warningIconClasses = {
+    sm: "w-4 h-4",
+    md: "w-5 h-5",
+    lg: "w-6 h-6",
+  };
 
   const profilePic = email && domain ? getProfilePictureUrl(email, domain, devMode, name) : null;
-  // Sender favicons come from the /api/favicon proxy, absent in the static build.
+  // Sender favicons come from the /api/favicon proxy, absent in the static
+  // build and off while third-party traffic is (#903).
   const showFavicon =
-    !IS_LITE && !disableFavicon && senderFavicons && faviconDomain && !PERSONAL_DOMAINS.has(faviconDomain) && !imgError && !domainFailed;
+    !IS_LITE && senderFaviconsAllowed() && !disableFavicon && senderFavicons && faviconDomain && !PERSONAL_DOMAINS.has(faviconDomain) && !imgError && !domainFailed;
 
-  // Priority: [per-app override slot — F8b, not yet implemented] > atproto
-  // profile photo > contact photo > plugin avatar (e.g. Gravatar) > custom
-  // avatar > profile picture > company favicon > initials.
-  // The override slot is intentionally left ahead of the atproto step so a
-  // later per-app avatar upload can precede it without reordering the chain.
-  const customAvatar = devMode && email ? CUSTOM_AVATARS[email.toLowerCase()] : null;
-  const pluginAvatar = pluginAvatarFailed ? null : pluginAvatarUrl;
-  const atprotoAvatar = atprotoAvatarFailed ? null : atprotoAvatarUrl;
-  const photoSrc = atprotoAvatar || resolvedContactPhoto || pluginAvatar || customAvatar || profilePic || null;
-  const faviconSrc = !imgError && !domainFailed && showFavicon ? withBasePath(`/api/favicon?domain=${encodeURIComponent(faviconDomain!)}`) : null;
+  // Priority: contact photo > BIMI logo > plugin avatar (e.g. Gravatar) > custom avatar > profile picture > company favicon > initials
+  const customAvatar = devMode && email && sampleAvatarsAllowed() ? CUSTOM_AVATARS[email.toLowerCase()] : null;
+  // Gravatar and the like are outside hosts: initials instead in the no-third-party mode.
+  const pluginAvatar = pluginAvatarFailed || !avatarUrlAllowed(pluginAvatarUrl) ? null : pluginAvatarUrl;
+  // BIMI logos come from /api/bimi under the same switches as favicons, and
+  // only for the address shown: a thread row may show another participant
+  // than the message whose DMARC pass named the domain.
+  const showBrand =
+    !IS_LITE && senderFaviconsAllowed() && senderFavicons && !!brandDomain && domain === brandDomain && brandDomain !== failedBrand && !failedBrandDomains.has(brandDomain);
+  const brandSrc = showBrand ? withBasePath(`/api/bimi?domain=${encodeURIComponent(brandDomain!)}${faviconRefreshedAt ? `&v=${faviconRefreshedAt}` : ""}`) : null;
+  const photoSrc = resolvedContactPhoto || brandSrc || pluginAvatar || customAvatar || profilePic || null;
+  const faviconSrc = !imgError && !domainFailed && showFavicon ? withBasePath(`/api/favicon?domain=${encodeURIComponent(faviconDomain!)}${faviconRefreshedAt ? `&v=${faviconRefreshedAt}` : ""}`) : null;
   const imgSrc = disableImages ? null : (photoSrc || faviconSrc);
   const isFavicon = imgSrc !== null && imgSrc === faviconSrc;
+  const isBrand = imgSrc !== null && imgSrc === brandSrc;
 
   const handleImgError = useCallback(() => {
-    // If the atproto avatar just failed to load, mark it and fall through.
-    if (atprotoAvatar && imgSrc === atprotoAvatar) {
-      setAtprotoAvatarFailed(true);
+    if (resolvedContactPhoto && imgSrc === resolvedContactPhoto) {
+      setFailedContactPhoto(resolvedContactPhoto);
+      return;
+    }
+    if (brandSrc && brandDomain && imgSrc === brandSrc) {
+      failedBrandDomains.add(brandDomain);
+      setFailedBrand(brandDomain);
       return;
     }
     // If the plugin avatar just failed, mark it and fall through to the next source
@@ -304,16 +317,38 @@ export function Avatar({ name, email, contactPhotoUri, did, size = "md", classNa
     if (faviconDomain && !resolvedContactPhoto && !pluginAvatar && !customAvatar && !profilePic) {
       failedFaviconDomains.add(faviconDomain);
     }
-  }, [imgSrc, atprotoAvatar, pluginAvatar, faviconDomain, resolvedContactPhoto, customAvatar, profilePic]);
+  }, [imgSrc, pluginAvatar, faviconDomain, resolvedContactPhoto, brandSrc, brandDomain, customAvatar, profilePic]);
+
+  const initialsBackground = fallbackColor ?? getBackgroundColor();
+
+  if (senderWarning) {
+    return (
+      <div
+        className={cn(
+          "rounded-full flex items-center justify-center overflow-hidden bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300",
+          sizeClasses[size],
+          className
+        )}
+        title={`${name || email || ""} (${senderWarning})`}
+        data-sender-warning=""
+      >
+        <ShieldAlert className={warningIconClasses[size]} aria-hidden />
+      </div>
+    );
+  }
 
   return (
     <div
+      ref={observe}
       className={cn(
         "rounded-full flex items-center justify-center font-semibold text-white overflow-hidden",
         sizeClasses[size],
         className
       )}
-      style={{ backgroundColor: imgSrc ? (isFavicon ? "#ffffff" : "transparent") : (fallbackColor ?? getBackgroundColor()) }}
+      style={{
+        backgroundColor: imgSrc ? (isFavicon || isBrand ? "#ffffff" : "transparent") : initialsBackground,
+        color: imgSrc ? undefined : initialsColor(initialsBackground),
+      }}
       title={name || email}
     >
       {imgSrc ? (
@@ -322,12 +357,12 @@ export function Avatar({ name, email, contactPhotoUri, did, size = "md", classNa
           alt=""
           className="w-full h-full object-cover"
           onError={handleImgError}
-          // /api/favicon returns a 1x1 transparent PNG (HTTP 200) when no real
-          // favicon exists, to avoid spamming the DevTools console with 404s.
-          // Detect that sentinel by naturalWidth and fall back to initials.
+          // /api/favicon and /api/bimi return a 1x1 transparent PNG (HTTP 200)
+          // when there is no icon, to avoid spamming the DevTools console with
+          // 404s. Detect that sentinel by naturalWidth and fall through.
           onLoad={(e) => {
             const img = e.currentTarget;
-            if (isFavicon && img.naturalWidth <= 1) {
+            if ((isFavicon || isBrand) && img.naturalWidth <= 1) {
               handleImgError();
             }
           }}

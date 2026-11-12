@@ -55,13 +55,29 @@ export interface HtmlToPlainTextOptions {
    * are visually spaced; leave off for compact output like signatures.
    */
   paragraphSpacing?: boolean;
+  /**
+   * Mark quoted text (<blockquote>, the composer's quoted original) with "> "
+   * and list items with "- " or "1. ", as plain-text mail does. Without them
+   * the text part of a reply could not tell the reply from the quote.
+   */
+  mailMarkup?: boolean;
+  /**
+   * Write an image as this text ("[Image: a red bicycle]"), from its alt
+   * text. Images without alt text, and decorative ones (alt=""), are left
+   * out. Without it, images are left out.
+   */
+  imageAlt?: (alt: string) => string;
 }
 
 function normalizeLineBreaks(value: string): string {
   return value
     .replace(/\r\n?/g, '\n')
     .replace(new RegExp(String.fromCharCode(160), 'g'), ' ')
-    .replace(/[ \t]+\n/g, '\n')
+    // Trims trailing spaces, but keeps the one that makes "-- " the RFC 3676
+    // signature delimiter, so the text part still marks the signature.
+    .split('\n')
+    .map((line) => (/^--[ \t]*$/.test(line) ? '-- ' : line.replace(/[ \t]+$/, '')))
+    .join('\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
@@ -72,8 +88,11 @@ function normalizeLineBreaks(value: string): string {
  * is the href. Used to derive the text/plain alternative of an HTML email.
  */
 export function htmlToPlainText(html: string, options: HtmlToPlainTextOptions = {}): string {
-  const { paragraphSpacing = false } = options;
-  const document = parseHtmlSafely(html);
+  return nodesToPlainText(parseHtmlSafely(html).body.childNodes, options);
+}
+
+function nodesToPlainText(nodes: NodeListOf<ChildNode>, options: HtmlToPlainTextOptions): string {
+  const { paragraphSpacing = false, mailMarkup = false } = options;
   const chunks: string[] = [];
 
   const appendText = (value: string) => {
@@ -81,7 +100,7 @@ export function htmlToPlainText(html: string, options: HtmlToPlainTextOptions = 
     const normalized = value.replace(/\s+/g, ' ');
     if (!normalized.trim()) return;
     const previous = chunks[chunks.length - 1];
-    if (previous && !previous.endsWith('\n') && !previous.endsWith(' ')) {
+    if (previous && !previous.endsWith('\n') && !previous.endsWith(' ') && !normalized.startsWith(' ')) {
       chunks.push(' ');
     }
     chunks.push(normalized);
@@ -125,6 +144,15 @@ export function htmlToPlainText(html: string, options: HtmlToPlainTextOptions = 
     const element = node as HTMLElement;
     const tagName = element.tagName.toLowerCase();
 
+    // A mail's own CSS and scripts are not part of what it says.
+    if (tagName === 'style' || tagName === 'script') return;
+
+    if (tagName === 'img') {
+      const alt = element.getAttribute('alt')?.replace(/\s+/g, ' ').trim();
+      if (alt && options.imageAlt) appendText(options.imageAlt(alt));
+      return;
+    }
+
     if (tagName === 'br') {
       // Additive so consecutive <br> can form a blank line (capped by normalize).
       if (chunks.length > 0) chunks.push('\n');
@@ -139,6 +167,11 @@ export function htmlToPlainText(html: string, options: HtmlToPlainTextOptions = 
         appendText(text);
         return;
       }
+      // An @mention reads as just "@Name"; the address is in the To or Cc.
+      if (/^mailto:/i.test(href) && text.startsWith('@') && element.children.length === 0) {
+        appendText(text);
+        return;
+      }
       if (text && href && text !== href) {
         appendText(`${text} <${href}>`);
         return;
@@ -147,6 +180,33 @@ export function htmlToPlainText(html: string, options: HtmlToPlainTextOptions = 
 
     const separator = paragraphSpacing && PARAGRAPH_TAGS.has(tagName) ? 2 : 1;
     const isBlock = BLOCK_TAGS.has(tagName);
+
+    if (mailMarkup && (tagName === 'blockquote' || element.hasAttribute('data-quoted-html'))) {
+      // The quote's own nodes: parsing its innerHTML again made each level
+      // re-read everything inside it, quadratic in a deeply nested reply.
+      const quoted = nodesToPlainText(element.childNodes, options);
+      if (quoted) {
+        ensureNewlines(separator);
+        chunks.push(quoted.split('\n').map((line) => (line ? `> ${line}` : '>')).join('\n'));
+        ensureNewlines(separator);
+      }
+      return;
+    }
+
+    if (mailMarkup && tagName === 'li') {
+      const list = element.parentElement;
+      let marker = '- ';
+      if (list?.tagName.toLowerCase() === 'ol') {
+        const start = Number(list.getAttribute('start') ?? 1) || 1;
+        const position = Array.from(list.children).filter((child) => child.tagName.toLowerCase() === 'li').indexOf(element);
+        marker = `${start + position}. `;
+      }
+      ensureNewlines(1);
+      chunks.push(marker);
+      Array.from(element.childNodes).forEach(walk);
+      ensureNewlines(1);
+      return;
+    }
 
     if (isBlock) {
       ensureNewlines(separator);
@@ -159,6 +219,6 @@ export function htmlToPlainText(html: string, options: HtmlToPlainTextOptions = 
     }
   };
 
-  Array.from(document.body.childNodes).forEach(walk);
+  Array.from(nodes).forEach(walk);
   return normalizeLineBreaks(chunks.join(''));
 }

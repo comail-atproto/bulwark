@@ -9,8 +9,8 @@ import { POST } from '@/app/api/account/stalwart/jmap/route';
 
 vi.mock('@/lib/auth/session-secret', () => ({ getSessionSecret: () => 'x'.repeat(32) }));
 vi.mock('@/lib/admin/config-manager', () => ({ configManager: { ensureLoaded: async () => {}, get: () => true } }));
-vi.mock('@/lib/access-approval/relay-bridge', () => ({
-  accessApprovalRelayBridgeUrl: () => `${origin}/bridge`, signAccessApprovalBridgeToken: () => 'synthetic-proof',
+vi.mock('@/lib/auth/mailbox-session', () => ({
+  mailboxSessionURL: () => `${origin}/bridge/identity`, signMailboxSessionToken: () => 'synthetic-proof',
 }));
 vi.mock('@/lib/stalwart/credentials', () => ({ getStalwartCredentials: async () => ({
   serverUrl: origin, username: 'owner@example.test', authHeader: `Basic ${Buffer.from('owner@example.test:synthetic').toString('base64')}`, slot: 2, trusted: true,
@@ -27,6 +27,7 @@ describe('Groupware browser gate', () => {
     let enabled = true;
     let groupwareCalls = 0;
     let mailCalls = 0;
+    let contactsProbes = 0;
     const slots: Array<string | null> = [];
     const bundle = await build({
       stdin: {
@@ -74,6 +75,11 @@ describe('Groupware browser gate', () => {
         } else if (url.pathname === '/disable') {
           enabled = false;
           outgoing.end();
+        } else if (url.pathname === '/api/contacts/book') {
+          if (url.search !== '?slot=2') throw new Error('Wrong contacts account');
+          contactsProbes++;
+          outgoing.writeHead(404, { 'Content-Type': 'application/json' });
+          outgoing.end(JSON.stringify({ error: 'not_configured' }));
         } else if (url.pathname === '/jmap/') {
           const payload = JSON.parse(body);
           const method = payload.methodCalls[0][0];
@@ -113,6 +119,7 @@ describe('Groupware browser gate', () => {
       expect(slots).toEqual(['2', '2']);
       expect(groupwareCalls).toBe(1);
       expect(mailCalls).toBe(1);
+      expect(contactsProbes).toBe(2);
     } finally {
       await browser?.close();
       await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));

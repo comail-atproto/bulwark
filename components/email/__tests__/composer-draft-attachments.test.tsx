@@ -132,6 +132,14 @@ vi.mock('@/stores/toast-store', () => ({
 }));
 
 vi.mock('@/lib/plugin-hooks', () => ({
+  identityHooks: {
+    onSignatureRender: { size: 0, transform: async (value: unknown) => value },
+    onIdentitySelect: { size: 0, emit: async () => {} },
+  },
+  templateHooks: {
+    onTemplateRender: { size: 0, transform: async (value: unknown) => value },
+    onTemplateApply: { size: 0, emit: async () => {} },
+  },
   emailHooks: {
     onComposerOpen: { call: async () => [] },
     onRecipientChange: { call: async () => [] },
@@ -139,8 +147,8 @@ vi.mock('@/lib/plugin-hooks', () => ({
     onRecipientChipsChange: { transform: async (chips: unknown) => chips },
     onDraftChange: { emit: () => {} },
     onBeforeDraftAutoSave: { transform: async (draft: unknown) => draft },
-    onBeforeEmailSend: { intercept: async () => true },
-    onComposeSend: { intercept: async () => true },
+    onBeforeEmailSend: { intercept: async () => true, interceptOutcome: async () => 'allowed' },
+    onComposeSend: { takeOver: async () => 'default' },
     onTransformOutgoingEmail: { transform: async (email: unknown) => email },
   },
   contactHooks: {
@@ -255,7 +263,9 @@ describe('re-opened draft attachments (#849)', () => {
       expect.objectContaining({ blobId: 'part-blob-v1', name: 'report.pdf', size: 1234 }),
     ]);
     // ... after which the blobId is re-resolved against the new version.
-    expect(getEmail).toHaveBeenCalledWith('draft-v2');
+    // Re-resolved in the account the draft was saved in (primary here: the mock
+    // client has no resolveSendAccountId).
+    expect(getEmail).toHaveBeenCalledWith('draft-v2', undefined);
 
     // The re-resolution itself must not count as a change: no phantom
     // save loop from the blobId swap.
@@ -290,5 +300,154 @@ describe('re-opened draft attachments (#849)', () => {
 
     expect(createDraft).toHaveBeenCalledTimes(1);
     expect(createDraft.mock.calls[0][8]).toEqual([]);
+  });
+});
+
+/**
+ * An undone send from a group identity is back in the group account's Drafts
+ * (Stalwart 1.0 and 0.16.23 file group mail there, beside its submission).
+ * Email ids repeat across accounts - live, `eaaaaab` is userb's own first
+ * message and the team account's too - so every step that removes the old
+ * version must name the account it lives in.
+ */
+const GROUP_DRAFT = { ...REOPENED_DRAFT, draftId: 'eaaaaab', draftAccountId: 'c', attachments: [] };
+
+describe('a re-opened draft that lives in a group account', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    useAuthStore.setState({ client: null });
+    vi.clearAllMocks();
+  });
+
+  async function editSubject(from: string, to: string) {
+    fireEvent.change(screen.getByDisplayValue(from), { target: { value: to } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
+  }
+
+  it('removes the old version in the group account on the first save, then saves as usual', async () => {
+    const { createDraft } = mockClient();
+    render(<EmailComposer initialData={GROUP_DRAFT} onClose={vi.fn()} />);
+
+    await editSubject('Quarterly numbers', 'Quarterly numbers v2');
+    expect(createDraft).toHaveBeenCalledTimes(1);
+    expect(createDraft.mock.calls[0][7]).toBe('eaaaaab');
+    expect(createDraft.mock.calls[0][13]?.previousDraftAccountId).toBe('c');
+
+    // The new version was saved in the own Drafts, like every draft.
+    await editSubject('Quarterly numbers v2', 'Quarterly numbers v3');
+    expect(createDraft).toHaveBeenCalledTimes(2);
+    expect(createDraft.mock.calls[1][7]).toBe('draft-v2');
+    expect(createDraft.mock.calls[1][13]?.previousDraftAccountId).toBeUndefined();
+  });
+
+  it('tells the host where the draft lives when it is sent unchanged', async () => {
+    mockClient();
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    render(<EmailComposer initialData={GROUP_DRAFT} onSend={onSend} />);
+
+    fireEvent.click(screen.getAllByTestId('composer-send')[0]);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+
+    expect(onSend).toHaveBeenCalledWith(expect.objectContaining({ draftId: 'eaaaaab', draftAccountId: 'c' }));
+  });
+
+  it('sends a version saved on the way without the group account', async () => {
+    const { createDraft } = mockClient();
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    render(<EmailComposer initialData={GROUP_DRAFT} onSend={onSend} />);
+
+    // Edited, and sent before the autosave ran: the send saves first.
+    fireEvent.change(screen.getByDisplayValue('Quarterly numbers'), { target: { value: 'Quarterly numbers v2' } });
+    fireEvent.click(screen.getAllByTestId('composer-send')[0]);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+
+    expect(createDraft.mock.calls[0][13]?.previousDraftAccountId).toBe('c');
+    expect(onSend).toHaveBeenCalledWith(expect.objectContaining({ draftId: 'draft-v2', draftAccountId: undefined }));
+  });
+
+  it('tells the host where the draft lives when it is discarded', async () => {
+    mockClient();
+    const onDiscardDraft = vi.fn();
+    const requestCloseRef = { current: null } as React.MutableRefObject<((afterClose?: () => void) => void) | null>;
+    render(<EmailComposer initialData={GROUP_DRAFT} onDiscardDraft={onDiscardDraft} requestCloseRef={requestCloseRef} onClose={vi.fn()} />);
+
+    fireEvent.change(screen.getByDisplayValue('Quarterly numbers'), { target: { value: 'Quarterly numbers v2' } });
+    act(() => requestCloseRef.current!());
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByText('discard'));
+
+    expect(onDiscardDraft).toHaveBeenCalledWith('eaaaaab', { accountId: 'c', localAccountId: undefined });
+  });
+
+  it('keeps an own draft in the own account throughout', async () => {
+    const { createDraft } = mockClient();
+    const onDiscardDraft = vi.fn();
+    const requestCloseRef = { current: null } as React.MutableRefObject<((afterClose?: () => void) => void) | null>;
+    render(<EmailComposer initialData={REOPENED_DRAFT} onDiscardDraft={onDiscardDraft} requestCloseRef={requestCloseRef} onClose={vi.fn()} />);
+
+    await editSubject('Quarterly numbers', 'Quarterly numbers v2');
+    expect(createDraft.mock.calls[0][7]).toBe('draft-v1');
+    expect(createDraft.mock.calls[0][13]?.previousDraftAccountId).toBeUndefined();
+
+    fireEvent.change(screen.getByDisplayValue('Quarterly numbers v2'), { target: { value: 'Quarterly numbers v3' } });
+    act(() => requestCloseRef.current!());
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByText('discard'));
+    expect(onDiscardDraft).toHaveBeenCalledWith('draft-v2', { accountId: undefined, localAccountId: undefined });
+  });
+});
+
+/**
+ * Send pressed while an autosave is still on the server and a later edit has
+ * armed the next one. The armed save must not fire beside the send: it would
+ * replace the version the send then destroys ("post-send cleanup failed") and
+ * leave its own version behind in Drafts. Seen with saves taking seconds.
+ */
+describe('send while a draft save is in flight', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    useAuthStore.setState({ client: null });
+    vi.clearAllMocks();
+  });
+
+  it('sends the version of the last save, made after the one in flight', async () => {
+    let finishFirstSave: (id: string) => void = () => {};
+    const createDraft = vi.fn()
+      .mockImplementationOnce(() => new Promise<string>((resolve) => { finishFirstSave = resolve; }))
+      .mockResolvedValueOnce('draft-v3');
+    useAuthStore.setState({
+      client: { createDraft, getEmail: vi.fn(), hasDelayedSend: () => false, getMaxDelayedSend: () => 0 } as never,
+    });
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    render(<EmailComposer initialData={{ ...REOPENED_DRAFT, attachments: [] }} onSend={onSend} />);
+
+    // First autosave starts and hangs on the server.
+    fireEvent.change(screen.getByDisplayValue('Quarterly numbers'), { target: { value: 'Quarterly numbers v2' } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
+    expect(createDraft).toHaveBeenCalledTimes(1);
+
+    // A last edit arms the next autosave, then Send right away.
+    fireEvent.change(screen.getByDisplayValue('Quarterly numbers v2'), { target: { value: 'Quarterly numbers v3' } });
+    fireEvent.click(screen.getAllByTestId('composer-send')[0]);
+    // Long enough for the armed autosave to have fired.
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    expect(onSend).not.toHaveBeenCalled();
+
+    await act(async () => {
+      finishFirstSave('draft-v2');
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    // One save after the first, replacing it, and the send carries its id.
+    expect(createDraft).toHaveBeenCalledTimes(2);
+    expect(createDraft.mock.calls[1][7]).toBe('draft-v2');
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(onSend).toHaveBeenCalledWith(expect.objectContaining({ draftId: 'draft-v3', subject: 'Quarterly numbers v3' }));
   });
 });

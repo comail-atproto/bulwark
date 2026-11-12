@@ -9,7 +9,6 @@ if node --no-experimental-webstorage -e '' >/dev/null 2>&1; then
   export NODE_OPTIONS="${NODE_OPTIONS:+${NODE_OPTIONS} }--no-experimental-webstorage"
 fi
 
-# The measured one-worker suite peaked at 2228 MiB in an isolated 11964 MiB
-# guest. Use two workers to overlap per-file imports and jsdom setup while
-# retaining headroom; vitest.setup.ts still waits for lazy imports on teardown.
-exec npx vitest run --maxWorkers=2 "$@"
+# Match the CI guest's three CPUs while keeping each test file in its own
+# process. Timezone tests need process-level isolation.
+exec npx vitest run --config vitest.comail.config.ts --maxWorkers=3 "$@"

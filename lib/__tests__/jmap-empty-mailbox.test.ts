@@ -1,6 +1,24 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { JMAPClient } from '../jmap/client';
-import { jmapSession } from './fixtures/jmap-session';
+
+function makeSession() {
+  return {
+    capabilities: { 'urn:ietf:params:jmap:core': {} },
+    accounts: { 'acct-1': { name: 'test', isPersonal: true, accountCapabilities: {} } },
+    primaryAccounts: { 'urn:ietf:params:jmap:mail': 'acct-1' },
+    apiUrl: 'https://mail.example.com/jmap/api',
+    downloadUrl: 'https://mail.example.com/jmap/download/{accountId}/{blobId}/{name}',
+    uploadUrl: 'https://mail.example.com/jmap/upload/{accountId}/',
+    eventSourceUrl: 'https://mail.example.com/jmap/eventsource',
+  };
+}
+
+function jsonResponse(body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
 
 /**
  * Stand-in for a Stalwart mailbox: Email/query returns one page of remaining
@@ -25,7 +43,7 @@ function makeMailboxServer(opts: {
     const destroyed = opts.destroyFails ? [] : page;
     remaining = remaining.slice(destroyed.length);
 
-    return Response.json({
+    return jsonResponse({
       methodResponses: [
         ['Email/query', { ids: page, ...(opts.includeTotal ? { total: page.length } : {}) }, '0'],
         ['Email/set', { destroyed, notDestroyed: {} }, '1'],
@@ -48,7 +66,7 @@ describe('JMAPClient.emptyMailbox', () => {
   });
 
   async function connectedClient(): Promise<JMAPClient> {
-    fetchSpy.mockResolvedValueOnce(Response.json(jmapSession({ accountCapabilities: {} })));
+    fetchSpy.mockResolvedValueOnce(jsonResponse(makeSession()));
     const client = JMAPClient.withBearer('https://mail.example.com', 'token123', 'user@test.com');
     await client.connect();
     fetchSpy.mockReset();
@@ -130,18 +148,18 @@ function makeMoveServer(opts: { count: number; updateFails?: boolean }) {
     if (method === 'Email/query') {
       const page = remaining.slice(0, args.limit);
       queries.push(page.length);
-      return Response.json({ methodResponses: [['Email/query', { ids: page }, '0']] });
+      return jsonResponse({ methodResponses: [['Email/query', { ids: page }, '0']] });
     }
 
     updates.push(args.update);
     const ids = Object.keys(args.update);
     if (opts.updateFails) {
       const notUpdated = Object.fromEntries(ids.map(id => [id, { type: 'forbidden' }]));
-      return Response.json({ methodResponses: [['Email/set', { notUpdated }, '0']] });
+      return jsonResponse({ methodResponses: [['Email/set', { notUpdated }, '0']] });
     }
     remaining = remaining.filter(id => !ids.includes(id));
     const updated = Object.fromEntries(ids.map(id => [id, null]));
-    return Response.json({ methodResponses: [['Email/set', { updated }, '0']] });
+    return jsonResponse({ methodResponses: [['Email/set', { updated }, '0']] });
   };
 
   return { handler, queries, updates, remainingCount: () => remaining.length };
@@ -159,7 +177,7 @@ describe('JMAPClient.moveMailboxContents', () => {
   });
 
   async function connectedClient(): Promise<JMAPClient> {
-    fetchSpy.mockResolvedValueOnce(Response.json(jmapSession({ accountCapabilities: {} })));
+    fetchSpy.mockResolvedValueOnce(jsonResponse(makeSession()));
     const client = JMAPClient.withBearer('https://mail.example.com', 'token123', 'user@test.com');
     await client.connect();
     fetchSpy.mockReset();

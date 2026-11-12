@@ -1,3 +1,4 @@
+import { calendarBridgeEndpoint, inboxBridgeEndpoint, inboxBridgeSecret } from '@/lib/auth/inbox-config';
 import { currentGroupwareEnabled } from '@/lib/groupware/access';
 import { decryptSession } from '@/lib/auth/crypto';
 import { sessionCookieName } from '@/lib/auth/session-cookie';
@@ -7,14 +8,16 @@ import { logger } from '@/lib/logger';
 import { configManager } from '@/lib/admin/config-manager';
 import { parseJmapServers, redactJmapServers } from '@/lib/admin/jmap-servers';
 import { hasSessionSecret } from '@/lib/auth/session-secret';
-import { getOauthScopes } from '@/lib/oauth/tokens';
-import { httpUrlOrEmpty } from '@/lib/config-validation';
+import { getOauthResource, getOauthScopes } from '@/lib/oauth/tokens';
+import { httpOrMailtoOrEmpty, httpUrlOrEmpty } from '@/lib/config-validation';
 import {
   matchDomainBranding,
   parseDomainBranding,
   pickRequestHost,
   type BrandingOverrideKey,
 } from '@/lib/admin/domain-branding';
+import { isNoThirdPartyTrafficOn } from '@/lib/admin/third-party-mode';
+import { browserErrorSettings } from '@/lib/error-reporting/settings';
 
 /**
  * Runtime configuration endpoint
@@ -114,6 +117,7 @@ export async function GET(request: NextRequest) {
       oauthClientId: configManager.get<string>('oauthClientId', ''),
       oauthIssuerUrl: configManager.get<string>('oauthIssuerUrl', ''),
       oauthScopes: getOauthScopes(),
+      oauthResource: getOauthResource(),
       rememberMeEnabled: hasSessionSecret(),
       settingsSyncEnabled: configManager.get<boolean>('settingsSyncEnabled', false) && hasSessionSecret(),
       stalwartFeaturesEnabled,
@@ -129,12 +133,18 @@ export async function GET(request: NextRequest) {
       loginImprintUrl: branded<string>('loginImprintUrl', ''),
       loginPrivacyPolicyUrl: branded<string>('loginPrivacyPolicyUrl', ''),
       loginWebsiteUrl: branded<string>('loginWebsiteUrl', ''),
+      buildersWebsiteUrl: configManager.get<string>('buildersWebsiteUrl'),
+      loginUsernamePlaceholder: branded<string>('loginUsernamePlaceholder', ''),
+      hostedInboxLogoutDestination: httpUrlOrEmpty(configManager.get<string>('hostedInboxLogoutDestination', '')),
       loginLogoMaxHeight: configManager.get<string>('loginLogoMaxHeight', ''),
       loginLogoMaxWidth: configManager.get<string>('loginLogoMaxWidth', ''),
       loginShowHeading: configManager.get<boolean>('loginShowHeading', true),
       loginShowSubtitle: configManager.get<boolean>('loginShowSubtitle', true),
       demoMode,
       calendarEnabled,
+      privateCalendarEnabled: calendarEnabled && !!inboxBridgeSecret() && !!calendarBridgeEndpoint(),
+      privateContactsEnabled: contactsEnabled && !!inboxBridgeSecret() && !!inboxBridgeEndpoint('INBOX_CONTACTS_BRIDGE_URL'),
+      privateFilesEnabled: filesEnabled && !!inboxBridgeSecret() && !!inboxBridgeEndpoint('INBOX_FILES_BRIDGE_URL'),
       contactsEnabled,
       filesEnabled,
       appsEnabled,
@@ -142,6 +152,7 @@ export async function GET(request: NextRequest) {
       smimeEnabled,
       loginShowTotp: configManager.get<boolean>('loginShowTotp', true),
       loginShowTokenLogin: configManager.get<boolean>('loginShowTokenLogin', false),
+      loginShowRememberMe: configManager.get<boolean>('loginShowRememberMe', false),
       loginShowVersion: configManager.get<boolean>('loginShowVersion', true),
       allowCustomJmapEndpoint: configManager.get<boolean>('allowCustomJmapEndpoint', false),
       // The domain lists name every organisation served here; the login page
@@ -159,6 +170,17 @@ export async function GET(request: NextRequest) {
       byomcAppPasswordApiUrl,
       buildersEnabled,
       sourceCodeUrl: httpUrlOrEmpty(configManager.get<string>('sourceCodeUrl', '')),
+      // Accessibility and help links, per domain like the legal links.
+      accessibilityStatementUrl: httpUrlOrEmpty(branded<string>('accessibilityStatementUrl', '')),
+      accessibilityFeedbackUrl: httpOrMailtoOrEmpty(branded<string>('accessibilityFeedbackUrl', '')),
+      helpUrl: httpUrlOrEmpty(branded<string>('helpUrl', '')),
+      easyReadUrl: httpUrlOrEmpty(branded<string>('easyReadUrl', '')),
+      signLanguageUrl: httpUrlOrEmpty(branded<string>('signLanguageUrl', '')),
+      // Browser-side switches of lib/outgoing-hosts.ts read this (#903).
+      noThirdPartyTraffic: await isNoThirdPartyTrafficOn(),
+      // Error reporting (lib/error-reporting/client.ts): off unless a DSN is
+      // set or this server counts errors. The DSN is public by design.
+      errorReporting: await browserErrorSettings(),
     },
     {
       // Runtime settings can change without new asset URLs. Prevent stale

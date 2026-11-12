@@ -1,13 +1,34 @@
 import { readFileSync } from 'node:fs';
 import { chromium } from 'playwright';
 import { describe, expect, it } from 'vitest';
-import { BUILTIN_THEMES } from '@/lib/builtin-themes';
+import { COMAIL_THEME } from '@/lib/__tests__/fixtures/comail-theme';
 
-const theme = BUILTIN_THEMES.find((item) => item.id === 'builtin-comail')!;
+const theme = COMAIL_THEME;
 const globals = readFileSync('app/globals.css', 'utf8');
-const scrollbarCss = globals.slice(globals.indexOf('/* Minimalist scrollbar */'), globals.indexOf('/* Enhanced Email Content Styling */'));
+const scrollbarCss = globals.slice(globals.indexOf('/* Minimalist scrollbar'), globals.indexOf('/* Enhanced Email Content Styling */'));
 
 describe.runIf(process.env.COMAIL_BROWSER_TESTS === '1')('Comail theme in the browser', () => {
+  it('uses charcoal input and focused menu surfaces in dark mode', async () => {
+    const browser = await chromium.launch({ executablePath: process.env.COMAIL_CHROMIUM_PATH });
+    try {
+      const page = await browser.newPage();
+      await page.setContent(`<html class="dark"><style>${theme.css}\n${theme.skin}</style>
+        <body data-theme-skin="builtin-comail">
+          <input type="search" aria-label="Search mail">
+          <div role="menu"><button role="menuitem">Mail</button></div>
+        </body></html>`);
+      const input = page.getByRole('searchbox');
+      expect(await input.evaluate(el => getComputedStyle(el).backgroundColor)).toBe('rgb(42, 45, 51)');
+      expect(await input.evaluate(el => getComputedStyle(el).color)).toBe('rgb(231, 233, 234)');
+      const item = page.getByRole('menuitem');
+      await item.focus();
+      expect(await item.evaluate(el => getComputedStyle(el).backgroundColor)).toBe('rgb(42, 45, 51)');
+      expect(await item.evaluate(el => getComputedStyle(el).color)).toBe('rgb(109, 191, 214)');
+    } finally {
+      await browser.close();
+    }
+  });
+
   it('keeps selected settings readable and colors native scrollbars from the theme', async () => {
     const browser = await chromium.launch({ executablePath: process.env.COMAIL_CHROMIUM_PATH });
     try {
@@ -30,6 +51,8 @@ describe.runIf(process.env.COMAIL_BROWSER_TESTS === '1')('Comail theme in the br
       await page.evaluate(() => document.documentElement.classList.add('dark'));
       expect(await page.locator('#selected').evaluate(el => getComputedStyle(el).color)).toBe('rgb(109, 191, 214)');
       expect(await page.locator('#scroll').evaluate(el => getComputedStyle(el).scrollbarColor)).toBe('rgb(168, 172, 177) rgba(0, 0, 0, 0)');
+      await page.evaluate(() => document.documentElement.setAttribute('data-native-scrollbars', 'on'));
+      expect(await page.locator('#scroll').evaluate(el => getComputedStyle(el).scrollbarColor)).toBe('auto');
     } finally {
       await browser.close();
     }

@@ -1,10 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { createPortal } from "react-dom";
-import { Button } from "@/components/ui/button";
+import { IconButton } from "@/components/ui/icon-button";
+import { useMenuNavigation } from "@/hooks/use-menu-navigation";
 import { Tag } from "@/components/icons";
 import { TagPicker } from "./tag-picker";
+import type { TagScope } from "@/hooks/use-account-tags";
 
 const TAG_PICKER_WIDTH = 224;
 
@@ -22,6 +24,7 @@ export function BatchTagButton({
   onToggle,
   active,
   disabled,
+  scope = null,
 }: {
   title: string;
   /** Tags every selected message carries. */
@@ -32,12 +35,26 @@ export function BatchTagButton({
   /** Whether there is a selection to tag; the picker shuts without one. */
   active: boolean;
   disabled?: boolean;
+  /** The account of the whole selection (commonTagScope); null: the user's own tags. */
+  scope?: TagScope | null;
 }) {
   const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
-  const pickerRef = useRef<HTMLDivElement | null>(null);
   const buttonRef = useRef<HTMLButtonElement | null>(null);
   const close = useCallback(() => setPos(null), []);
   const isOpen = pos !== null && active;
+  // The picker sits at the end of <body>: the focus moves into it on open,
+  // the arrow keys walk the tags, and the focus goes back to the button on
+  // close (Escape, Tab, a pick that closes it).
+  const { menuRef: pickerRef, onKeyDown: onMenuKeyDown } = useMenuNavigation<HTMLDivElement>({
+    open: isOpen,
+    onClose: close,
+    triggerRef: buttonRef,
+  });
+  const onPickerKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    // Home and End belong to the text fields (filter, new tag).
+    if ((event.key === "Home" || event.key === "End") && event.target instanceof HTMLInputElement) return;
+    onMenuKeyDown(event);
+  };
 
   useEffect(() => {
     if (!pos) return;
@@ -59,14 +76,13 @@ export function BatchTagButton({
       document.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("resize", close);
     };
-  }, [pos, close]);
+  }, [pos, close, pickerRef]);
 
   return (
     <>
-      <Button
+      <IconButton
         ref={buttonRef}
-        variant="ghost"
-        size="sm"
+        label={title}
         data-testid="batch-tag"
         onClick={(event) => {
           const rect = event.currentTarget.getBoundingClientRect();
@@ -79,25 +95,24 @@ export function BatchTagButton({
                 },
           );
         }}
-        title={title}
-        aria-label={title}
         aria-haspopup="menu"
         aria-expanded={isOpen}
         disabled={disabled}
-        className="hover:bg-accent transition-colors disabled:opacity-50"
       >
-        <Tag className="w-4 h-4" />
-      </Button>
+        <Tag />
+      </IconButton>
       {isOpen &&
         createPortal(
           <div
             ref={pickerRef}
             data-testid="batch-tag-picker"
             role="menu"
+            aria-label={title}
+            onKeyDown={onPickerKeyDown}
             className="fixed z-50 w-56 max-w-[18rem] rounded-lg border border-border bg-popover py-1 shadow-lg"
             style={{ top: pos.top, left: pos.left }}
           >
-            <TagPicker selectedIds={selectedIds} partialIds={partialIds} onToggle={onToggle} />
+            <TagPicker selectedIds={selectedIds} partialIds={partialIds} onToggle={onToggle} scope={scope} />
           </div>,
           document.body,
         )}

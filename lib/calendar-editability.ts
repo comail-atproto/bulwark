@@ -3,6 +3,34 @@ import { isOrganizer, getUserParticipantId } from '@/lib/calendar-participants';
 
 export type EventEditability = 'editable' | 'rsvp-only' | 'read-only';
 
+export function isPublicAtprotoCalendar(calendar: { id?: string; originalId?: string; source?: string }): boolean {
+  return calendar.source === 'atproto-public' || [calendar.id, calendar.originalId].some(id => {
+    if (!id) return false;
+    const raw = id.includes('::') ? id.slice(id.lastIndexOf('::') + 2) : id;
+    return raw.startsWith('atmo:');
+  });
+}
+
+export function isPublicAtprotoEvent(event: {
+  id?: string; originalId?: string; baseEventId?: string | null; source?: string;
+  atprotoUri?: string;
+  calendarIds?: Record<string, boolean>; originalCalendarIds?: Record<string, boolean>;
+}): boolean {
+  return event.source === 'atproto-space' && event.atprotoUri !== undefined
+    || Object.keys(event).some(key => key.startsWith('calendarIds/') && isPublicAtprotoCalendar({ id: key.slice('calendarIds/'.length) }))
+    || isPublicAtprotoCalendar(event) || isPublicAtprotoCalendar({ id: event.baseEventId ?? undefined })
+    || [event.calendarIds, event.originalCalendarIds].some(ids => Object.entries(ids ?? {})
+      .some(([id, included]) => included && isPublicAtprotoCalendar({ id })));
+}
+
+export function publicAtprotoOriginalLink(event: CalendarEvent): string | null {
+  if (!isPublicAtprotoEvent(event) || !event.atprotoUri) return null;
+  const identity = /^at:\/\/(did:(?:plc|web):[^/\s]+)\/community\.lexicon\.calendar\.event\/([234567abcdefghijklmnopqrstuvwxyz]{13})$/.exec(event.atprotoUri);
+  if (!identity) return null;
+  const expected = `https://atmo.rsvp/p/${encodeURIComponent(identity[1])}/e/${identity[2]}`;
+  return event.source === 'atproto-space' || event.links?.atmo?.href === expected ? expected : null;
+}
+
 export interface EditabilityContext {
   /** Viewer's calendars by id; only their `myRights` is read. */
   calendarsById: ReadonlyMap<string, Pick<Calendar, 'myRights'>>;
@@ -18,10 +46,10 @@ export interface EditabilityContext {
  * calendars with writable myRights, so the flag must be checked too (issue #762).
  */
 export function canCreateEventsIn(
-  calendar: Pick<Calendar, 'id' | 'myRights'>,
+  calendar: Pick<Calendar, 'id' | 'myRights'> & Partial<Pick<Calendar, 'source' | 'originalId'>>,
   isSubscriptionCalendar?: (calendarId: string) => boolean,
 ): boolean {
-  if (isSubscriptionCalendar?.(calendar.id)) return false;
+  if (isPublicAtprotoCalendar(calendar) || isSubscriptionCalendar?.(calendar.id)) return false;
   const r = calendar.myRights;
   return !r || r.mayWriteAll || r.mayWriteOwn;
 }
@@ -49,6 +77,7 @@ export function getEventEditability(
   event: CalendarEvent,
   ctx: EditabilityContext,
 ): EventEditability {
+  if (isPublicAtprotoEvent(event)) return 'read-only';
   const calIds = Object.keys(event.calendarIds ?? {});
 
   // Subscriptions have no write path and myRights can't describe them.
@@ -76,6 +105,17 @@ export function getEventEditability(
   return 'read-only';
 }
 
+/** Private rights apply to this viewer’s settings without granting event-body edits. */
+export function canUserEditPrivate(event: CalendarEvent, ctx: EditabilityContext): boolean {
+  // A public overlay has no private state. A verified linked Space copy does:
+  // reminders and other actor-private settings remain separate from its
+  // organizer-owned public fields.
+  if (isPublicAtprotoEvent(event) && event.source !== 'atproto-space') return false;
+  const ids = Object.entries(event.calendarIds ?? {}).filter(([, included]) => included).map(([id]) => id);
+  return ids.length > 0 && ids.every(id => !ctx.isSubscriptionCalendar(id)
+    && ctx.calendarsById.get(id)?.myRights?.mayUpdatePrivate === true);
+}
+
 /**
  * Whether the viewer may RSVP to an event.
  *
@@ -86,6 +126,7 @@ export function canUserRsvp(
   event: CalendarEvent,
   ctx: EditabilityContext,
 ): boolean {
+  if (isPublicAtprotoEvent(event)) return false;
   const calIds = Object.keys(event.calendarIds ?? {});
 
   // Subscriptions are a one-way copy; there is no scheduling path to reply on.

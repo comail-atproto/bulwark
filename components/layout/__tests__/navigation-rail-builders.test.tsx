@@ -2,7 +2,7 @@ import { render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { NavigationRail } from '../navigation-rail';
 
-const membership = vi.hoisted(() => ({ enrolled: false }));
+const membership = vi.hoisted(() => ({ enrolled: false, buildersWebsiteUrl: 'https://build.comail.at' }));
 vi.mock('@/hooks/use-builders-membership', () => ({ useBuildersMembership: () => membership.enrolled }));
 
 vi.mock('@/hooks/use-config', () => ({
@@ -14,6 +14,7 @@ vi.mock('@/hooks/use-config', () => ({
     filesEnabled: false,
     appsEnabled: false,
     buildersEnabled: false,
+    buildersWebsiteUrl: membership.buildersWebsiteUrl,
   }),
 }));
 vi.mock('@/stores/update-store', () => ({
@@ -29,7 +30,14 @@ vi.mock('@/components/keyboard-shortcuts-modal', () => ({ KeyboardShortcutsModal
 vi.mock('@/components/plugins/plugin-slot', () => ({ PluginSlot: () => null }));
 
 describe('Builder product navigation', () => {
-  beforeEach(() => { membership.enrolled = false; });
+  beforeEach(() => { membership.enrolled = false; membership.buildersWebsiteUrl = 'https://build.comail.at'; });
+
+  it('opens the configured Builders staging site', () => {
+    membership.enrolled = true;
+    membership.buildersWebsiteUrl = 'https://builders.stage.test';
+    render(<NavigationRail />);
+    expect(screen.getByRole('link', { name: 'Comail for Builders' })).toHaveAttribute('href', membership.buildersWebsiteUrl);
+  });
 
   it.each([false, true])('shows the desktop link for an enrolled account (collapsed=%s)', (collapsed) => {
     membership.enrolled = true;

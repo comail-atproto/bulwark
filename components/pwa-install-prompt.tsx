@@ -3,8 +3,12 @@
 import { useEffect, useState } from "react";
 import { useTranslations } from "next-intl";
 import { X, Download } from "@/components/icons";
+import { Button } from "@/components/ui/button";
+import { IconButton } from "@/components/ui/icon-button";
 import { useConfig } from "@/hooks/use-config";
 import { withBasePath } from "@/lib/browser-navigation";
+import { useUIStore } from "@/stores/ui-store";
+import { useStrictestDevices } from "@/hooks/use-device-policy";
 
 interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>;
@@ -12,19 +16,28 @@ interface BeforeInstallPromptEvent extends Event {
 }
 
 const DISMISSED_KEY = "pwa-install-dismissed";
-const SNOOZE_KEY = "pwa-install-snoozed-until";
+// "Not now" holds the card back for a week, in every account on this browser.
+const SNOOZED_UNTIL_KEY = "pwa-install-snoozed-until";
 const SNOOZE_MS = 7 * 24 * 60 * 60 * 1000;
-export const PWA_INSTALL_PROMPT_VISIBILITY_EVENT =
-  "bulwark:pwa-install-prompt-visibility";
 
-function isSnoozed(): boolean {
+function isDismissed(): boolean {
   try {
-    const until = Number(localStorage.getItem(SNOOZE_KEY));
-    return Number.isFinite(until) && until > Date.now();
+    if (localStorage.getItem(DISMISSED_KEY)) return true;
+    const snoozedUntil = Number(localStorage.getItem(SNOOZED_UNTIL_KEY));
+    return snoozedUntil > Date.now();
   } catch {
     return false;
   }
 }
+
+function remember(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch { /* localStorage may be unavailable */ }
+}
+
+export const PWA_INSTALL_PROMPT_VISIBILITY_EVENT =
+  "bulwark:pwa-install-prompt-visibility";
 
 // Mirrors the last dispatched visibility so a listener that mounts after the
 // event was fired can still read the current state instead of assuming hidden.
@@ -40,14 +53,26 @@ export function PWAInstallPrompt() {
   const [showPrompt, setShowPrompt] = useState(false);
   const { appName, faviconUrl, appLogoLightUrl, appLogoDarkUrl } = useConfig();
   const t = useTranslations("pwa_install");
+  // Stays "visible" for the push prompt's sake while a composer is open, so
+  // that card doesn't take its place over the Send button either.
+  const composing = useUIStore((state) => state.composingCount > 0);
+  // Organisation > Devices > No install prompt, if any account signed in
+  // here has it: no card, and the browser's own install banner is held back
+  // too. The browser's menu can still install Bulwark.
+  const noInstallPrompt = useStrictestDevices().noInstallPrompt;
 
   useEffect(() => {
-    if (localStorage.getItem(DISMISSED_KEY)) return;
+    if (noInstallPrompt) {
+      const suppress = (e: Event) => e.preventDefault();
+      window.addEventListener("beforeinstallprompt", suppress);
+      return () => window.removeEventListener("beforeinstallprompt", suppress);
+    }
+    if (isDismissed()) return;
 
     const handler = (e: Event) => {
       e.preventDefault();
       setDeferredPrompt(e as BeforeInstallPromptEvent);
-      if (isSnoozed()) return;
+      if (isDismissed()) return;
       setShowPrompt(true);
     };
 
@@ -56,19 +81,20 @@ export function PWAInstallPrompt() {
     return () => {
       window.removeEventListener("beforeinstallprompt", handler);
     };
-  }, []);
+  }, [noInstallPrompt]);
 
+  const visible = showPrompt && !noInstallPrompt;
   useEffect(() => {
-    promptVisible = showPrompt;
+    promptVisible = visible;
     window.dispatchEvent(
       new CustomEvent(PWA_INSTALL_PROMPT_VISIBILITY_EVENT, {
-        detail: { visible: showPrompt },
+        detail: { visible },
       }),
     );
     return () => {
-      if (showPrompt) promptVisible = false;
+      if (visible) promptVisible = false;
     };
-  }, [showPrompt]);
+  }, [visible]);
 
   const handleInstall = async () => {
     if (!deferredPrompt) return;
@@ -84,20 +110,16 @@ export function PWAInstallPrompt() {
   };
 
   const handleDismiss = () => {
-    try {
-      localStorage.setItem(SNOOZE_KEY, String(Date.now() + SNOOZE_MS));
-    } catch {
-      // The prompt still closes for this session when storage is unavailable.
-    }
+    remember(SNOOZED_UNTIL_KEY, String(Date.now() + SNOOZE_MS));
     setShowPrompt(false);
   };
 
   const handleDismissForever = () => {
-    localStorage.setItem(DISMISSED_KEY, "1");
+    remember(DISMISSED_KEY, "1");
     setShowPrompt(false);
   };
 
-  if (!showPrompt || !deferredPrompt) {
+  if (!visible || !deferredPrompt || composing) {
     return null;
   }
 
@@ -105,7 +127,7 @@ export function PWAInstallPrompt() {
   const darkLogoSrc = withBasePath(appLogoDarkUrl || faviconUrl);
 
   return (
-    <div className="fixed bottom-4 right-4 z-50 bg-white dark:bg-neutral-900 rounded-lg shadow-lg border border-neutral-200 dark:border-neutral-800 p-4 max-w-sm animate-in slide-in-from-bottom-4">
+    <div className="fixed bottom-4 end-4 z-50 max-w-sm rounded-lg border border-border bg-popover text-popover-foreground shadow-lg p-4 animate-in slide-in-from-bottom-4 max-sm:inset-x-3 max-sm:max-w-none max-sm:bottom-[calc(var(--bottom-controls-height,3.75rem)+0.75rem)]">
       <div className="flex items-start justify-between mb-3">
         <div className="flex items-start gap-3">
           {logoSrc ? (
@@ -125,43 +147,30 @@ export function PWAInstallPrompt() {
             />
           )}
           <div>
-            <h3 className="font-semibold text-sm text-neutral-900 dark:text-white">
+            <h3 className="font-semibold text-sm text-foreground">
               {t("title", { appName })}
             </h3>
-            <p className="text-xs text-neutral-600 dark:text-neutral-400 mt-1">
+            <p className="text-xs text-muted-foreground mt-1">
               {t("description")}
             </p>
           </div>
         </div>
-        <button
-          onClick={handleDismiss}
-          className="text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300 transition-colors"
-          aria-label={t("dismiss_aria")}
-        >
-          <X className="w-4 h-4" />
-        </button>
+        <IconButton label={t("dismiss_aria")} onClick={handleDismiss} className="-me-2 -mt-2 text-muted-foreground">
+          <X />
+        </IconButton>
       </div>
       <div className="flex flex-col gap-2">
         <div className="flex gap-2">
-          <button
-            onClick={handleDismiss}
-            className="flex-1 px-3 py-2 text-sm font-medium text-neutral-700 dark:text-neutral-300 bg-neutral-100 dark:bg-neutral-800 rounded hover:bg-neutral-200 dark:hover:bg-neutral-700 transition-colors"
-          >
+          <Button type="button" variant="outline" size="sm" className="flex-1" onClick={handleDismiss}>
             {t("not_now")}
-          </button>
-          <button
-            onClick={handleInstall}
-            className="flex-1 px-3 py-2 text-sm font-medium text-primary-foreground bg-primary rounded hover:bg-primary/90 transition-colors"
-          >
+          </Button>
+          <Button type="button" size="sm" className="flex-1" onClick={handleInstall}>
             {t("install")}
-          </button>
+          </Button>
         </div>
-        <button
-          onClick={handleDismissForever}
-          className="w-full text-xs text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300 transition-colors text-center"
-        >
+        <Button type="button" variant="ghost" size="xs" className="w-full text-xs text-muted-foreground" onClick={handleDismissForever}>
           {t("dont_remind")}
-        </button>
+        </Button>
       </div>
     </div>
   );

@@ -39,6 +39,9 @@ vi.mock('@/lib/settings-sync', () => ({
   saveUserSettings: async (username: string, serverUrl: string, settings: Record<string, unknown>) => {
     store.set(`${username}|${serverUrl}`, settings);
   },
+  updateUserSettings: async (username: string, serverUrl: string, change: (stored: Record<string, unknown> | null) => Record<string, unknown>) => {
+    store.set(`${username}|${serverUrl}`, change(store.get(`${username}|${serverUrl}`) ?? null));
+  },
   deleteUserSettings: async (username: string, serverUrl: string) => { store.delete(`${username}|${serverUrl}`); },
 }));
 
@@ -62,6 +65,17 @@ beforeEach(() => {
 });
 
 describe('settings route keys on the account the credential belongs to', () => {
+  it('rejects an unmatched long server URL promptly before authentication', async () => {
+    const { POST } = await import('@/app/api/settings/route');
+    const request = new NextRequest('https://webmail.example/api/settings', {
+      method: 'POST', headers: SAME_ORIGIN,
+      body: JSON.stringify({ username: 'john', serverUrl: `https://other.example/${'/'.repeat(40000)}x`, settings: {} }),
+    });
+    const start = performance.now();
+    expect((await POST(request)).status).toBe(403);
+    expect(performance.now() - start).toBeLessThan(1500);
+  }, 10000);
+
   it('saves a bare Bearer claim under the canonical account name', async () => {
     await signIn({ username: 'john', accountName: 'john@b.example' });
     const { POST } = await import('@/app/api/settings/route');
@@ -84,6 +98,40 @@ describe('settings route keys on the account the credential belongs to', () => {
     expect(await res.json()).toEqual({ settings: null });
   });
 
+  it('keys on the canonical account even when a remember-me session cookie carries the bare claim', async () => {
+    // /api/auth/session writes both cookies for a token login; the session
+    // cookie only knows the claim, the context the account it resolved to.
+    store.set(`john|${SERVER}`, { signature: 'john@a.example private' });
+    await signIn({ username: 'john', accountName: 'john@b.example' });
+    const { encryptSession } = await import('@/lib/auth/crypto');
+    const { sessionCookieName } = await import('@/lib/auth/session-cookie');
+    jar.set(sessionCookieName(0), encryptSession(SERVER, 'john', { token: 't' }));
+    const { GET, POST } = await import('@/app/api/settings/route');
+    const read = await GET(new NextRequest('https://webmail.example/api/settings', {
+      headers: { 'x-settings-username': 'john', 'x-settings-server': SERVER },
+    }));
+    expect(await read.json()).toEqual({ settings: null });
+    await POST(new NextRequest('https://webmail.example/api/settings', {
+      method: 'POST',
+      headers: SAME_ORIGIN,
+      body: JSON.stringify({ username: 'john', serverUrl: SERVER, settings: { theme: 'dark' } }),
+    }));
+    expect(store.get(`john|${SERVER}`)).toEqual({ signature: 'john@a.example private' });
+    expect(store.get(`john@b.example|${SERVER}`)).toEqual({ theme: 'dark' });
+  });
+
+  it('refuses to key on a bare token-login claim when no context cookie resolves it', async () => {
+    jar.clear();
+    const { encryptSession } = await import('@/lib/auth/crypto');
+    const { sessionCookieName } = await import('@/lib/auth/session-cookie');
+    jar.set(sessionCookieName(0), encryptSession(SERVER, 'john', { token: 't' }));
+    const { GET } = await import('@/app/api/settings/route');
+    const res = await GET(new NextRequest('https://webmail.example/api/settings', {
+      headers: { 'x-settings-username': 'john', 'x-settings-server': SERVER },
+    }));
+    expect(res.status).toBe(403);
+  });
+
   it('keeps keying on the login name when the context names no other account', async () => {
     await signIn({ username: 'alice@example.org' });
     const { POST } = await import('@/app/api/settings/route');
@@ -93,5 +141,42 @@ describe('settings route keys on the account the credential belongs to', () => {
       body: JSON.stringify({ username: 'alice@example.org', serverUrl: SERVER, settings: { theme: 'light' } }),
     }));
     expect([...store.keys()]).toEqual([`alice@example.org|${SERVER}`]);
+  });
+
+  it('refuses a settings blob over the size cap before parsing it', async () => {
+    // One blob per account, re-read on every sync: it was accepted at any size.
+    await signIn({ username: 'alice@example.org' });
+    const { POST } = await import('@/app/api/settings/route');
+    const big = JSON.stringify({ username: 'alice@example.org', serverUrl: SERVER, settings: { signature: 'x'.repeat(2 * 1024 * 1024 + 10) } });
+    const res = await POST(new NextRequest('https://webmail.example/api/settings', { method: 'POST', headers: SAME_ORIGIN, body: big }));
+    expect(res.status).toBe(413);
+    expect(store.size).toBe(0);
+    const claimed = await POST(new NextRequest('https://webmail.example/api/settings', {
+      method: 'POST',
+      headers: { ...SAME_ORIGIN, 'content-length': String(3 * 1024 * 1024) },
+      body: JSON.stringify({ username: 'alice@example.org', serverUrl: SERVER, settings: { theme: 'dark' } }),
+    }));
+    expect(claimed.status).toBe(413);
+  });
+
+  it('keeps one blob per account however many slashes end the server address', async () => {
+    // The address is matched with its trailing slashes stripped but was
+    // stored as sent, so each extra slash wrote another blob of up to 2 MB.
+    await signIn({ username: 'alice@example.org' });
+    const { GET, POST } = await import('@/app/api/settings/route');
+    for (const slashes of [0, 1, 2, 3, 7]) {
+      const res = await POST(new NextRequest('https://webmail.example/api/settings', {
+        method: 'POST',
+        headers: SAME_ORIGIN,
+        body: JSON.stringify({ username: 'alice@example.org', serverUrl: SERVER + '/'.repeat(slashes), settings: { n: slashes } }),
+      }));
+      expect(res.status).toBe(200);
+    }
+    // Clients send the address with or without one slash; both keep their blob.
+    expect([...store.keys()].sort()).toEqual([`alice@example.org|${SERVER}`, `alice@example.org|${SERVER}/`]);
+    const read = await GET(new NextRequest('https://webmail.example/api/settings', {
+      headers: { 'x-settings-username': 'alice@example.org', 'x-settings-server': `${SERVER}//` },
+    }));
+    expect(await read.json()).toEqual({ settings: { n: 7 } });
   });
 });

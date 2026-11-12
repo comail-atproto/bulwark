@@ -23,25 +23,31 @@ const { accountState, authState } = vi.hoisted(() => ({
 vi.mock('next-intl', () => ({
   useTranslations: () => (key: string) => key,
 }));
+vi.mock('@/hooks/use-config', () => ({ useConfig: () => ({ identityManagementEnabled: true }), getCachedConfig: () => null }));
 vi.mock('@/i18n/navigation', () => ({
   useRouter: () => ({ push: vi.fn() }),
 }));
 vi.mock('@/stores/auth-store', () => ({
-  useAuthStore: (selector?: (state: typeof authState) => unknown) =>
-    selector ? selector(authState) : authState,
+  useAuthStore: Object.assign(
+    (selector?: (state: typeof authState) => unknown) => selector ? selector(authState) : authState,
+    { getState: () => authState },
+  ),
 }));
 vi.mock('@/stores/account-store', () => ({
   useAccountStore: (selector: (state: typeof accountState) => unknown) => selector(accountState),
 }));
 vi.mock('@/stores/email-store', () => ({
-  useEmailStore: () => ({ quota: null }),
+  useEmailStore: (selector?: (state: { quota: null; mailboxes: never[] }) => unknown) => {
+    const state = { quota: null, mailboxes: [] as never[] };
+    return selector ? selector(state) : state;
+  },
 }));
 vi.mock('@/stores/managed-account-store', () => ({
   useManagedAccountStore: (selector: (state: { setManagedAccount: () => void }) => unknown) =>
     selector({ setManagedAccount: vi.fn() }),
 }));
-vi.mock('@/components/ui/avatar', () => ({
-  Avatar: ({ did }: { did?: string }) => <span data-testid="account-avatar" data-did={did} />,
+vi.mock('@/components/ui/atproto-avatar', () => ({
+  AtprotoAvatar: ({ did }: { did?: string }) => <span data-testid="account-avatar" data-did={did} />,
 }));
 vi.mock('@/components/ui/atproto-handle', () => ({
   AtprotoHandle: ({ did }: { did?: string }) =>

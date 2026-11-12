@@ -1,10 +1,13 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useLocale, useTranslations } from "next-intl";
 import { Loader2, X } from "@/components/icons";
 import { getActiveAccountSlotHeaders } from "@/lib/auth/active-account-slot";
 import { apiFetch } from "@/lib/browser-navigation";
+import { useCloseOnBack } from "@/hooks/use-close-on-back";
+import { useFocusTrap } from "@/hooks/use-focus-trap";
+import { useStrictestDevices } from "@/hooks/use-device-policy";
 
 /** What the overlay opens: a Files node, or a mail attachment (read-only, #1047). */
 export type WopiDocument =
@@ -21,6 +24,8 @@ interface WopiEditorProps {
    */
   slot?: number | null;
   onClose: () => void;
+  /** Back closes the editor (Files); Mail keeps its own history. */
+  closeOnBack?: boolean;
 }
 
 interface LaunchData {
@@ -36,8 +41,16 @@ interface LaunchData {
  * a form POST of the access token to the editor URL, targeted at an iframe.
  * Mail attachments open in the same overlay as a read-only viewer (#1047).
  */
-export function WopiEditor({ target, accountId, slot, onClose }: WopiEditorProps) {
+export function WopiEditor({ target, accountId, slot, onClose, closeOnBack = false }: WopiEditorProps) {
+  // The editor turns print and export off itself (CheckFileInfo); without
+  // downloads the frame may not start one either.
+  const downloadsOff = useStrictestDevices().noDownloads;
   const t = useTranslations("files");
+  // A full-screen modal: Tab stays in it, the focus starts on Close and goes
+  // back to the file when the editor closes. Escape is the listener below.
+  const titleId = useId();
+  const editorRef = useFocusTrap({ isActive: true, restoreFocus: true });
+  useCloseOnBack({ onBack: onClose, active: closeOnBack });
   const locale = useLocale();
   const [launch, setLaunch] = useState<LaunchData | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -106,28 +119,35 @@ export function WopiEditor({ target, accountId, slot, onClose }: WopiEditorProps
   }, [onClose]);
 
   return (
-    <div className="fixed inset-0 z-[100] bg-background flex flex-col">
+    <div
+      ref={editorRef}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={titleId}
+      className="fixed inset-0 z-[100] bg-background flex flex-col"
+    >
       <div className="flex items-center justify-between gap-3 px-4 h-12 border-b border-border shrink-0">
-        <span className="text-sm font-medium text-foreground truncate">{target.name}</span>
+        <h2 id={titleId} className="text-sm font-medium text-foreground truncate">{target.name}</h2>
         <button
+          type="button"
           onClick={onClose}
           aria-label={t("office_close")}
           className="p-1.5 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
         >
-          <X className="w-4 h-4" />
+          <X className="w-4 h-4" aria-hidden="true" />
         </button>
       </div>
 
       <div className="relative flex-1 min-h-0">
         {error ? (
-          <div className="absolute inset-0 flex items-center justify-center px-6 text-center text-sm text-muted-foreground">
+          <div role="alert" className="absolute inset-0 flex items-center justify-center px-6 text-center text-sm text-muted-foreground">
             {error}
           </div>
         ) : (
           <>
             {!frameLoaded && (
-              <div className="absolute inset-0 flex items-center justify-center gap-2 text-sm text-muted-foreground">
-                <Loader2 className="w-4 h-4 animate-spin" />
+              <div role="status" className="absolute inset-0 flex items-center justify-center gap-2 text-sm text-muted-foreground">
+                <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
                 {t("office_loading")}
               </div>
             )}
@@ -136,7 +156,7 @@ export function WopiEditor({ target, accountId, slot, onClose }: WopiEditorProps
               title={target.name}
               className="w-full h-full border-0"
               onLoad={() => setFrameLoaded(true)}
-              sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-downloads allow-modals"
+              sandbox={`allow-scripts allow-same-origin allow-forms allow-popups${downloadsOff ? "" : " allow-downloads"} allow-modals`}
               referrerPolicy="no-referrer"
               allow="clipboard-read; clipboard-write"
             />

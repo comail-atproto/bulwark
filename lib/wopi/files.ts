@@ -1,6 +1,10 @@
-import { postJmap, fetchJmapSession, rebaseApiUrl } from '@/lib/stalwart/jmap-api';
+import { postJmap, fetchJmapSession, rebaseApiUrl, type JmapSessionDocument } from '@/lib/stalwart/jmap-api';
 import { fetchJmapServer } from '@/lib/stalwart/server-fetch';
+import { UPSTREAM_JSON_MAX_BYTES, readJsonCapped } from '@/lib/security/capped-body';
+import { jmapError, type JmapErrorInfo } from '@/lib/jmap/jmap-error';
+import { fromDraftFileNode } from '@/lib/jmap/filenode-kind';
 import type { FileNode } from '@/lib/jmap/types';
+import { downloadNameSegment } from '@/lib/jmap/download-name';
 
 /**
  * Server-side JMAP FileNode content I/O for the WOPI host (#425).
@@ -24,6 +28,8 @@ const USING = ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:filenode'];
 
 export const WOPI_FILE_NODE_PROPERTIES = [
   'id', 'parentId', 'name', 'type', 'blobId', 'size', 'modified', 'myRights',
+  // `type` as Stalwart 1.0.0 names it (see fromDraftFileNode).
+  'mediaType',
 ];
 
 type JmapMethodResponse = [string, Record<string, unknown>, string];
@@ -47,8 +53,28 @@ async function callJmap(ctx: WopiJmapContext, methodCalls: unknown[]): Promise<J
   if (!response.ok) {
     throw new Error(`JMAP request failed (${response.status})`);
   }
-  const json = (await response.json()) as { methodResponses?: JmapMethodResponse[] };
+  const json = await readJsonCapped<{ methodResponses?: JmapMethodResponse[] }>(response, UPSTREAM_JSON_MAX_BYTES);
   return json.methodResponses ?? [];
+}
+
+/**
+ * Whether saving into another account's node takes the Modify right
+ * (`mayRename`) on top of `mayModifyContent`. Stalwart 0.16 refuses any
+ * update a sharee makes without Modify in the node's own grants, which its
+ * `myRights` reports, content changes included; 1.0 asks for the content
+ * right alone. 1.0 advertises `maxFileNodeDepth` (64) and 0.16 null. A
+ * shared account without the capability goes by the user's own.
+ */
+export function shareeSavesNeedRename(
+  session: JmapSessionDocument | null,
+  accountId: string,
+  ownAccountId: string,
+): boolean {
+  const filenode = (id: string) => {
+    const account = session?.accounts?.[id] as { accountCapabilities?: Record<string, unknown> } | undefined;
+    return account?.accountCapabilities?.['urn:ietf:params:jmap:filenode'] as { maxFileNodeDepth?: unknown } | undefined;
+  };
+  return typeof (filenode(accountId) ?? filenode(ownAccountId))?.maxFileNodeDepth !== 'number';
 }
 
 export async function getWopiFileNode(
@@ -62,7 +88,7 @@ export async function getWopiFileNode(
   const [name, payload] = responses[0] ?? [];
   if (name !== 'FileNode/get') return null;
   const list = (payload?.list as FileNode[] | undefined) ?? [];
-  return list[0] ?? null;
+  return list[0] ? fromDraftFileNode(list[0]) : null;
 }
 
 // The session's download/upload templates advertise the server's public
@@ -127,7 +153,7 @@ export async function downloadFileBlob(
   const url = expandTemplate(downloadUrl, {
     accountId,
     blobId,
-    name,
+    name: downloadNameSegment(name),
     type: type || 'application/octet-stream',
   });
   return fetchJmapServer(url, {
@@ -179,7 +205,7 @@ export async function uploadFileBlob(
   if (!response.ok) {
     throw new Error(`Blob upload failed (${response.status})`);
   }
-  const json = (await response.json()) as { blobId?: string; size?: number; type?: string };
+  const json = await readJsonCapped<{ blobId?: string; size?: number; type?: string }>(response, UPSTREAM_JSON_MAX_BYTES);
   if (!json.blobId) throw new Error('Blob upload returned no blobId');
   return { blobId: json.blobId, size: json.size ?? body.byteLength, type: json.type ?? contentType };
 }
@@ -195,20 +221,27 @@ export async function updateFileNodeBlob(
   blobId: string,
 ): Promise<{ modified: string }> {
   const responses = await callJmap(ctx, [
-    ['FileNode/set', { accountId, update: { [fileId]: { blobId } } }, 's0'],
+    // `modified: null` has the server stamp the save. Stalwart 1.0 treats
+    // `modified` as the client's and leaves it alone on a content change
+    // unless asked, so the list kept the old date and the conflict check
+    // against other JMAP writers never fired. 0.16.6+ bump it either way.
+    ['FileNode/set', { accountId, update: { [fileId]: { blobId, modified: null } } }, 's0'],
     ['FileNode/get', { accountId, ids: [fileId], properties: ['id', 'modified'] }, 'g1'],
   ]);
 
   const [setName, setPayload] = responses[0] ?? [];
   if (setName !== 'FileNode/set') {
-    throw new Error((setPayload?.description as string) || 'FileNode/set failed');
+    throw jmapError((setPayload?.description as string) || 'FileNode/set failed', setPayload as JmapErrorInfo | undefined);
   }
-  const updated = setPayload?.updated as Record<string, unknown> | undefined;
+  const updated = setPayload?.updated as Record<string, { modified?: unknown } | null> | undefined;
   if (!updated || !(fileId in updated)) {
-    const notUpdated = setPayload?.notUpdated as Record<string, { description?: string }> | undefined;
-    throw new Error(notUpdated?.[fileId]?.description || 'FileNode content update rejected');
+    const notUpdated = setPayload?.notUpdated as Record<string, JmapErrorInfo> | undefined;
+    throw jmapError(notUpdated?.[fileId]?.description || 'FileNode content update rejected', notUpdated?.[fileId]);
   }
 
+  // 1.0 echoes the time it stamped; 0.16 answers `null` and the get reads it.
+  const stamped = updated[fileId]?.modified;
+  if (typeof stamped === 'string') return { modified: stamped };
   const getPayload = responses[1]?.[1];
   const node = ((getPayload?.list as FileNode[] | undefined) ?? [])[0];
   return { modified: node?.modified ?? new Date().toISOString() };

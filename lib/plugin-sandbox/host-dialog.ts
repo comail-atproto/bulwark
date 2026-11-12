@@ -5,6 +5,8 @@
 // at a time. Prompts collect one or more (optionally masked) text fields so a
 // plugin never has to fall back to the sandbox-blocked `window.prompt`.
 
+import type { AnchorRect } from './dialog-anchor';
+
 export type DialogKind = 'confirm' | 'alert' | 'prompt' | 'custom';
 
 export interface PromptField {
@@ -26,6 +28,12 @@ export type DialogResult = boolean | Record<string, string> | null;
 
 export interface DialogRequest {
   id: string;
+  /**
+   * For `kind === 'custom'`: the plugin's frame fills the dialog, which is as
+   * tall as the window lets it be (at most 640 px), instead of growing with
+   * its content. For chats, whose input stays at the bottom.
+   */
+  fill?: boolean;
   pluginId: string;
   kind: DialogKind;
   title: string;
@@ -50,6 +58,12 @@ export interface DialogRequest {
   extraProps?: Record<string, unknown>;
   /** Optional width override in px for the dialog box (custom kind only). */
   width?: number;
+  /**
+   * Custom kind only: draw the dialog as a popover next to this place (the
+   * control whose activation led to it, see dialog-anchor.ts) instead of
+   * centred. Set by the host, never taken from the plugin.
+   */
+  anchor?: AnchorRect;
   /** Called when the dialog closes with its typed result (see DialogResult). */
   resolve: (result: unknown) => void;
 }
@@ -67,7 +81,32 @@ function uid(): string {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
 
+/** How many dialogs one plugin may open per minute. */
+export const MAX_DIALOGS_PER_MINUTE = 20;
+const recentByPlugin = new Map<string, number[]>();
+
+export class DialogLimitError extends Error {}
+
+/**
+ * Queue a dialog. A plugin gets one dialog at a time and a limited number
+ * per minute: with neither limit, a plugin that opens dialogs in a loop
+ * covers the whole app and the user can't reach Settings to turn it off.
+ */
 export function enqueueDialog(req: Omit<DialogRequest, 'id'>): { id: string } {
+  // One dialog per plugin, except that a plugin's own large dialog (custom)
+  // may ask one confirm/alert/prompt on top of itself ("Discard changes?").
+  const open = queue.filter((d) => d.pluginId === req.pluginId);
+  const overCustom = open.length === 1 && open[0].kind === 'custom' && req.kind !== 'custom';
+  if (open.length > 0 && !overCustom) {
+    throw new DialogLimitError('This plugin already has a dialog open');
+  }
+  const now = Date.now();
+  const recent = (recentByPlugin.get(req.pluginId) ?? []).filter((t) => now - t < 60_000);
+  if (recent.length >= MAX_DIALOGS_PER_MINUTE) {
+    throw new DialogLimitError('This plugin opened too many dialogs; try again in a minute');
+  }
+  recent.push(now);
+  recentByPlugin.set(req.pluginId, recent);
   const entry: DialogRequest = { ...req, id: uid() };
   queue.push(entry);
   notify();
@@ -78,11 +117,39 @@ export function head(): DialogRequest | null {
   return queue[0] ?? null;
 }
 
+/**
+ * A confirm/alert/prompt a plugin opened on top of its own custom dialog,
+ * when that custom dialog is the one showing. Drawn above it; the custom
+ * dialog stays open (and its iframe keeps its state) underneath.
+ */
+export function overlay(): DialogRequest | null {
+  const base = queue[0];
+  if (!base || base.kind !== 'custom') return null;
+  return queue.find((d, i) => i > 0 && d.pluginId === base.pluginId && d.kind !== 'custom') ?? null;
+}
+
 export function resolveHead(result: unknown): void {
   const entry = queue.shift();
   if (!entry) return;
   try { entry.resolve(result); } catch { /* ignore */ }
   notify();
+}
+
+/**
+ * Resolve one specific dialog. A custom dialog's onResult uses this, so a
+ * second call after it closed can't answer whatever dialog came next.
+ */
+export function resolveDialog(id: string, result: unknown): void {
+  const idx = queue.findIndex((d) => d.id === id);
+  if (idx < 0) return;
+  const [entry] = queue.splice(idx, 1);
+  try { entry.resolve(result); } catch { /* ignore */ }
+  notify();
+}
+
+/** Forget rate-limit history (tests). */
+export function resetDialogLimits(): void {
+  recentByPlugin.clear();
 }
 
 /** The "cancelled" result for a given dialog kind (null for prompt/custom, else false). */
@@ -104,6 +171,28 @@ export function cancelForPlugin(pluginId: string): void {
   if (changed) notify();
 }
 
+/** Whether the plugin has a dialog showing or waiting in the queue. */
+export function hasDialogFor(pluginId: string): boolean {
+  return queue.some((d) => d.pluginId === pluginId);
+}
+
+/**
+ * Calls `cb` once the plugin has no dialog left in the queue (right away if it
+ * has none). Returns a function that drops the callback.
+ */
+export function whenNoDialogFor(pluginId: string, cb: () => void): () => void {
+  if (!hasDialogFor(pluginId)) {
+    cb();
+    return () => {};
+  }
+  const unsubscribe = subscribe(() => {
+    if (hasDialogFor(pluginId)) return;
+    unsubscribe();
+    cb();
+  });
+  return unsubscribe;
+}
+
 export function subscribe(listener: () => void): () => void {
   listeners.add(listener);
   return () => { listeners.delete(listener); };
@@ -118,6 +207,8 @@ export function awaitDialog(req: Omit<DialogRequest, 'id' | 'resolve'>): Promise
     enqueueDialog({ ...req, resolve: (r) => resolve(r === true) });
   });
 }
+// (enqueueDialog throws synchronously inside the executor, which rejects
+// the promise, so the plugin's await sees the limit error.)
 
 /**
  * Prompt variant of `awaitDialog`: resolves to the collected name→value map on

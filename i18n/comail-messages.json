@@ -1,0 +1,1488 @@
+{
+  "common": {
+    "files": {
+      "private_consent_title": "Connect private files",
+      "private_consent_message": "Authorize this account’s private storage to load and save files.",
+      "private_consent_action": "Connect"
+    },
+    "calendar": {
+      "atmo": {
+        "add_to_my_calendar": "Copy to My Calendar",
+        "end_unspecified": "End time not specified",
+        "going": "Going",
+        "hosting": "Hosting",
+        "interested": "Interested",
+        "open_original": "Open in Atmo",
+        "preference_failed": "Atmosphere calendar setting could not be saved",
+        "publish_event": "Publish to Atmosphere",
+        "publish_failed": "Event could not be published",
+        "publish_succeeded": "Event published to Atmosphere",
+        "refresh_my_calendar": "Refresh My Calendar",
+        "rsvp_failed": "Public RSVP could not be saved",
+        "rsvp_going": "Going",
+        "rsvp_interested": "Interested",
+        "rsvp_notgoing": "Not going",
+        "rsvp_succeeded": "Public RSVP saved",
+        "subscribe_failed": "Event could not be added to My Calendar",
+        "subscribe_succeeded": "Event added to My Calendar"
+      }
+    },
+    "login": {
+      "atproto_handle_invalid": "We couldn't find that handle. Check for typos and try again.",
+      "atproto_handle_label": "Handle",
+      "atproto_handle_placeholder": "you.bsky.social or your handle",
+      "atproto_only_hint": "Use your Bluesky or other atproto handle — no password needed.",
+      "comail_builders": "comail for builders",
+      "comail_continue": "Login with Atmosphere",
+      "comail_handle_help": "Comail never asks for your password.",
+      "comail_headline": "Email that's",
+      "comail_headline_emphasis": "actually yours.",
+      "comail_intro": "About Comail Inbox",
+      "comail_next": "Sign in to open your inbox or join the waitlist. No email address needed.",
+      "comail_relay_hint": "Looking for the shared relay?",
+      "comail_signin_hint": "Sign in with your Bluesky or other atproto handle.",
+      "comail_tagline": "Your inbox, atproto-native. Your mail stays with you.",
+      "comail_welcome": "Make yourself at home.",
+      "sign_in_atproto": "Sign in with your handle",
+      "waitlist": {
+        "add_email": "Add an email address (optional)",
+        "already_saved": "Your waitlist signup is saved even if you don't confirm your email.",
+        "check_email": "Check your email.",
+        "checking": "Check your waitlist signup",
+        "close": "You can close this page. Sign in again anytime to check for Inbox access.",
+        "confirmation_sent": "Confirm {email} using the link in your email to receive an update when access is ready.",
+        "email_confirmed": "Email confirmed.",
+        "email_hint": "We'll send a confirmation link first. Availability updates only.",
+        "email_label": "Email address",
+        "email_title": "Want an email when access is ready?",
+        "identity": "Signed in as {identity}.",
+        "inbox_available": "Inbox is available for your account. Sign in to continue.",
+        "invalid_email": "Enter a valid email address.",
+        "loading": "Checking your sign-in…",
+        "notifications_enabled": "We'll email {email} when Inbox access is ready.",
+        "notify": "Email me when access is ready",
+        "optional": "Adding an email is optional. You're already on the waitlist.",
+        "proof_required": "Your sign-in expired. Sign in again to check your signup or manage email notifications.",
+        "rate_limited": "Too many notification requests. Please try again later.",
+        "retry": "Try again",
+        "saved": "Your signup is saved.",
+        "sending": "Sending confirmation…",
+        "sign_in": "Return to sign-in",
+        "title": "You're on the waitlist.",
+        "try_again": "We couldn't check or update your waitlist signup. Please try again."
+      }
+    },
+    "settings": {
+      "advanced": {
+        "about": {
+          "based_on": "Based on Bulwark Webmail (AGPL-3.0)",
+          "license": "License: AGPL-3.0-only",
+          "modified_notice": "Modified by Comail. This service runs a modified version of Bulwark Webmail.",
+          "powered_by": "Powered by Stalwart Mail Server (AGPL-3.0)",
+          "source_offer": "Corresponding Source",
+          "source_offer_desc": "Per AGPL-3.0 §13, the complete corresponding source of this modified version is available at no charge.",
+          "stalwart": "Stalwart Mail Server",
+          "upstream": "Upstream project"
+        }
+      },
+      "byomc": {
+        "clients": {
+          "apple_mail": "Apple Mail",
+          "apple_mail_steps": "Mail → Add Account… → \"Other Mail Account…\" → enter email, then \"Sign In\" fails → choose IMAP/SMTP and fill the host/port above with your email as username.",
+          "thunderbird": "Thunderbird",
+          "thunderbird_steps": "Add Account → \"Set up manually\". Server hostname: use the IMAP host above, port 993, SSL/TLS. Outgoing: SMTP host above, port 465, SSL/TLS. Authentication: \"Normal password\", username = your full email."
+        },
+        "config_missing_description": "Your operator hasn't published IMAP/SMTP connection details. Ask them to set IMAP_HOST and SMTP_HOST.",
+        "config_missing_title": "Not configured yet",
+        "connection_description": "Enter these in your mail client's account setup. Use your Comail email address as the username.",
+        "connection_title": "Connection details",
+        "copied": "Copied",
+        "copy": "Copy",
+        "copy_aria": "Copy {label}",
+        "copy_failed": "Copy failed",
+        "description": "Use Comail from a third-party mail app like Thunderbird or Apple Mail.",
+        "hints_title": "Per-client setup hints",
+        "imap_host_label": "IMAP host (receiving mail)",
+        "imap_port_label": "IMAP port",
+        "passwords": {
+          "description": "Third-party clients can't use your main password. Mint a dedicated app password per client and revoke it when you stop using that client.",
+          "empty": "No app passwords yet.",
+          "label_placeholder": "Label (e.g. Thunderbird)",
+          "load_failed": "Couldn't load app passwords",
+          "loading": "Loading app passwords…",
+          "mint": "Mint app password",
+          "mint_failed": "Couldn't mint app password",
+          "minted": "App password minted",
+          "minted_dialog_copy_warning": "Closing this dialog hides the password permanently. Store it somewhere safe.",
+          "minted_dialog_done": "Done",
+          "minted_dialog_title": "Your new app password",
+          "minted_dialog_warning": "Copy this now — you won't see it again.",
+          "minted_value_label": "New app password",
+          "refresh": "Refresh",
+          "revoke": "Revoke",
+          "revoke_aria": "Revoke this app password",
+          "revoke_confirm": "Revoke",
+          "revoke_confirm_message": "Any client using this password will stop working immediately. This can't be undone.",
+          "revoke_confirm_title": "Revoke app password?",
+          "revoke_failed": "Couldn't revoke app password",
+          "revoked": "App password revoked",
+          "title": "App passwords",
+          "unnamed": "Unnamed"
+        },
+        "smtp_host_label": "SMTP host (sending mail)",
+        "smtp_port_label": "SMTP port",
+        "title": "Connect a mail client",
+        "tls_note": "Both connections use TLS. Pick the \"SSL/TLS\" (not STARTTLS) option in your client when it asks.",
+        "username_label": "Username",
+        "username_unknown": "(sign in to view)"
+      },
+      "tabs": {
+        "byomc": "Connect a mail client"
+      }
+    },
+    "sidebar": {
+      "builders": "Builders",
+      "builders_label": "Comail for Builders"
+    },
+    "contacts": {
+      "private_consent_title": "Connect private contacts",
+      "private_consent_message": "Authorize this account’s private address book to load and save contacts.",
+      "private_consent_action": "Connect",
+      "export": {
+        "failed": "Contacts could not be exported without losing unsupported fields"
+      }
+    }
+  },
+  "locales": {
+    "ar": {
+      "calendar": {
+        "notifications": {
+          "space_calendar_authorization_message": "لم تُحفظ أي تغييرات. امنح الإذن، ثم عُد إلى هنا وأعد المحاولة.",
+          "space_calendar_authorization_title": "يلزم إذن التقويم",
+          "space_calendar_authorize": "إذن",
+          "space_calendar_consent_pending": "موافقة عضو التقويم معلّقة. لم يُفعّل الوصول بعد.",
+          "space_calendar_consent_start_failed": "تعذّر بدء موافقة التقويم",
+          "space_calendar_mixed_audiences": "احفظ تغييرات الحدث وتذكيراتك الخاصة بشكل منفصل.",
+          "space_calendar_unsupported_operation": "هذا الإجراء غير مدعوم لهذا التقويم."
+        }
+      },
+      "sharing": {
+        "space_calendar_description": "يجب على العضو المدعو السماح بالوصول قبل تفعيل مشاركة التقويم."
+      }
+    },
+    "ca": {
+      "calendar": {
+        "notifications": {
+          "space_calendar_authorization_message": "No s’ha desat cap canvi. Autoritza l’accés, torna aquí i torna-ho a provar.",
+          "space_calendar_authorization_title": "Cal autoritzar el calendari",
+          "space_calendar_authorize": "Autoritza",
+          "space_calendar_consent_pending": "El consentiment del membre està pendent. L’accés encara no és actiu.",
+          "space_calendar_consent_start_failed": "No s’ha pogut iniciar el consentiment del calendari",
+          "space_calendar_mixed_audiences": "Desa els canvis de l’esdeveniment i els teus recordatoris privats per separat.",
+          "space_calendar_unsupported_operation": "Aquesta acció no és compatible amb aquest calendari."
+        }
+      },
+      "settings": {
+        "advanced": {
+          "about": {
+            "title": "Comail Webmail"
+          }
+        }
+      },
+      "sharing": {
+        "space_calendar_description": "La persona convidada ha d’autoritzar l’accés perquè la compartició del calendari s’activi."
+      }
+    },
+    "cs": {
+      "calendar": {
+        "notifications": {
+          "space_calendar_authorization_message": "Žádné změny nebyly uloženy. Povolte přístup, vraťte se sem a zkuste to znovu.",
+          "space_calendar_authorization_title": "Je třeba povolit kalendář",
+          "space_calendar_authorize": "Povolit",
+          "space_calendar_consent_pending": "Souhlas člena čeká na vyřízení. Přístup zatím není aktivní.",
+          "space_calendar_consent_start_failed": "Nepodařilo se zahájit souhlas s kalendářem",
+          "space_calendar_mixed_audiences": "Změny události a své soukromé připomínky uložte zvlášť.",
+          "space_calendar_unsupported_operation": "Tato akce není pro tento kalendář podporována."
+        }
+      },
+      "demo_welcome": {
+        "title": "Vítejte v Comail"
+      },
+      "email_viewer": {
+        "unsubscribe_banner": {
+          "success_mailto": "Požadavek na odhlášení byl odeslán do e-mailového klienta"
+        }
+      },
+      "identities": {
+        "form": {
+          "bcc_placeholder": "archiv@email.com",
+          "reply_to_placeholder": "jiny@email.com"
+        }
+      },
+      "protocol_handlers": {
+        "browser_note": "Prohlížeč nebo operační systém vás může požádat o potvrzení a může vyžadovat, aby byl Comail nainstalovaný, než jej půjde vybrat jako výchozí aplikaci.",
+        "description": "Zvolte, zda se mají e-mailové a kalendářové odkazy otevírat v Comailu. Technicky se Comail registruje jako obslužná aplikace protokolu pro odkazy mailto: a webcal:.",
+        "focus_notification_body": "Odkaz byl otevřen v Comailu. Kliknutím přenesete okno do popředí.",
+        "focus_notification_title": "Otevřít Comail",
+        "mailto_description": "Otevře odkazy mailto: v Comailu s předvyplněným editorem zprávy.",
+        "protocol_open_mode_description": "Zvolte, zda má Comail otevírat odkazy mailto: a webcal: v nové kartě, nebo znovu použít otevřenou relaci. Volba aktivní relace vyžaduje oprávnění k oznámením, abyste mohli kliknout na záložní oznámení a přenést Comail do popředí, pokud prohlížeč blokuje fokus.",
+        "webcal_description": "Otevře odkazy webcal: v Comailu s předvyplněným dialogem pro odběr kalendáře."
+      },
+      "settings": {
+        "email_behavior": {
+          "return_to_list_after_action": {
+            "description": "After deleting or marking the open message unread, go back to the message list instead of opening the next message.",
+            "label": "Return to list after delete or mark unread"
+          }
+        },
+        "notifications": {
+          "push": {
+            "description": "Přijímat systémová oznámení o nové poště, když je tento web zavřený. Doručováno přes push relay Comail; relay nikdy nevidí obsah pošty.",
+            "relay_desc": "Výchozí je hostovaný relay Comail. Změňte pouze pokud používáte vlastní hosting."
+          }
+        },
+        "security": {
+          "link_device": {
+            "description": "Přihlaste se do mobilní aplikace Comail bez psaní. Vygenerujte zde QR kód a naskenujte jej na přihlašovací obrazovce aplikace.",
+            "instructions": "Otevřete aplikaci Comail, na přihlašovací obrazovce klepněte na \"Naskenovat QR kód\" a namiřte fotoaparát sem."
+          }
+        }
+      },
+      "sharing": {
+        "space_calendar_description": "Pozvaný člen musí povolit přístup, než se sdílení kalendáře aktivuje."
+      }
+    },
+    "da": {
+      "calendar": {
+        "notifications": {
+          "space_calendar_authorization_message": "Ingen ændringer blev gemt. Godkend adgang, vend tilbage hertil, og prøv igen.",
+          "space_calendar_authorization_title": "Kalenderadgang kræver godkendelse",
+          "space_calendar_authorize": "Godkend",
+          "space_calendar_consent_pending": "Medlemmets samtykke afventer. Adgangen er ikke aktiv endnu.",
+          "space_calendar_consent_start_failed": "Kunne ikke starte kalendersamtykke",
+          "space_calendar_mixed_audiences": "Gem ændringer i begivenheden og dine private påmindelser hver for sig.",
+          "space_calendar_unsupported_operation": "Denne handling understøttes ikke for denne kalender."
+        }
+      },
+      "common": {
+        "rate_limited_action_detail": "Comail venter på, at serverens nedkølingsperiode slutter, før der sendes flere godkendte anmodninger. Prøv igen om {seconds}s.",
+        "rate_limited_detail": "Comail har sat baggrundsanmodninger på pause for at undgå udelukkelse. Prøver igen om {seconds}s."
+      },
+      "demo_welcome": {
+        "title": "Velkommen til Comail"
+      },
+      "email_viewer": {
+        "unsubscribe_banner": {
+          "success_mailto": "Afmeldingsanmodning sendt til din e-mailklient"
+        }
+      },
+      "protocol_handlers": {
+        "browser_note": "Din browser eller dit operativsystem beder dig muligvis bekræfte dette og kræver muligvis, at Comail er installeret, før det kan vælges som standardapp.",
+        "description": "Vælg om e-mail- og kalenderlinks åbnes i Comail. Teknisk set registrerer Comail sig som protokolhåndtering for mailto:- og webcal:-links.",
+        "focus_notification_body": "Linket blev åbnet i Comail. Klik for at bringe vinduet frem.",
+        "focus_notification_title": "Åbn Comail",
+        "mailto_description": "Åbn mailto:-links i Comail med et forudfyldt skrivevindue.",
+        "protocol_open_mode_description": "Vælg om Comail åbner mailto:- og webcal:-links i en ny fane eller genbruger en åben session. Indstillingen \\\"aktiv session\\\" kræver notifikationstilladelse, så du kan klikke på en nødnotifikation for at bringe Comail frem, hvis browseren blokerer fokus.",
+        "webcal_description": "Åbn webcal:-links i Comail med en forudfyldt kalenderabonnementsdialog."
+      },
+      "settings": {
+        "email_behavior": {
+          "return_to_list_after_action": {
+            "description": "After deleting or marking the open message unread, go back to the message list instead of opening the next message.",
+            "label": "Return to list after delete or mark unread"
+          }
+        },
+        "notifications": {
+          "push": {
+            "description": "Modtag systemnotifikationer for ny mail, når dette site er lukket. Leveres via Comail push-relæet; relæet ser aldrig mail-indhold.",
+            "relay_desc": "Som standard det hosted Comail-relæ. Ændr kun, hvis du selv-host'er."
+          }
+        },
+        "security": {
+          "link_device": {
+            "description": "Log ind i Comail-mobilappen uden at skrive noget. Generér en QR-kode her, og scan den fra appens loginskærm.",
+            "instructions": "Åbn Comail-appen, tryk på \"Scan QR-kode\" på loginskærmen, og ret dit kamera herhen."
+          }
+        }
+      },
+      "sharing": {
+        "space_calendar_description": "Den inviterede skal godkende adgang, før kalenderdelingen bliver aktiv."
+      }
+    },
+    "de": {
+      "calendar": {
+        "notifications": {
+          "space_calendar_authorization_message": "Es wurden keine Änderungen gespeichert. Autorisiere den Zugriff, kehre hierher zurück und versuche es erneut.",
+          "space_calendar_authorization_title": "Kalenderzugriff erforderlich",
+          "space_calendar_authorize": "Autorisieren",
+          "space_calendar_consent_pending": "Die Zustimmung des Mitglieds steht noch aus. Der Zugriff ist noch nicht aktiv.",
+          "space_calendar_consent_start_failed": "Kalenderzustimmung konnte nicht gestartet werden",
+          "space_calendar_mixed_audiences": "Speichere Änderungen am Termin und deine privaten Erinnerungen getrennt.",
+          "space_calendar_unsupported_operation": "Diese Aktion wird für diesen Kalender nicht unterstützt."
+        }
+      },
+      "common": {
+        "rate_limited_action_detail": "Comail wartet, bis die Serverabklingzeit endet, bevor weitere authentifizierte Anfragen gesendet werden. Versuchen Sie es in {seconds}s erneut.",
+        "rate_limited_detail": "Comail hat Hintergrundanfragen pausiert, um eine Sperre zu vermeiden. Neuer Versuch in {seconds}s."
+      },
+      "demo_welcome": {
+        "title": "Willkommen bei Comail"
+      },
+      "email_viewer": {
+        "unsubscribe_banner": {
+          "success_mailto": "Abmeldeanfrage an Ihr E-Mail-Programm gesendet"
+        }
+      },
+      "protocol_handlers": {
+        "browser_note": "Ihr Browser oder Betriebssystem kann eine Bestätigung verlangen. Eventuell muss Comail installiert sein, bevor es als Standard-App ausgewählt werden kann.",
+        "description": "Legen Sie fest, ob E-Mail- und Kalender-Links in Comail geöffnet werden. Technisch registriert sich Comail dafür als Protokoll-Handler für mailto: und webcal:.",
+        "focus_notification_body": "Der Link wurde in Comail geöffnet. Klicke hier, um das Fenster in den Vordergrund zu holen.",
+        "focus_notification_title": "Comail öffnen",
+        "mailto_description": "Öffnet mailto:-Links in Comail mit vorausgefülltem Editor.",
+        "protocol_open_mode_description": "Wähle, ob Comail mailto:- und webcal:-Links immer in einem neuen Tab öffnet oder eine offene Sitzung wiederverwendet. Für die aktive Sitzung benötigt Comail Benachrichtigungen, damit du das Fenster per Klick in den Vordergrund holen kannst, falls der Browser den Fokus blockiert.",
+        "webcal_description": "Öffnet webcal:-Links in Comail mit vorausgefülltem Kalender-Abo-Dialog."
+      },
+      "settings": {
+        "email_behavior": {
+          "return_to_list_after_action": {
+            "description": "After deleting or marking the open message unread, go back to the message list instead of opening the next message.",
+            "label": "Return to list after delete or mark unread"
+          }
+        },
+        "notifications": {
+          "push": {
+            "description": "Systembenachrichtigungen für neue E-Mails empfangen, wenn diese Seite geschlossen ist. Zustellung über das Comail Push-Relay; das Relay sieht niemals E-Mail-Inhalte.",
+            "relay_desc": "Standardmäßig wird das gehostete Comail-Relay verwendet. Nur ändern, wenn Sie selbst hosten."
+          }
+        },
+        "security": {
+          "link_device": {
+            "description": "Melden Sie sich in der Comail App an, ohne etwas einzutippen. Erzeugen Sie hier einen QR-Code und scannen Sie ihn auf dem Anmeldebildschirm der App.",
+            "instructions": "Öffnen Sie die Comail App, tippen Sie auf dem Anmeldebildschirm auf \"QR-Code scannen\" und richten Sie die Kamera hierauf."
+          }
+        }
+      },
+      "sharing": {
+        "space_calendar_description": "Das eingeladene Mitglied muss den Zugriff autorisieren, bevor die Kalenderfreigabe aktiv wird."
+      }
+    },
+    "en": {
+      "calendar": {
+        "notifications": {
+          "space_calendar_authorization_message": "No calendar changes were saved. Authorize access, return here, then retry.",
+          "space_calendar_authorization_title": "Calendar authorization needed",
+          "space_calendar_authorize": "Authorize",
+          "space_calendar_consent_pending": "Calendar access is waiting for member consent. It is not active yet.",
+          "space_calendar_consent_start_failed": "Could not start calendar consent",
+          "space_calendar_mixed_audiences": "Save event changes and your private reminders separately.",
+          "space_calendar_unsupported_operation": "This action isn’t supported for this calendar."
+        }
+      },
+      "common": {
+        "rate_limited_action_detail": "Comail is waiting for the server cooldown to end before sending more authenticated requests. Try again in {seconds}s.",
+        "rate_limited_detail": "Comail has paused background requests to avoid lockout. Retrying in {seconds}s."
+      },
+      "demo_welcome": {
+        "title": "Welcome to Comail"
+      },
+      "email_viewer": {
+        "read_receipt": {
+          "prompt": "The sender requested a read receipt:"
+        },
+        "unsubscribe_banner": {
+          "success_mailto": "Unsubscribe request sent to your email client"
+        }
+      },
+      "identities": {
+        "form": {
+          "bcc_placeholder": "archive@email.com",
+          "reply_to_placeholder": "different@email.com"
+        }
+      },
+      "protocol_handlers": {
+        "browser_note": "Your browser or operating system may ask you to confirm this and may require Comail to be installed before it can be selected as the default app.",
+        "description": "Choose whether email and calendar links open in Comail. Technically, Comail registers as a protocol handler for mailto: and webcal: links.",
+        "focus_notification_body": "The link was opened in Comail. Click to bring the window to the front.",
+        "focus_notification_title": "Open Comail",
+        "mailto_description": "Open mailto: links in Comail with a prefilled composer.",
+        "protocol_open_mode_description": "Choose whether Comail opens mailto: and webcal: links in a new tab or reuses an open session. The active-session option needs notification permission so you can click a fallback notification to bring Comail to the front if the browser blocks focus.",
+        "webcal_description": "Open webcal: links in Comail with a prefilled calendar subscription dialog."
+      },
+      "settings": {
+        "advanced": {
+          "about": {
+            "title": "Comail Webmail"
+          }
+        },
+        "notifications": {
+          "push": {
+            "description": "Receive system notifications for new mail when this site is closed. Delivered via the Comail push relay; the relay never sees mail content."
+          }
+        },
+        "security": {
+          "link_device": {
+            "description": "Sign in to the Comail mobile app without typing anything. Generate a QR code here and scan it from the app's login screen.",
+            "instructions": "Open the Comail app, tap \"Scan QR code\" on the login screen, and point your camera here."
+          }
+        }
+      },
+      "sharing": {
+        "space_calendar_description": "The invited member must authorize access before calendar sharing becomes active."
+      }
+    },
+    "es": {
+      "calendar": {
+        "notifications": {
+          "space_calendar_authorization_message": "No se guardaron cambios. Autoriza el acceso, vuelve aquí e inténtalo de nuevo.",
+          "space_calendar_authorization_title": "Se necesita autorización del calendario",
+          "space_calendar_authorize": "Autorizar",
+          "space_calendar_consent_pending": "El consentimiento del miembro está pendiente. El acceso aún no está activo.",
+          "space_calendar_consent_start_failed": "No se pudo iniciar el consentimiento del calendario",
+          "space_calendar_mixed_audiences": "Guarda los cambios del evento y tus recordatorios privados por separado.",
+          "space_calendar_unsupported_operation": "Esta acción no es compatible con este calendario."
+        }
+      },
+      "common": {
+        "rate_limited_action_detail": "Comail está esperando a que termine el enfriamiento del servidor antes de enviar más solicitudes autenticadas. Inténtalo de nuevo en {seconds}s.",
+        "rate_limited_detail": "Comail ha pausado las solicitudes en segundo plano para evitar un bloqueo. Reintentando en {seconds}s."
+      },
+      "demo_welcome": {
+        "title": "Bienvenido a Comail"
+      },
+      "email_viewer": {
+        "unsubscribe_banner": {
+          "success_mailto": "Solicitud de cancelación enviada a su cliente de correo"
+        }
+      },
+      "protocol_handlers": {
+        "browser_note": "Tu navegador o sistema operativo puede pedirte confirmación y puede requerir que Comail esté instalado antes de poder seleccionarlo como aplicación predeterminada.",
+        "description": "Elige si los enlaces de correo y calendario se abren en Comail. Técnicamente, Comail se registra como controlador de protocolo para enlaces mailto: y webcal:.",
+        "focus_notification_body": "El enlace se abrió en Comail. Haz clic para traer la ventana al frente.",
+        "focus_notification_title": "Abrir Comail",
+        "mailto_description": "Abre enlaces mailto: en Comail con el redactor rellenado previamente.",
+        "protocol_open_mode_description": "Elige si Comail abre los enlaces mailto: y webcal: en una nueva pestaña o reutiliza una sesión abierta. La opción de sesión activa necesita permiso de notificaciones para que puedas hacer clic en una notificación de respaldo y traer Comail al frente si el navegador bloquea el foco.",
+        "webcal_description": "Abre enlaces webcal: en Comail con un diálogo de suscripción al calendario rellenado previamente."
+      },
+      "settings": {
+        "email_behavior": {
+          "return_to_list_after_action": {
+            "description": "After deleting or marking the open message unread, go back to the message list instead of opening the next message.",
+            "label": "Return to list after delete or mark unread"
+          }
+        },
+        "notifications": {
+          "push": {
+            "description": "Recibe notificaciones del sistema para correo nuevo cuando este sitio está cerrado. Se entrega a través del relay push de Comail; el relay nunca ve el contenido del correo.",
+            "relay_desc": "Usa el relay alojado de Comail de forma predeterminada. Cámbialo solo si te alojas tú mismo."
+          }
+        },
+        "security": {
+          "link_device": {
+            "description": "Inicie sesión en la aplicación móvil de Comail sin escribir nada. Genere un código QR aquí y escanéelo desde la pantalla de inicio de sesión de la aplicación.",
+            "instructions": "Abra la aplicación Comail, toque \"Escanear código QR\" en la pantalla de inicio de sesión y apunte su cámara aquí."
+          }
+        }
+      },
+      "sharing": {
+        "space_calendar_description": "La persona invitada debe autorizar el acceso antes de que se active el calendario compartido."
+      }
+    },
+    "fa": {
+      "calendar": {
+        "notifications": {
+          "space_calendar_authorization_message": "هیچ تغییری ذخیره نشد. دسترسی را مجاز کنید، به اینجا برگردید و دوباره تلاش کنید.",
+          "space_calendar_authorization_title": "مجوز تقویم لازم است",
+          "space_calendar_authorize": "مجاز کردن",
+          "space_calendar_consent_pending": "رضایت عضو در انتظار است. دسترسی هنوز فعال نیست.",
+          "space_calendar_consent_start_failed": "شروع رضایت تقویم ممکن نشد",
+          "space_calendar_mixed_audiences": "تغییرات رویداد و یادآوری‌های خصوصی خود را جداگانه ذخیره کنید.",
+          "space_calendar_unsupported_operation": "این عملیات برای این تقویم پشتیبانی نمی‌شود."
+        }
+      },
+      "common": {
+        "rate_limited_action_detail": "Comail منتظر پایان زمان انتظار سرور است. در {seconds} ثانیه دوباره تلاش کنید.",
+        "rate_limited_detail": "Comail درخواست‌های پس‌زمینه را متوقف کرده است. تلاش مجدد در {seconds} ثانیه."
+      },
+      "demo_welcome": {
+        "title": "به Comail خوش آمدید"
+      },
+      "email_viewer": {
+        "unsubscribe_banner": {
+          "success_mailto": "درخواست لغو اشتراک ارسال شد"
+        }
+      },
+      "identities": {
+        "form": {
+          "bcc_placeholder": "archive@email.com",
+          "reply_to_placeholder": "different@email.com"
+        }
+      },
+      "protocol_handlers": {
+        "description": "انتخاب کنید لینک‌های ایمیل و تقویم در Comail باز شوند.",
+        "focus_notification_body": "لینک در Comail باز شد.",
+        "focus_notification_title": "باز کردن Comail",
+        "mailto_description": "باز کردن لینک‌های mailto: در Comail",
+        "webcal_description": "باز کردن لینک‌های webcal: در Comail"
+      },
+      "settings": {
+        "notifications": {
+          "push": {
+            "relay_desc": "پیش‌فرض رله میزبانی شده Comail"
+          }
+        }
+      },
+      "sharing": {
+        "space_calendar_description": "عضو دعوت‌شده باید پیش از فعال شدن اشتراک‌گذاری تقویم، دسترسی را مجاز کند."
+      }
+    },
+    "fr": {
+      "calendar": {
+        "notifications": {
+          "space_calendar_authorization_message": "Aucune modification n’a été enregistrée. Autorisez l’accès, revenez ici, puis réessayez.",
+          "space_calendar_authorization_title": "Autorisation du calendrier requise",
+          "space_calendar_authorize": "Autoriser",
+          "space_calendar_consent_pending": "Le consentement du membre est en attente. L’accès n’est pas encore actif.",
+          "space_calendar_consent_start_failed": "Impossible de démarrer le consentement au calendrier",
+          "space_calendar_mixed_audiences": "Enregistrez séparément les modifications de l’événement et vos rappels privés.",
+          "space_calendar_unsupported_operation": "Cette action n’est pas prise en charge pour ce calendrier."
+        }
+      },
+      "common": {
+        "rate_limited_action_detail": "Comail attend la fin du delai impose par le serveur avant d'envoyer d'autres requetes authentifiees. Reessayez dans {seconds}s.",
+        "rate_limited_detail": "Comail a suspendu les requetes en arriere-plan pour eviter un blocage. Nouvelle tentative dans {seconds}s."
+      },
+      "demo_welcome": {
+        "title": "Bienvenue sur Comail"
+      },
+      "email_viewer": {
+        "unsubscribe_banner": {
+          "success_mailto": "Demande de désabonnement envoyée à votre client mail"
+        }
+      },
+      "identities": {
+        "form": {
+          "bcc_placeholder": "archive@email.com",
+          "reply_to_placeholder": "autre@email.com"
+        }
+      },
+      "protocol_handlers": {
+        "browser_note": "Votre navigateur ou système d'exploitation peut vous demander de confirmer et peut exiger que Comail soit installé avant de pouvoir le sélectionner comme application par défaut.",
+        "description": "Choisissez si les liens d'e-mail et de calendrier s'ouvrent dans Comail. Techniquement, Comail s'enregistre comme gestionnaire de protocole pour les liens mailto: et webcal:.",
+        "focus_notification_body": "Le lien a été ouvert dans Comail. Cliquez pour ramener la fenêtre au premier plan.",
+        "focus_notification_title": "Ouvrir Comail",
+        "mailto_description": "Ouvre les liens mailto: dans Comail avec un éditeur prérempli.",
+        "protocol_open_mode_description": "Choisissez si Comail ouvre les liens mailto: et webcal: dans un nouvel onglet ou réutilise une session ouverte. L’option de session active nécessite l’autorisation des notifications afin que vous puissiez cliquer sur une notification de secours pour ramener Comail au premier plan si le navigateur bloque le focus.",
+        "webcal_description": "Ouvre les liens webcal: dans Comail avec une boîte de dialogue d'abonnement au calendrier préremplie."
+      },
+      "settings": {
+        "email_behavior": {
+          "return_to_list_after_action": {
+            "description": "After deleting or marking the open message unread, go back to the message list instead of opening the next message.",
+            "label": "Return to list after delete or mark unread"
+          }
+        },
+        "notifications": {
+          "push": {
+            "description": "Recevez des notifications système pour les nouveaux courriers quand ce site est fermé. Livré via le relais push Comail ; le relais ne voit jamais le contenu des courriers.",
+            "relay_desc": "Utilise par défaut le relais Comail hébergé. Ne le changez que si vous l'hébergez vous-même."
+          }
+        },
+        "security": {
+          "link_device": {
+            "description": "Connectez-vous à l'application mobile Comail sans rien saisir. Générez un QR code ici et scannez-le depuis l'écran de connexion de l'application.",
+            "instructions": "Ouvrez l'application Comail, appuyez sur \"Scanner le QR code\" sur l'écran de connexion et pointez votre caméra ici."
+          }
+        }
+      },
+      "sharing": {
+        "space_calendar_description": "La personne invitée doit autoriser l’accès avant que le partage du calendrier soit actif."
+      }
+    },
+    "he": {
+      "calendar": {
+        "notifications": {
+          "space_calendar_authorization_message": "לא נשמרו שינויים. יש לאשר את הגישה, לחזור לכאן ולנסות שוב.",
+          "space_calendar_authorization_title": "נדרש אישור ליומן",
+          "space_calendar_authorize": "אישור",
+          "space_calendar_consent_pending": "הסכמת המשתמש ממתינה. הגישה עדיין אינה פעילה.",
+          "space_calendar_consent_start_failed": "לא ניתן להתחיל את הסכמת היומן",
+          "space_calendar_mixed_audiences": "יש לשמור את השינויים באירוע ואת התזכורות הפרטיות שלך בנפרד.",
+          "space_calendar_unsupported_operation": "הפעולה הזו אינה נתמכת ביומן הזה."
+        }
+      },
+      "sharing": {
+        "space_calendar_description": "המשתמש המוזמן צריך לאשר את הגישה לפני ששיתוף היומן יופעל."
+      }
+    },
+    "hu": {
+      "calendar": {
+        "notifications": {
+          "space_calendar_authorization_message": "Nem történt módosítás. Engedélyezd a hozzáférést, térj vissza ide, majd próbáld újra.",
+          "space_calendar_authorization_title": "Naptárengedélyezés szükséges",
+          "space_calendar_authorize": "Engedélyezés",
+          "space_calendar_consent_pending": "A tag hozzájárulása függőben van. A hozzáférés még nem aktív.",
+          "space_calendar_consent_start_failed": "Nem sikerült elindítani a naptárhozzájárulást",
+          "space_calendar_mixed_audiences": "Az esemény módosításait és a saját emlékeztetőidet külön mentsd el.",
+          "space_calendar_unsupported_operation": "Ez a művelet nem támogatott ennél a naptárnál."
+        }
+      },
+      "common": {
+        "rate_limited_action_detail": "A Comail várja a szerver lehűlését, mielőtt további hitelesített kéréseket küldene. Próbáld újra {seconds} másodperc múlva.",
+        "rate_limited_detail": "A Comail szüneteltette a háttérkéréseket a lezárás elkerülése érdekében. Újrapróbálkozás {seconds} másodperc múlva."
+      },
+      "demo_welcome": {
+        "title": "Üdvözlünk a Comail-ben"
+      },
+      "email_viewer": {
+        "unsubscribe_banner": {
+          "success_mailto": "Leiratkozási kérelem elküldve az e-mail kliensnek"
+        }
+      },
+      "identities": {
+        "form": {
+          "bcc_placeholder": "archive@email.com",
+          "reply_to_placeholder": "different@email.com"
+        }
+      },
+      "protocol_handlers": {
+        "browser_note": "A böngésző vagy operációs rendszered megerősítést kérhet, és előfordulhat, hogy a Comailot telepíteni kell, mielőtt alapértelmezett alkalmazásként kiválasztható.",
+        "description": "Válaszd ki, hogy az e-mail és naptár hivatkozások a Comailban nyíljanak meg. Technikailag a Comail protokollkezelőként regisztrálja magát a mailto: és webcal: hivatkozásokhoz.",
+        "focus_notification_body": "A hivatkozás megnyílt a Comailban. Kattints az ablak előtérbe hozásához.",
+        "focus_notification_title": "Comail megnyitása",
+        "mailto_description": "Mailto: hivatkozások megnyitása a Comailban egy előre kitöltött szerkesztővel.",
+        "protocol_open_mode_description": "Válaszd ki, hogy a Comail a mailto: és webcal: hivatkozásokat új lapon vagy a meglévő munkamenetben nyissa meg. Az aktív munkamenet opcióhoz értesítési engedély szükséges, hogy egy értesítésre kattintva előtérbe hozd a Comailot, ha a böngésző blokkolja a fókuszt.",
+        "webcal_description": "Webcal: hivatkozások megnyitása a Comailban egy előre kitöltött naptárfeliratkozási párbeszédpanellel."
+      },
+      "settings": {
+        "email_behavior": {
+          "return_to_list_after_action": {
+            "description": "After deleting or marking the open message unread, go back to the message list instead of opening the next message.",
+            "label": "Return to list after delete or mark unread"
+          }
+        },
+        "notifications": {
+          "push": {
+            "description": "Rendszerértesítések fogadása új levelekről, amikor ez az oldal be van zárva. A Comail push relén keresztül kézbesítve; a relay soha nem látja a levél tartalmát.",
+            "relay_desc": "Alapértelmezés szerint a tárolt Comail relay. Csak akkor módosítsd, ha sajátot üzemeltetsz."
+          }
+        },
+        "security": {
+          "link_device": {
+            "description": "Jelentkezz be a Comail mobilalkalmazásba gépelés nélkül. Generálj itt egy QR-kódot, és olvasd be az alkalmazás bejelentkezési képernyőjén.",
+            "instructions": "Nyisd meg a Comail alkalmazást, koppints a \"QR-kód beolvasása\" lehetőségre a bejelentkezési képernyőn, és irányítsd ide a kamerát."
+          }
+        }
+      },
+      "sharing": {
+        "space_calendar_description": "A meghívott tagnak engedélyeznie kell a hozzáférést a naptármegosztás aktiválása előtt."
+      }
+    },
+    "it": {
+      "calendar": {
+        "notifications": {
+          "space_calendar_authorization_message": "Non è stata salvata alcuna modifica. Autorizza l’accesso, torna qui e riprova.",
+          "space_calendar_authorization_title": "È necessaria l’autorizzazione del calendario",
+          "space_calendar_authorize": "Autorizza",
+          "space_calendar_consent_pending": "Il consenso del membro è in attesa. L’accesso non è ancora attivo.",
+          "space_calendar_consent_start_failed": "Impossibile avviare il consenso al calendario",
+          "space_calendar_mixed_audiences": "Salva separatamente le modifiche all’evento e i tuoi promemoria privati.",
+          "space_calendar_unsupported_operation": "Questa azione non è supportata per questo calendario."
+        }
+      },
+      "common": {
+        "rate_limited_action_detail": "Comail attende che termini il cooldown del server prima di inviare altre richieste autenticate. Riprova tra {seconds}s.",
+        "rate_limited_detail": "Comail ha sospeso le richieste in background per evitare il blocco. Nuovo tentativo tra {seconds}s."
+      },
+      "demo_welcome": {
+        "title": "Benvenuto su Comail"
+      },
+      "email_viewer": {
+        "unsubscribe_banner": {
+          "success_mailto": "Richiesta di annullamento iscrizione inviata al tuo client email"
+        }
+      },
+      "identities": {
+        "form": {
+          "bcc_placeholder": "archivio@email.com",
+          "reply_to_placeholder": "diversa@email.com"
+        }
+      },
+      "protocol_handlers": {
+        "browser_note": "Il browser o il sistema operativo potrebbe chiederti di confermare e potrebbe richiedere che Comail sia installato prima di poterlo selezionare come app predefinita.",
+        "description": "Scegli se i link e-mail e calendario devono aprirsi in Comail. Tecnicamente, Comail si registra come gestore di protocollo per i link mailto: e webcal:.",
+        "focus_notification_body": "Il link è stato aperto in Comail. Fai clic per portare la finestra in primo piano.",
+        "focus_notification_title": "Apri Comail",
+        "mailto_description": "Apre i link mailto: in Comail con l'editor precompilato.",
+        "protocol_open_mode_description": "Scegli se Comail deve aprire i link mailto: e webcal: in una nuova scheda o riutilizzare una sessione aperta. L'opzione sessione attiva richiede l'autorizzazione alle notifiche, così puoi fare clic su una notifica di fallback per portare Comail in primo piano se il browser blocca il focus.",
+        "webcal_description": "Apre i link webcal: in Comail con una finestra di dialogo di sottoscrizione al calendario precompilata."
+      },
+      "settings": {
+        "email_behavior": {
+          "return_to_list_after_action": {
+            "description": "After deleting or marking the open message unread, go back to the message list instead of opening the next message.",
+            "label": "Return to list after delete or mark unread"
+          }
+        },
+        "notifications": {
+          "push": {
+            "description": "Ricevi notifiche di sistema per la nuova posta quando questo sito è chiuso. Consegnato tramite il relay push Comail; il relay non vede mai il contenuto della posta.",
+            "relay_desc": "Per impostazione predefinita usa il relay Comail ospitato. Cambialo solo se ospiti in autonomia."
+          }
+        },
+        "security": {
+          "link_device": {
+            "description": "Accedi all'app mobile Comail senza digitare nulla. Genera qui un codice QR e scansionalo dalla schermata di accesso dell'app.",
+            "instructions": "Apri l'app Comail, tocca \"Scansiona codice QR\" nella schermata di accesso e inquadra qui con la fotocamera."
+          }
+        }
+      },
+      "sharing": {
+        "space_calendar_description": "Il membro invitato deve autorizzare l’accesso prima che la condivisione del calendario diventi attiva."
+      }
+    },
+    "ja": {
+      "calendar": {
+        "notifications": {
+          "space_calendar_authorization_message": "変更は保存されていません。アクセスを許可し、ここに戻ってから再試行してください。",
+          "space_calendar_authorization_title": "カレンダーの認証が必要です",
+          "space_calendar_authorize": "認証する",
+          "space_calendar_consent_pending": "メンバーの同意待ちです。アクセスはまだ有効ではありません。",
+          "space_calendar_consent_start_failed": "カレンダーの同意を開始できませんでした",
+          "space_calendar_mixed_audiences": "イベントの変更と自分用のリマインダーは、別々に保存してください。",
+          "space_calendar_unsupported_operation": "この操作はこのカレンダーではサポートされていません。"
+        }
+      },
+      "common": {
+        "rate_limited_action_detail": "Comail はサーバーのクールダウンが終わるまで、追加の認証付きリクエストを送信しません。{seconds} 秒後に再試行してください。",
+        "rate_limited_detail": "ロックアウトを避けるため、Comail はバックグラウンド要求を一時停止しました。{seconds} 秒後に再試行します。"
+      },
+      "demo_welcome": {
+        "title": "Comail へようこそ"
+      },
+      "email_viewer": {
+        "unsubscribe_banner": {
+          "success_mailto": "購読解除リクエストをメールクライアントに送信しました"
+        }
+      },
+      "identities": {
+        "form": {
+          "bcc_placeholder": "archive@email.com",
+          "reply_to_placeholder": "different@email.com"
+        }
+      },
+      "protocol_handlers": {
+        "browser_note": "ブラウザーまたはオペレーティング システムから確認を求められる場合があります。また、既定のアプリとして選択する前に Comail のインストールが必要な場合があります。",
+        "description": "メールとカレンダーのリンクを Comail で開くかどうかを選択します。技術的には、Comail は mailto: と webcal: リンクのプロトコル ハンドラーとして登録されます。",
+        "focus_notification_body": "リンクは Comail で開かれました。クリックするとウィンドウを前面に表示します。",
+        "focus_notification_title": "Comail を開く",
+        "mailto_description": "mailto: リンクを、入力済みの作成画面で Comail に開きます。",
+        "protocol_open_mode_description": "Comail が mailto: と webcal: のリンクを新しいタブで開くか、開いているセッションを再利用するかを選択します。アクティブなセッションのオプションでは通知の許可が必要です。ブラウザーがフォーカスをブロックした場合に、代替通知をクリックして Comail を前面に表示できます。",
+        "webcal_description": "webcal: リンクを、入力済みのカレンダー購読ダイアログで Comail に開きます。"
+      },
+      "settings": {
+        "email_behavior": {
+          "return_to_list_after_action": {
+            "description": "After deleting or marking the open message unread, go back to the message list instead of opening the next message.",
+            "label": "Return to list after delete or mark unread"
+          }
+        },
+        "notifications": {
+          "push": {
+            "description": "このサイトが閉じているときに新着メールのシステム通知を受信します。Comail プッシュリレー経由で配信され、リレーがメール内容を見ることはありません。",
+            "relay_desc": "デフォルトはホストされた Comail リレーです。セルフホストする場合のみ変更してください。"
+          }
+        },
+        "security": {
+          "link_device": {
+            "description": "入力なしで Comail モバイルアプリにサインインできます。ここで QR コードを生成し、アプリのログイン画面からスキャンしてください。",
+            "instructions": "Comail アプリを開き、ログイン画面で「QRコードをスキャン」をタップして、カメラをここに向けてください。"
+          }
+        }
+      },
+      "sharing": {
+        "space_calendar_description": "招待されたメンバーがアクセスを許可すると、カレンダー共有が有効になります。"
+      }
+    },
+    "ko": {
+      "calendar": {
+        "notifications": {
+          "space_calendar_authorization_message": "변경 사항이 저장되지 않았습니다. 액세스를 승인하고 여기로 돌아와 다시 시도하세요.",
+          "space_calendar_authorization_title": "캘린더 인증이 필요합니다",
+          "space_calendar_authorize": "인증",
+          "space_calendar_consent_pending": "멤버 동의를 기다리는 중입니다. 아직 액세스가 활성화되지 않았습니다.",
+          "space_calendar_consent_start_failed": "캘린더 동의를 시작하지 못했습니다",
+          "space_calendar_mixed_audiences": "일정 변경 사항과 개인 알림은 따로 저장하세요.",
+          "space_calendar_unsupported_operation": "이 캘린더에서는 이 작업을 지원하지 않습니다."
+        }
+      },
+      "common": {
+        "rate_limited_detail": "Comail가 계정 잠금을 방지하기 위해 백그라운드 요청을 일시 중지했어요. {seconds}초 후에 다시 시도할게요."
+      },
+      "demo_welcome": {
+        "title": "Comail에 오신 것을 환영해요"
+      },
+      "email_viewer": {
+        "unsubscribe_banner": {
+          "success_mailto": "이메일 클라이언트를 통해 구독 취소 요청이 전송되었어요"
+        }
+      },
+      "identities": {
+        "form": {
+          "bcc_placeholder": "archive@email.com",
+          "reply_to_placeholder": "different@email.com"
+        }
+      },
+      "protocol_handlers": {
+        "browser_note": "브라우저 또는 운영 체제에서 확인을 요청할 수 있으며, 기본 앱으로 선택하기 전에 Comail 설치가 필요할 수 있습니다.",
+        "description": "이메일 및 캘린더 링크를 Comail에서 열지 선택하세요. 기술적으로 Comail는 mailto: 및 webcal: 링크의 프로토콜 핸들러로 등록됩니다.",
+        "focus_notification_body": "링크가 Comail에서 열렸습니다. 창을 앞으로 가져오려면 클릭하세요.",
+        "focus_notification_title": "Comail 열기",
+        "mailto_description": "mailto: 링크를 Comail의 미리 채워진 작성 창에서 엽니다.",
+        "protocol_open_mode_description": "Comail가 mailto: 및 webcal: 링크를 새 탭에서 열지, 열린 세션을 재사용할지 선택하세요. 활성 세션 옵션은 브라우저가 포커스를 차단할 때 Comail를 앞으로 가져오기 위한 대체 알림을 클릭할 수 있도록 알림 권한이 필요합니다.",
+        "webcal_description": "webcal: 링크를 Comail의 미리 채워진 캘린더 구독 대화상자에서 엽니다."
+      },
+      "settings": {
+        "email_behavior": {
+          "return_to_list_after_action": {
+            "description": "After deleting or marking the open message unread, go back to the message list instead of opening the next message.",
+            "label": "Return to list after delete or mark unread"
+          }
+        },
+        "notifications": {
+          "push": {
+            "description": "이 사이트가 닫혀 있을 때 새 메일에 대한 시스템 알림을 받습니다. Comail 푸시 릴레이를 통해 전달되며, 릴레이는 메일 내용을 절대 보지 않습니다.",
+            "relay_desc": "기본값은 호스팅된 Comail 릴레이입니다. 셀프 호스팅 시에만 변경하세요."
+          }
+        },
+        "security": {
+          "link_device": {
+            "description": "아무것도 입력하지 않고 Comail 모바일 앱에 로그인하세요. 여기에서 QR 코드를 생성하고 앱의 로그인 화면에서 스캔하세요.",
+            "instructions": "Comail 앱을 열고 로그인 화면에서 \"QR 코드 스캔\"을 누른 다음 카메라를 여기에 비추세요."
+          }
+        }
+      },
+      "sharing": {
+        "space_calendar_description": "초대된 멤버가 액세스를 승인해야 캘린더 공유가 활성화됩니다."
+      }
+    },
+    "lv": {
+      "calendar": {
+        "notifications": {
+          "space_calendar_authorization_message": "Izmaiņas netika saglabātas. Autorizējiet piekļuvi, atgriezieties šeit un mēģiniet vēlreiz.",
+          "space_calendar_authorization_title": "Nepieciešama kalendāra autorizācija",
+          "space_calendar_authorize": "Autorizēt",
+          "space_calendar_consent_pending": "Dalībnieka piekrišana tiek gaidīta. Piekļuve vēl nav aktīva.",
+          "space_calendar_consent_start_failed": "Neizdevās sākt kalendāra piekrišanu",
+          "space_calendar_mixed_audiences": "Saglabājiet pasākuma izmaiņas un savus privātos atgādinājumus atsevišķi.",
+          "space_calendar_unsupported_operation": "Šī darbība šajā kalendārā nav atbalstīta."
+        }
+      },
+      "common": {
+        "rate_limited_action_detail": "Comail gaida servera noildzes beigas pirms jaunu autentificētu pieprasījumu sūtīšanas. Mēģiniet vēlreiz pēc {seconds} s.",
+        "rate_limited_detail": "Comail ir apturējis fonā veiktos pieprasījumus, lai izvairītos no bloķēšanas. Mēģinās vēlreiz pēc {seconds} s."
+      },
+      "demo_welcome": {
+        "title": "Laipni lūdzam Comail"
+      },
+      "email_viewer": {
+        "unsubscribe_banner": {
+          "success_mailto": "Atteikšanās pieprasījums nosūtīts"
+        }
+      },
+      "protocol_handlers": {
+        "browser_note": "Pārlūkprogramma vai operētājsistēma var lūgt apstiprinājumu un var prasīt, lai Comail būtu instalēts, pirms to var izvēlēties kā noklusējuma lietotni.",
+        "description": "Izvēlieties, vai e-pasta un kalendāra saites atvērt Comail. Tehniski Comail reģistrējas kā protokola apstrādātājs mailto: un webcal: saitēm.",
+        "focus_notification_body": "Saite tika atvērta Comail. Noklikšķiniet, lai izceltu logu priekšplānā.",
+        "focus_notification_title": "Atvērt Comail",
+        "mailto_description": "Atver mailto: saites Comail ar iepriekš aizpildītu ziņojuma redaktoru.",
+        "protocol_open_mode_description": "Izvēlieties, vai Comail atver mailto: un webcal: saites jaunā cilnē vai atkārtoti izmanto atvērtu sesiju. Aktīvās sesijas opcijai nepieciešama paziņojumu atļauja, lai jūs varētu noklikšķināt uz rezerves paziņojuma un izcelt Comail priekšplānā, ja pārlūkprogramma bloķē fokusu.",
+        "webcal_description": "Atver webcal: saites Comail ar iepriekš aizpildītu kalendāra abonēšanas dialogu."
+      },
+      "settings": {
+        "email_behavior": {
+          "return_to_list_after_action": {
+            "description": "After deleting or marking the open message unread, go back to the message list instead of opening the next message.",
+            "label": "Return to list after delete or mark unread"
+          }
+        },
+        "notifications": {
+          "push": {
+            "description": "Saņem sistēmas paziņojumus par jaunu pastu, kad šī vietne ir aizvērta. Piegādāts caur Comail push releju; relejs nekad neredz pasta saturu.",
+            "relay_desc": "Pēc noklusējuma izmanto izmitināto Comail releju. Mainiet tikai tad, ja izmitināt pats."
+          }
+        },
+        "security": {
+          "link_device": {
+            "description": "Pierakstieties Comail mobilajā lietotnē, neko nerakstot. Šeit izveidojiet QR kodu un noskenējiet to lietotnes pierakstīšanās ekrānā.",
+            "instructions": "Atveriet Comail lietotni, pierakstīšanās ekrānā pieskarieties \"Skenēt QR kodu\" un pavērsiet kameru šeit."
+          }
+        }
+      },
+      "sharing": {
+        "space_calendar_description": "Uzaicinātajam dalībniekam jāautorizē piekļuve, lai kalendāra kopīgošana kļūtu aktīva."
+      }
+    },
+    "mn": {
+      "calendar": {
+        "notifications": {
+          "space_calendar_authorization_message": "Өөрчлөлт хадгалагдаагүй. Хандалтыг зөвшөөрөөд энд буцаж ирэн дахин оролдоно уу.",
+          "space_calendar_authorization_title": "Хуанлийн зөвшөөрөл шаардлагатай",
+          "space_calendar_authorize": "Зөвшөөрөх",
+          "space_calendar_consent_pending": "Гишүүний зөвшөөрлийг хүлээж байна. Хандалт хараахан идэвхтэй болоогүй.",
+          "space_calendar_consent_start_failed": "Хуанлийн зөвшөөрлийг эхлүүлж чадсангүй",
+          "space_calendar_mixed_audiences": "Үйл явдлын өөрчлөлт болон хувийн сануулгаа тус тусад нь хадгална уу.",
+          "space_calendar_unsupported_operation": "Энэ үйлдлийг энэ хуанлид дэмжихгүй."
+        }
+      },
+      "settings": {
+        "advanced": {
+          "about": {
+            "title": "Comail Webmail"
+          }
+        }
+      },
+      "sharing": {
+        "space_calendar_description": "Уригдсан гишүүн хандалтыг зөвшөөрсний дараа хуанлийн хуваалцалт идэвхжинэ."
+      }
+    },
+    "nb": {
+      "calendar": {
+        "notifications": {
+          "space_calendar_authorization_message": "Ingen endringer ble lagret. Godkjenn tilgang, gå tilbake hit, og prøv på nytt.",
+          "space_calendar_authorization_title": "Kalendertilgang krever godkjenning",
+          "space_calendar_authorize": "Godkjenn",
+          "space_calendar_consent_pending": "Medlemmets samtykke venter. Tilgangen er ikke aktiv ennå.",
+          "space_calendar_consent_start_failed": "Kunne ikke starte kalendersamtykke",
+          "space_calendar_mixed_audiences": "Lagre endringer i hendelsen og dine private påminnelser hver for seg.",
+          "space_calendar_unsupported_operation": "Denne handlingen støttes ikke for denne kalenderen."
+        }
+      },
+      "sharing": {
+        "space_calendar_description": "Den inviterte må godkjenne tilgang før kalenderdelingen blir aktiv."
+      }
+    },
+    "nl": {
+      "calendar": {
+        "notifications": {
+          "space_calendar_authorization_message": "Er zijn geen wijzigingen opgeslagen. Autoriseer de toegang, keer hier terug en probeer het opnieuw.",
+          "space_calendar_authorization_title": "Kalendertoegang vereist autorisatie",
+          "space_calendar_authorize": "Autoriseren",
+          "space_calendar_consent_pending": "De toestemming van het lid is in afwachting. De toegang is nog niet actief.",
+          "space_calendar_consent_start_failed": "Kalendertoestemming starten is mislukt",
+          "space_calendar_mixed_audiences": "Sla wijzigingen in de afspraak en je persoonlijke herinneringen afzonderlijk op.",
+          "space_calendar_unsupported_operation": "Deze actie wordt niet ondersteund voor deze agenda."
+        }
+      },
+      "common": {
+        "rate_limited_action_detail": "Comail wacht tot de servercooldown voorbij is voordat er nieuwe geauthenticeerde verzoeken worden verzonden. Probeer het over {seconds}s opnieuw.",
+        "rate_limited_detail": "Comail heeft achtergrondverzoeken gepauzeerd om een blokkade te voorkomen. Nieuwe poging over {seconds}s."
+      },
+      "demo_welcome": {
+        "title": "Welkom bij Comail"
+      },
+      "email_viewer": {
+        "unsubscribe_banner": {
+          "success_mailto": "Uitschrijfverzoek verzonden naar je e-mailclient"
+        }
+      },
+      "protocol_handlers": {
+        "browser_note": "Je browser of besturingssysteem kan om bevestiging vragen en kan vereisen dat Comail is geïnstalleerd voordat het als standaardapp kan worden geselecteerd.",
+        "description": "Kies of e-mail- en kalenderlinks in Comail worden geopend. Technisch registreert Comail zich als protocolhandler voor mailto:- en webcal:-links.",
+        "focus_notification_body": "De link is geopend in Comail. Klik om het venster naar voren te halen.",
+        "focus_notification_title": "Comail openen",
+        "mailto_description": "Opent mailto:-links in Comail met een vooraf ingevulde opsteller.",
+        "protocol_open_mode_description": "Kies of Comail mailto:- en webcal:-links in een nieuw tabblad opent of een geopende sessie hergebruikt. Voor de optie actieve sessie is toestemming voor meldingen nodig, zodat je op een fallbackmelding kunt klikken om Comail naar voren te halen als de browser focus blokkeert.",
+        "webcal_description": "Opent webcal:-links in Comail met een vooraf ingevuld dialoogvenster voor kalenderabonnementen."
+      },
+      "settings": {
+        "email_behavior": {
+          "return_to_list_after_action": {
+            "description": "After deleting or marking the open message unread, go back to the message list instead of opening the next message.",
+            "label": "Return to list after delete or mark unread"
+          }
+        },
+        "notifications": {
+          "push": {
+            "description": "Ontvang systeemmeldingen voor nieuwe e-mail wanneer deze site gesloten is. Geleverd via de Comail-pushrelay; de relay ziet nooit e-mailinhoud.",
+            "relay_desc": "Gebruikt standaard de gehoste Comail-relay. Wijzig alleen als je zelf hostt."
+          }
+        },
+        "security": {
+          "link_device": {
+            "description": "Log in bij de Comail mobiele app zonder iets te typen. Genereer hier een QR-code en scan deze vanaf het inlogscherm van de app.",
+            "instructions": "Open de Comail app, tik op \"QR-code scannen\" op het inlogscherm en richt uw camera hierop."
+          }
+        }
+      },
+      "sharing": {
+        "space_calendar_description": "Het uitgenodigde lid moet toegang autoriseren voordat de agenda actief wordt gedeeld."
+      }
+    },
+    "pl": {
+      "calendar": {
+        "notifications": {
+          "space_calendar_authorization_message": "Nie zapisano żadnych zmian. Autoryzuj dostęp, wróć tutaj i spróbuj ponownie.",
+          "space_calendar_authorization_title": "Wymagana autoryzacja kalendarza",
+          "space_calendar_authorize": "Autoryzuj",
+          "space_calendar_consent_pending": "Oczekiwanie na zgodę członka. Dostęp nie jest jeszcze aktywny.",
+          "space_calendar_consent_start_failed": "Nie udało się rozpocząć zgody na kalendarz",
+          "space_calendar_mixed_audiences": "Zapisz zmiany wydarzenia i swoje prywatne przypomnienia osobno.",
+          "space_calendar_unsupported_operation": "Ta czynność nie jest obsługiwana w tym kalendarzu."
+        }
+      },
+      "common": {
+        "rate_limited_action_detail": "Comail czeka na zakończenie okresu blokady serwera przed wysłaniem kolejnych uwierzytelnionych żądań. Spróbuj ponownie za {seconds}s.",
+        "rate_limited_detail": "Comail wstrzymał żądania w tle, aby uniknąć blokady. Ponowna próba za {seconds}s."
+      },
+      "demo_welcome": {
+        "title": "Witaj w Comail"
+      },
+      "email_viewer": {
+        "unsubscribe_banner": {
+          "success_mailto": "Żądanie wypisania wysłane do klienta poczty"
+        }
+      },
+      "identities": {
+        "form": {
+          "bcc_placeholder": "archive@email.com",
+          "reply_to_placeholder": "different@email.com"
+        }
+      },
+      "protocol_handlers": {
+        "browser_note": "Przeglądarka lub system operacyjny może poprosić o potwierdzenie i może wymagać zainstalowania Comail, zanim będzie można wybrać go jako aplikację domyślną.",
+        "description": "Wybierz, czy linki e-mail i kalendarza mają otwierać się w Comail. Technicznie Comail rejestruje się jako obsługa protokołu dla linków mailto: i webcal:.",
+        "focus_notification_body": "Link został otwarty w Comail. Kliknij, aby przenieść okno na pierwszy plan.",
+        "focus_notification_title": "Otwórz Comail",
+        "mailto_description": "Otwiera linki mailto: w Comail z wstępnie wypełnionym edytorem wiadomości.",
+        "protocol_open_mode_description": "Wybierz, czy Comail ma otwierać linki mailto: i webcal: w nowej karcie, czy ponownie używać otwartej sesji. Opcja aktywnej sesji wymaga uprawnienia do powiadomień, aby można było kliknąć powiadomienie awaryjne i przenieść Comail na pierwszy plan, jeśli przeglądarka blokuje fokus.",
+        "webcal_description": "Otwiera linki webcal: w Comail z wstępnie wypełnionym oknem subskrypcji kalendarza."
+      },
+      "settings": {
+        "email_behavior": {
+          "return_to_list_after_action": {
+            "description": "After deleting or marking the open message unread, go back to the message list instead of opening the next message.",
+            "label": "Return to list after delete or mark unread"
+          }
+        },
+        "notifications": {
+          "push": {
+            "description": "Otrzymuj powiadomienia systemowe o nowych wiadomościach, gdy ta strona jest zamknięta. Dostarczane przez przekaźnik push Comail; przekaźnik nigdy nie widzi treści wiadomości.",
+            "relay_desc": "Domyślnie używa hostowanego przekaźnika Comail. Zmień tylko jeśli hostujesz samodzielnie."
+          }
+        },
+        "security": {
+          "link_device": {
+            "description": "Zaloguj się do aplikacji mobilnej Comail bez wpisywania czegokolwiek. Wygeneruj tutaj kod QR i zeskanuj go na ekranie logowania aplikacji.",
+            "instructions": "Otwórz aplikację Comail, na ekranie logowania stuknij \"Skanuj kod QR\" i skieruj aparat tutaj."
+          }
+        }
+      },
+      "sharing": {
+        "space_calendar_description": "Zaproszony członek musi autoryzować dostęp, zanim udostępnianie kalendarza stanie się aktywne."
+      }
+    },
+    "pt": {
+      "calendar": {
+        "notifications": {
+          "space_calendar_authorization_message": "Nenhuma alteração foi guardada. Autorize o acesso, volte aqui e tente novamente.",
+          "space_calendar_authorization_title": "É necessária autorização do calendário",
+          "space_calendar_authorize": "Autorizar",
+          "space_calendar_consent_pending": "Aguarda-se o consentimento do membro. O acesso ainda não está ativo.",
+          "space_calendar_consent_start_failed": "Não foi possível iniciar o consentimento do calendário",
+          "space_calendar_mixed_audiences": "Guarde as alterações do evento e os seus lembretes privados separadamente.",
+          "space_calendar_unsupported_operation": "Esta ação não é suportada neste calendário."
+        }
+      },
+      "common": {
+        "rate_limited_action_detail": "O Comail está aguardando o fim do cooldown do servidor antes de enviar mais solicitações autenticadas. Tente novamente em {seconds}s.",
+        "rate_limited_detail": "O Comail pausou as solicitações em segundo plano para evitar bloqueio. Nova tentativa em {seconds}s."
+      },
+      "demo_welcome": {
+        "title": "Bem-vindo ao Comail"
+      },
+      "email_viewer": {
+        "unsubscribe_banner": {
+          "success_mailto": "Solicitação de cancelamento enviada para seu cliente de e-mail"
+        }
+      },
+      "identities": {
+        "form": {
+          "bcc_placeholder": "arquivo@email.com",
+          "reply_to_placeholder": "diferente@email.com"
+        }
+      },
+      "protocol_handlers": {
+        "browser_note": "Seu navegador ou sistema operacional pode pedir confirmação e pode exigir que o Comail esteja instalado antes de poder ser selecionado como aplicativo padrão.",
+        "description": "Escolha se links de e-mail e calendário devem abrir no Comail. Tecnicamente, o Comail se registra como manipulador de protocolo para links mailto: e webcal:.",
+        "focus_notification_body": "O link foi aberto no Comail. Clique para trazer a janela para a frente.",
+        "focus_notification_title": "Abrir Comail",
+        "mailto_description": "Abre links mailto: no Comail com o editor preenchido previamente.",
+        "protocol_open_mode_description": "Escolha se o Comail abre links mailto: e webcal: em uma nova guia ou reutiliza uma sessão aberta. A opção de sessão ativa precisa da permissão de notificações para que você possa clicar em uma notificação alternativa e trazer o Comail para a frente se o navegador bloquear o foco.",
+        "webcal_description": "Abre links webcal: no Comail com uma janela de assinatura de calendário preenchida previamente."
+      },
+      "settings": {
+        "email_behavior": {
+          "return_to_list_after_action": {
+            "description": "After deleting or marking the open message unread, go back to the message list instead of opening the next message.",
+            "label": "Return to list after delete or mark unread"
+          }
+        },
+        "notifications": {
+          "push": {
+            "description": "Receba notificações do sistema para novas mensagens quando este site estiver fechado. Entregue através do relay push do Comail; o relay nunca vê o conteúdo da mensagem.",
+            "relay_desc": "Usa o relay Comail hospedado por padrão. Altere apenas se você hospedar."
+          }
+        },
+        "security": {
+          "link_device": {
+            "description": "Entre no aplicativo móvel Comail sem digitar nada. Gere um código QR aqui e escaneie-o na tela de login do aplicativo.",
+            "instructions": "Abra o aplicativo Comail, toque em \"Escanear código QR\" na tela de login e aponte sua câmera para cá."
+          }
+        }
+      },
+      "sharing": {
+        "space_calendar_description": "A pessoa convidada tem de autorizar o acesso para que a partilha do calendário fique ativa."
+      }
+    },
+    "ro": {
+      "calendar": {
+        "notifications": {
+          "space_calendar_authorization_message": "Nu s-a salvat nicio modificare. Autorizează accesul, revino aici și încearcă din nou.",
+          "space_calendar_authorization_title": "Este necesară autorizarea calendarului",
+          "space_calendar_authorize": "Autorizează",
+          "space_calendar_consent_pending": "Se așteaptă consimțământul membrului. Accesul nu este încă activ.",
+          "space_calendar_consent_start_failed": "Nu s-a putut începe consimțământul pentru calendar",
+          "space_calendar_mixed_audiences": "Salvează separat modificările evenimentului și mementourile tale private.",
+          "space_calendar_unsupported_operation": "Această acțiune nu este acceptată pentru acest calendar."
+        }
+      },
+      "common": {
+        "rate_limited_action_detail": "Comail Așteaptă încheierea perioadei de așteptare a serverului înainte de a trimite alte cereri autentificate. Încercați din nou în câteva {seconds}.",
+        "rate_limited_detail": "Comail A suspendat solicitările de fundal pentru a evita blocarea. Se va încerca din nou în câteva {seconds} s."
+      },
+      "demo_welcome": {
+        "title": "Bine ați venit la Comail"
+      },
+      "email_viewer": {
+        "unsubscribe_banner": {
+          "success_mailto": "Cerere de dezabonare trimisă către clientul dvs. de e-mail"
+        }
+      },
+      "identities": {
+        "form": {
+          "bcc_placeholder": "archive@email.com",
+          "reply_to_placeholder": "different@email.com"
+        }
+      },
+      "protocol_handlers": {
+        "browser_note": "Este posibil ca browserul sau sistemul de operare să vă solicite confirmarea acestei acțiuni și să necesite instalareComailului înainte de a putea fi selectat ca aplicație implicită.",
+        "description": "Alegeți dacă linkurile către e-mail și calendar se deschid în Comail. Din punct de vedere tehnic, Comail se înregistrează ca gestionar de protocol pentru linkurile de tip mailto: și webcal:.",
+        "focus_notification_body": "Linkul a fost deschis în Comail. Faceți clic pentru a aduce fereastra în prim-plan.",
+        "focus_notification_title": "Deschideți Comail",
+        "mailto_description": "Deschideți linkurile „mailto:” în Comail cu o fereastră de redactare precompletată.",
+        "protocol_open_mode_description": "Alegeți dacă Comail deschide linkurile mailto: și webcal: într-o filă nouă sau reutilizează o sesiune deschisă. Opțiunea „sesiune activă” necesită permisiunea de notificare, astfel încât să puteți face clic pe o notificare de rezervă pentru a aduce Comail în prim-plan dacă browserul blochează focalizarea.",
+        "webcal_description": "Deschideți linkurile webcal: din Comail cu o fereastră de dialog de abonare la calendar completată în prealabil."
+      },
+      "settings": {
+        "email_behavior": {
+          "return_to_list_after_action": {
+            "description": "After deleting or marking the open message unread, go back to the message list instead of opening the next message.",
+            "label": "Return to list after delete or mark unread"
+          }
+        },
+        "notifications": {
+          "push": {
+            "description": "Primiți notificări de sistem pentru e-mailuri noi chiar și atunci când acest site este închis. Notificările sunt transmise prin intermediul serverului de push Comail; serverul nu vede niciodată conținutul e-mailurilor.",
+            "relay_desc": "Implicit este setat serverul de retransmitere găzduit Comail. Modificați această setare numai dacă utilizați un server propriu."
+          }
+        },
+        "security": {
+          "link_device": {
+            "description": "Conectați-vă la aplicația mobilă „Comail” fără a introduce nimic. Generați un cod QR aici și scanați-l din ecranul de conectare al aplicației.",
+            "instructions": "Deschideți aplicația „ComailMail”, atingeți „Scanează codul QR” pe ecranul de autentificare și îndreptați camera în această direcție."
+          }
+        }
+      },
+      "sharing": {
+        "space_calendar_description": "Membrul invitat trebuie să autorizeze accesul înainte ca partajarea calendarului să devină activă."
+      }
+    },
+    "ru": {
+      "calendar": {
+        "notifications": {
+          "space_calendar_authorization_message": "Изменения не сохранены. Разрешите доступ, вернитесь сюда и повторите попытку.",
+          "space_calendar_authorization_title": "Требуется авторизация календаря",
+          "space_calendar_authorize": "Авторизовать",
+          "space_calendar_consent_pending": "Ожидается согласие участника. Доступ ещё не активен.",
+          "space_calendar_consent_start_failed": "Не удалось начать согласие на доступ к календарю",
+          "space_calendar_mixed_audiences": "Сохраните изменения события и свои личные напоминания отдельно.",
+          "space_calendar_unsupported_operation": "Это действие не поддерживается для данного календаря."
+        }
+      },
+      "common": {
+        "rate_limited_action_detail": "Comail ждет окончания серверного тайм-аута перед отправкой новых аутентифицированных запросов. Повторите через {seconds}с.",
+        "rate_limited_detail": "Comail приостановил фоновые запросы, чтобы избежать блокировки. Повтор через {seconds}с."
+      },
+      "demo_welcome": {
+        "title": "Добро пожаловать в Comail"
+      },
+      "email_viewer": {
+        "unsubscribe_banner": {
+          "success_mailto": "Запрос на отписку отправлен в ваш почтовый клиент"
+        }
+      },
+      "identities": {
+        "form": {
+          "reply_to_placeholder": "other@email.com"
+        }
+      },
+      "protocol_handlers": {
+        "browser_note": "Браузер или операционная система может запросить подтверждение и может потребовать, чтобы Comail был установлен, прежде чем его можно будет выбрать приложением по умолчанию.",
+        "description": "Выберите, должны ли ссылки электронной почты и календаря открываться в Comail. Технически Comail регистрируется как обработчик протокола для ссылок mailto: и webcal:.",
+        "focus_notification_body": "Ссылка была открыта в Comail. Нажмите, чтобы вывести окно на передний план.",
+        "focus_notification_title": "Открыть Comail",
+        "mailto_description": "Открывает ссылки mailto: в Comail с предварительно заполненным редактором письма.",
+        "protocol_open_mode_description": "Выберите, будет ли Comail открывать ссылки mailto: и webcal: в новой вкладке или повторно использовать открытую сессию. Для варианта с активной сессией нужно разрешение на уведомления, чтобы можно было нажать на резервное уведомление и вывести Comail на передний план, если браузер блокирует фокус.",
+        "webcal_description": "Открывает ссылки webcal: в Comail с предварительно заполненным диалогом подписки на календарь."
+      },
+      "settings": {
+        "email_behavior": {
+          "return_to_list_after_action": {
+            "description": "After deleting or marking the open message unread, go back to the message list instead of opening the next message.",
+            "label": "Return to list after delete or mark unread"
+          }
+        },
+        "notifications": {
+          "push": {
+            "description": "Получайте системные уведомления о новых письмах, когда этот сайт закрыт. Доставляется через push-релей Comail; релей никогда не видит содержимое писем.",
+            "relay_desc": "По умолчанию используется размещённый релей Comail. Меняйте только если хостите самостоятельно."
+          }
+        },
+        "security": {
+          "link_device": {
+            "description": "Войдите в мобильное приложение Comail без ввода данных. Создайте здесь QR-код и отсканируйте его на экране входа в приложении.",
+            "instructions": "Откройте приложение Comail, нажмите \"Сканировать QR-код\" на экране входа и наведите камеру сюда."
+          }
+        }
+      },
+      "sharing": {
+        "space_calendar_description": "Приглашённый участник должен разрешить доступ, прежде чем общий календарь станет активным."
+      }
+    },
+    "sk": {
+      "calendar": {
+        "notifications": {
+          "space_calendar_authorization_message": "Žiadne zmeny sa neuložili. Povoľte prístup, vráťte sa sem a skúste to znova.",
+          "space_calendar_authorization_title": "Je potrebné povoliť kalendár",
+          "space_calendar_authorize": "Povoliť",
+          "space_calendar_consent_pending": "Čaká sa na súhlas člena. Prístup ešte nie je aktívny.",
+          "space_calendar_consent_start_failed": "Nepodarilo sa začať súhlas s kalendárom",
+          "space_calendar_mixed_audiences": "Zmeny udalosti a svoje súkromné pripomienky uložte samostatne.",
+          "space_calendar_unsupported_operation": "Táto akcia nie je pre tento kalendár podporovaná."
+        }
+      },
+      "sharing": {
+        "space_calendar_description": "Pozvaný člen musí povoliť prístup, aby sa zdieľanie kalendára aktivovalo."
+      }
+    },
+    "tr": {
+      "calendar": {
+        "notifications": {
+          "space_calendar_authorization_message": "Hiçbir değişiklik kaydedilmedi. Erişime izin verin, buraya dönün ve yeniden deneyin.",
+          "space_calendar_authorization_title": "Takvim yetkilendirmesi gerekli",
+          "space_calendar_authorize": "Yetkilendir",
+          "space_calendar_consent_pending": "Üyenin izni bekleniyor. Erişim henüz etkin değil.",
+          "space_calendar_consent_start_failed": "Takvim izni başlatılamadı",
+          "space_calendar_mixed_audiences": "Etkinlik değişikliklerini ve kişisel hatırlatıcılarınızı ayrı ayrı kaydedin.",
+          "space_calendar_unsupported_operation": "Bu işlem bu takvimde desteklenmiyor."
+        }
+      },
+      "common": {
+        "rate_limited_action_detail": "Comail, daha fazla kimlik doğrulama isteği göndermeden önce sunucunun soğuma süresinin bitmesini bekliyor. {seconds} saniye içinde tekrar deneyin.",
+        "rate_limited_detail": "Hesap kilitlenmesini önlemek için Comail arka plan isteklerini duraklattı. {seconds} saniye içinde yeniden deneniyor."
+      },
+      "demo_welcome": {
+        "title": "Comail'e Hoş Geldiniz"
+      },
+      "email_viewer": {
+        "unsubscribe_banner": {
+          "success_mailto": "Abonelik iptali isteği e-posta istemcinize gönderildi"
+        }
+      },
+      "identities": {
+        "form": {
+          "bcc_placeholder": "arsiv@email.com",
+          "reply_to_placeholder": "baska@email.com"
+        }
+      },
+      "protocol_handlers": {
+        "browser_note": "Tarayıcınız veya işletim sisteminiz bunu onaylamanızı isteyebilir ve Comail'ın varsayılan uygulama olarak seçilebilmesi için yüklenmiş olmasını gerektirebilir.",
+        "description": "E-posta ve takvim bağlantılarının Comail'ta açılıp açılmayacağını seçin. Teknik olarak Comail, mailto: ve webcal: bağlantıları için protokol işleyicisi olarak kaydolur.",
+        "focus_notification_body": "Bağlantı Comail'ta açıldı. Pencereyi öne getirmek için tıklayın.",
+        "focus_notification_title": "Comail'ı aç",
+        "mailto_description": "mailto: bağlantılarını Comail'ta önceden doldurulmuş düzenleyiciyle açın.",
+        "protocol_open_mode_description": "Comail'ın mailto: ve webcal: bağlantılarını yeni bir sekmede açmasını mı yoksa açık bir oturumu yeniden kullanmasını mı istediğinizi seçin. Etkin oturum seçeneği, tarayıcı odağı engellerse Comail'ı öne getirmek için yedek bildirime tıklayabilmeniz amacıyla bildirim izni gerektirir.",
+        "webcal_description": "webcal: bağlantılarını Comail'ta önceden doldurulmuş takvim aboneliği penceresiyle açın."
+      },
+      "settings": {
+        "email_behavior": {
+          "return_to_list_after_action": {
+            "description": "After deleting or marking the open message unread, go back to the message list instead of opening the next message.",
+            "label": "Return to list after delete or mark unread"
+          }
+        },
+        "notifications": {
+          "push": {
+            "description": "Bu site kapalıyken yeni postalar için sistem bildirimleri alın. Comail push röle aracılığıyla iletilir; röle posta içeriğini asla görmez.",
+            "relay_desc": "Varsayılan olarak barındırılan Comail rölesini kullanır. Yalnızca kendiniz barındırıyorsanız değiştirin."
+          }
+        },
+        "security": {
+          "link_device": {
+            "description": "Hiçbir şey yazmadan Comail mobil uygulamasında oturum açın. Burada bir QR kodu oluşturun ve uygulamanın giriş ekranından tarayın.",
+            "instructions": "Comail uygulamasını açın, giriş ekranında \"QR kodu tara\" seçeneğine dokunun ve kameranızı buraya doğrultun."
+          }
+        }
+      },
+      "sharing": {
+        "space_calendar_description": "Takvim paylaşımının etkinleşmesi için davet edilen üyenin erişimi yetkilendirmesi gerekir."
+      }
+    },
+    "uk": {
+      "calendar": {
+        "notifications": {
+          "space_calendar_authorization_message": "Зміни не збережено. Надайте доступ, поверніться сюди та повторіть спробу.",
+          "space_calendar_authorization_title": "Потрібна авторизація календаря",
+          "space_calendar_authorize": "Авторизувати",
+          "space_calendar_consent_pending": "Очікується згода учасника. Доступ ще не активний.",
+          "space_calendar_consent_start_failed": "Не вдалося розпочати згоду на календар",
+          "space_calendar_mixed_audiences": "Збережіть зміни події та свої особисті нагадування окремо.",
+          "space_calendar_unsupported_operation": "Ця дія не підтримується для цього календаря."
+        }
+      },
+      "common": {
+        "rate_limited_action_detail": "Comail чекає закінчення часу відновлення сервера, перш ніж надсилати додаткові автентифіковані запити. Повторіть спробу через {seconds} с.",
+        "rate_limited_detail": "Comail призупинив фонові запити, щоб уникнути блокування. Повторна спроба через {seconds} с."
+      },
+      "demo_welcome": {
+        "title": "Ласкаво просимо до Comail"
+      },
+      "email_viewer": {
+        "unsubscribe_banner": {
+          "success_mailto": "Запит на скасування підписки надіслано на ваш поштовий клієнт"
+        }
+      },
+      "identities": {
+        "form": {
+          "bcc_placeholder": "archive@email.com",
+          "reply_to_placeholder": "different@email.com"
+        }
+      },
+      "protocol_handlers": {
+        "browser_note": "Браузер або операційна система може попросити підтвердження та може вимагати, щоб Comail був встановлений, перш ніж його можна буде вибрати програмою за замовчуванням.",
+        "description": "Виберіть, чи відкривати посилання електронної пошти та календаря в Comail. Технічно Comail реєструється як обробник протоколу для посилань mailto: і webcal:.",
+        "focus_notification_body": "Посилання було відкрито в Comail. Натисніть, щоб вивести вікно на передній план.",
+        "focus_notification_title": "Відкрити Comail",
+        "mailto_description": "Відкриває посилання mailto: у Comail із попередньо заповненим редактором листа.",
+        "protocol_open_mode_description": "Виберіть, чи Comail має відкривати посилання mailto: і webcal: у новій вкладці, чи повторно використовувати відкритий сеанс. Для варіанта активного сеансу потрібен дозвіл на сповіщення, щоб ви могли натиснути резервне сповіщення й вивести Comail на передній план, якщо браузер блокує фокус.",
+        "webcal_description": "Відкриває посилання webcal: у Comail із попередньо заповненим діалогом підписки на календар."
+      },
+      "settings": {
+        "email_behavior": {
+          "return_to_list_after_action": {
+            "description": "After deleting or marking the open message unread, go back to the message list instead of opening the next message.",
+            "label": "Return to list after delete or mark unread"
+          }
+        },
+        "notifications": {
+          "push": {
+            "description": "Отримуйте системні сповіщення про нові листи, коли цей сайт закритий. Доставляється через push-реле Comail; реле ніколи не бачить вміст листів.",
+            "relay_desc": "Типово використовується розміщене реле Comail. Змінюйте лише, якщо хостите самостійно."
+          }
+        },
+        "security": {
+          "link_device": {
+            "description": "Увійдіть у мобільний застосунок Comail без введення даних. Створіть тут QR-код і відскануйте його на екрані входу в застосунку.",
+            "instructions": "Відкрийте застосунок Comail, натисніть \"Сканувати QR-код\" на екрані входу та наведіть камеру сюди."
+          }
+        }
+      },
+      "sharing": {
+        "space_calendar_description": "Запрошений учасник має авторизувати доступ, перш ніж спільний календар стане активним."
+      }
+    },
+    "zh": {
+      "calendar": {
+        "notifications": {
+          "space_calendar_authorization_message": "尚未保存任何更改。请授权访问、返回此处，然后重试。",
+          "space_calendar_authorization_title": "需要授权日历",
+          "space_calendar_authorize": "授权",
+          "space_calendar_consent_pending": "正在等待成员同意，访问权限尚未启用。",
+          "space_calendar_consent_start_failed": "无法开始日历授权流程",
+          "space_calendar_mixed_audiences": "请分别保存活动更改和你的私人提醒。",
+          "space_calendar_unsupported_operation": "此日历不支持此操作。"
+        }
+      },
+      "common": {
+        "rate_limited_action_detail": "Comail 正在等待服务器冷却，然后再发送更多请求。请在 {seconds} 秒后重试。",
+        "rate_limited_detail": "Comail 已暂停后台请求以避免账户被锁定。将在 {seconds} 秒后重试。"
+      },
+      "demo_welcome": {
+        "title": "欢迎使用 Comail"
+      },
+      "email_viewer": {
+        "unsubscribe_banner": {
+          "success_mailto": "取消订阅请求已发送"
+        }
+      },
+      "protocol_handlers": {
+        "browser_note": "你的浏览器或操作系统可能会要求确认，并且可能需要先安装 Comail，才能将其选为默认应用。",
+        "description": "选择是否在 Comail 中打开电子邮件和日历链接。从技术上讲，Comail 会注册为 mailto: 和 webcal: 链接的协议处理程序。",
+        "focus_notification_body": "链接已在 Comail 中打开。点击可将窗口带到前台。",
+        "focus_notification_title": "打开 Comail",
+        "mailto_description": "在 Comail 中打开 mailto: 链接，并预先填好撰写窗口。",
+        "protocol_open_mode_description": "选择 Comail 是在新标签页中打开 mailto: 和 webcal: 链接，还是复用已打开的会话。活动会话选项需要通知权限，这样当浏览器阻止聚焦时，你可以点击备用通知将 Comail 窗口带到前台。",
+        "webcal_description": "在 Comail 中打开 webcal: 链接，并预先填好日历订阅对话框。"
+      },
+      "settings": {
+        "email_behavior": {
+          "return_to_list_after_action": {
+            "description": "After deleting or marking the open message unread, go back to the message list instead of opening the next message.",
+            "label": "Return to list after delete or mark unread"
+          }
+        },
+        "notifications": {
+          "push": {
+            "description": "在此网站关闭时接收新邮件的系统通知。通过 Comail 推送中继传送；中继永远不会看到邮件内容。",
+            "relay_desc": "默认使用托管的 Comail 中继。仅当您自托管时才更改。"
+          }
+        },
+        "security": {
+          "link_device": {
+            "description": "无需输入任何内容即可登录 Comail 移动应用。在此生成二维码，然后在应用的登录界面扫描。",
+            "instructions": "打开 Comail 应用，在登录界面点按\"扫描二维码\"，然后将相机对准此处。"
+          }
+        }
+      },
+      "sharing": {
+        "space_calendar_description": "受邀成员必须授权访问，日历共享才会生效。"
+      }
+    },
+    "zh-TW": {
+      "calendar": {
+        "notifications": {
+          "space_calendar_authorization_message": "尚未儲存任何變更。請授權存取、返回此處，然後重試。",
+          "space_calendar_authorization_title": "需要授權行事曆",
+          "space_calendar_authorize": "授權",
+          "space_calendar_consent_pending": "正在等待成員同意，存取權尚未啟用。",
+          "space_calendar_consent_start_failed": "無法開始行事曆同意流程",
+          "space_calendar_mixed_audiences": "請分別儲存活動變更和你的私人提醒。",
+          "space_calendar_unsupported_operation": "此行事曆不支援此操作。"
+        }
+      },
+      "sharing": {
+        "space_calendar_description": "受邀成員必須授權存取，行事曆分享才會生效。"
+      }
+    }
+  }
+}

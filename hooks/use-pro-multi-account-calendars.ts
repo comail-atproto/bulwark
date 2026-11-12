@@ -23,6 +23,7 @@ export function useProMultiAccountCalendars(start: string | null, end: string | 
   const isEmbedded = useIsEmbedded();
   const proInterface = useSettingsStore((s) => s.proInterface);
   const accounts = useAccountStore((s) => s.accounts);
+  const connectedAccountsRevision = useAuthStore((s) => s.connectedAccountsRevision);
   const activeAccountId = useAuthStore((s) => s.activeAccountId);
   const fetchAllAccountsCalendars = useCalendarStore((s) => s.fetchAllAccountsCalendars);
   const fetchAllAccountsEvents = useCalendarStore((s) => s.fetchAllAccountsEvents);
@@ -40,16 +41,16 @@ export function useProMultiAccountCalendars(start: string | null, end: string | 
       pairs.push({ localAccountId: account.id, client });
     }
     return pairs;
-    // accounts identity changes whenever the connected set or login states
-    // change, so this is the only dependency we need.
-  }, [enabled, accounts]);
+    // Private capabilities can arrive after the connected account list.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled, accounts, connectedAccountsRevision]);
 
   // Fetch calendars whenever the set of connected calendar-capable accounts
   // changes. Skips when there isn't an active account yet (auth still
   // bootstrapping).
   useEffect(() => {
     if (!enabled || !activeAccountId || accountClients.length === 0) return;
-    void fetchAllAccountsCalendars(accountClients);
+    void fetchAllAccountsCalendars(accountClients, activeAccountId);
   }, [enabled, activeAccountId, accountClients, fetchAllAccountsCalendars]);
 
   // Fetch events for the current visible date range across all accounts.

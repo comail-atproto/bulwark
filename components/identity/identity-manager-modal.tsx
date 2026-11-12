@@ -2,12 +2,15 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { useTranslations } from 'next-intl';
-import { X, Mail, Pencil, Trash2, Plus, AlertTriangle, Star } from '@/components/icons';
-import { cn } from '@/lib/utils';
+import { Mail, Pencil, Trash2, Plus, AlertTriangle, Star } from '@/components/icons';
 import { Button } from '@/components/ui/button';
+import { IconButton } from '@/components/ui/icon-button';
+import { Dialog } from '@/components/ui/dialog';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { IdentityForm } from './identity-form';
-import { useIdentityStore } from '@/stores/identity-store';
+import {
+  useIdentityStore, createIdentityWithHooks, updateIdentityWithHooks, deleteIdentityWithHooks,
+} from '@/stores/identity-store';
 import { useAuthStore } from '@/stores/auth-store';
 import { useAccountStore } from '@/stores/account-store';
 import { useSettingsStore } from '@/stores/settings-store';
@@ -22,16 +25,13 @@ function useRefreshIdentities() {
 }
 import type { Identity, EmailAddress } from '@/lib/jmap/types';
 import { toast } from '@/stores/toast-store';
-import { useFocusTrap } from '@/hooks/use-focus-trap';
 import { useConfirmDialog } from '@/hooks/use-confirm-dialog';
+import { useDiscardChanges } from '@/components/settings/use-discard-changes';
 import { useConfig } from '@/hooks/use-config';
 import { toUnicodeEmail } from '@/lib/idn';
-
-function emailMatchesUsername(email: string, username: string): boolean {
-  if (email === username) return true;
-  if (!username.includes('@') && email.split('@')[0] === username) return true;
-  return false;
-}
+import { getPlainTextSignature } from '@/lib/signature-utils';
+import { sortIdentities } from '@/lib/identity-order';
+import { useRestriction } from '@/hooks/use-restriction';
 
 interface IdentityFormData {
   name: string;
@@ -50,6 +50,9 @@ interface IdentityManagerModalProps {
 export function IdentityManagerModal({ isOpen, onClose }: IdentityManagerModalProps) {
   const t = useTranslations('identities');
   const tNotif = useTranslations('notifications');
+  // A locked or hidden signature: the identity's own isn't what it sends with.
+  const signatureRestriction = useRestriction('signature');
+  const showOwnSignature = !signatureRestriction.locked && !signatureRestriction.hidden;
 
   const client = useAuthStore((state) => state.client);
   const identities = useIdentityStore((state) => state.identities);
@@ -74,6 +77,13 @@ export function IdentityManagerModal({ isOpen, onClose }: IdentityManagerModalPr
   const [editingId, setEditingId] = useState<string | null>(null);
   const [isCreating, setIsCreating] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [formDirty, setFormDirty] = useState(false);
+  // Reopened, the dialog starts on the list, not on a form left open.
+  useEffect(() => {
+    if (isOpen) return;
+    setIsCreating(false);
+    setEditingId(null);
+  }, [isOpen]);
   const { dialogProps: confirmDialogProps, confirm: confirmDialog } = useConfirmDialog();
 
   // Re-fetch all identities from server and update stores
@@ -83,17 +93,7 @@ export function IdentityManagerModal({ isOpen, onClose }: IdentityManagerModalPr
       const serverIdentities = await client.getIdentities();
       const username = useAuthStore.getState().username;
       const preferredPrimaryId = useIdentityStore.getState().preferredPrimaryId;
-      const sorted = [...serverIdentities].sort((a, b) => {
-        const aMatch = emailMatchesUsername(a.email, username || '');
-        const bMatch = emailMatchesUsername(b.email, username || '');
-        if (aMatch && !bMatch) return -1;
-        if (!aMatch && bMatch) return 1;
-        if (aMatch && bMatch) {
-          if (!a.mayDelete && b.mayDelete) return -1;
-          if (a.mayDelete && !b.mayDelete) return 1;
-        }
-        return 0;
-      });
+      const sorted = sortIdentities(serverIdentities, username || '');
       // Move preferred primary to front if set
       if (preferredPrimaryId) {
         const idx = sorted.findIndex((id) => id.id === preferredPrimaryId);
@@ -110,47 +110,30 @@ export function IdentityManagerModal({ isOpen, onClose }: IdentityManagerModalPr
     }
   }, [client, syncIdentities]);
 
-  // Focus trap with Escape handling
-  const modalRef = useFocusTrap({
-    isActive: isOpen,
-    onEscape: () => {
-      if (isCreating || editingId) {
-        setIsCreating(false);
-        setEditingId(null);
-      } else {
-        onClose();
-      }
-    },
-    restoreFocus: true,
-  });
+  // Unsaved input in the create or edit form is only dropped once the user
+  // says so (R5); an outside click is ignored while there is some.
+  const { confirmDiscard, discardDialog } = useDiscardChanges();
+  const cancelForm = useCallback(async () => {
+    if (!(await confirmDiscard(formDirty))) return;
+    setIsCreating(false);
+    setEditingId(null);
+  }, [confirmDiscard, formDirty]);
 
-  // Close on click outside (but not when ConfirmDialog is open)
-  useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      if (confirmDialogProps.isOpen) return;
-      if (modalRef.current && !modalRef.current.contains(e.target as Node)) {
-        onClose();
-      }
-    };
-
-    if (isOpen) {
-      document.addEventListener('mousedown', handleClickOutside);
-      return () => document.removeEventListener('mousedown', handleClickOutside);
+  // Escape, the X and an outside click close the open form first, then the
+  // dialog: the innermost layer only.
+  const requestClose = useCallback(async () => {
+    if (isCreating || editingId) {
+      await cancelForm();
+      return;
     }
-  }, [isOpen, onClose, modalRef, confirmDialogProps.isOpen]);
+    onClose();
+  }, [isCreating, editingId, cancelForm, onClose]);
 
   const handleCreate = useCallback(async (data: IdentityFormData) => {
     if (!client) return;
 
     try {
-      await client.createIdentity(
-        data.name,
-        data.email,
-        data.replyTo,
-        data.bcc,
-        data.textSignature,
-        data.htmlSignature
-      );
+      if (!(await createIdentityWithHooks(client, data))) return;
 
       await refreshIdentities();
       setIsCreating(false);
@@ -166,13 +149,14 @@ export function IdentityManagerModal({ isOpen, onClose }: IdentityManagerModalPr
     if (!client) return;
 
     try {
-      await client.updateIdentity(identity.id, {
+      const saved = await updateIdentityWithHooks(client, identity, {
         name: data.name,
         replyTo: data.replyTo,
         bcc: data.bcc,
         textSignature: data.textSignature,
         htmlSignature: data.htmlSignature,
       });
+      if (!saved) return;
 
       await refreshIdentities();
       setEditingId(null);
@@ -202,7 +186,7 @@ export function IdentityManagerModal({ isOpen, onClose }: IdentityManagerModalPr
     setDeletingId(identity.id);
 
     try {
-      await client.deleteIdentity(identity.id);
+      if (!(await deleteIdentityWithHooks(client, identity))) return;
       await refreshIdentities();
       toast.success(tNotif('identity_deleted'));
     } catch (error) {
@@ -234,47 +218,30 @@ export function IdentityManagerModal({ isOpen, onClose }: IdentityManagerModalPr
     toast.success(tNotif('identity_set_primary'));
   }, [identities, setPreferredPrimary, syncIdentities, tNotif]);
 
-  if (!isOpen) return null;
-
   return (
-    <div className="fixed inset-0 bg-black/50 backdrop-blur-[1px] flex items-center justify-center z-50 p-4 animate-in fade-in duration-150">
-      <div
-        ref={modalRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="identity-modal-title"
-        className={cn(
-          'bg-background border border-border rounded-lg shadow-xl',
-          'w-full max-w-3xl max-h-[90vh] overflow-hidden',
-          'animate-in zoom-in-95 duration-200'
-        )}
-      >
-        {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-border">
-          <div className="flex items-center gap-3">
-            <Mail className="w-5 h-5 text-muted-foreground" />
-            <h2 id="identity-modal-title" className="text-lg font-semibold text-foreground">
-              {t('modal_title')}
-            </h2>
-          </div>
-          <button
-            onClick={onClose}
-            className="p-1.5 rounded-md hover:bg-muted transition-colors duration-150 text-muted-foreground hover:text-foreground"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        {/* Content */}
-        <div className="p-6 overflow-y-auto max-h-[calc(90vh-80px)]">
-          {/* Create New Form — gated: members cannot mint arbitrary
-              From-identities when identity management is disabled (#1790). */}
+    <>
+    <Dialog
+      isOpen={isOpen}
+      onClose={() => void requestClose()}
+      dirty={formDirty}
+      size="lg"
+      className="max-w-3xl max-h-[90vh]"
+      title={
+        <span className="flex items-center gap-3">
+          <Mail className="w-5 h-5 text-muted-foreground" />
+          {t('modal_title')}
+        </span>
+      }
+    >
+        <div className="pt-4">
+          {/* Create New Form */}
           {identityManagementEnabled && isCreating && (
             <div className="mb-6 p-4 border border-border rounded-lg bg-muted/30">
               <h3 className="text-sm font-semibold mb-4">{t('create_new')}</h3>
               <IdentityForm
                 onSave={handleCreate}
-                onCancel={() => setIsCreating(false)}
+                onCancel={() => void cancelForm()}
+                onDirtyChange={setFormDirty}
               />
             </div>
           )}
@@ -305,7 +272,8 @@ export function IdentityManagerModal({ isOpen, onClose }: IdentityManagerModalPr
                     <IdentityForm
                       identity={identity}
                       onSave={(data) => handleUpdate(identity, data)}
-                      onCancel={() => setEditingId(null)}
+                      onCancel={() => void cancelForm()}
+                      onDirtyChange={setFormDirty}
                     />
                   </div>
                 ) : (
@@ -313,8 +281,8 @@ export function IdentityManagerModal({ isOpen, onClose }: IdentityManagerModalPr
                     <div className="flex items-start justify-between gap-4">
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 mb-1">
-                          <h3 className="font-semibold text-foreground truncate">
-                            {identity.name}
+                          <h3 className="font-semibold text-foreground truncate" title={identity.name || toUnicodeEmail(identity.email)} dir="auto">
+                            {identity.name || toUnicodeEmail(identity.email)}
                           </h3>
                           {identities[0]?.id === identity.id && (
                             <span className="text-xs px-2 py-0.5 rounded-full bg-primary/10 text-primary font-medium">
@@ -322,9 +290,11 @@ export function IdentityManagerModal({ isOpen, onClose }: IdentityManagerModalPr
                             </span>
                           )}
                         </div>
-                        <p className="text-sm text-muted-foreground truncate">
-                          {toUnicodeEmail(identity.email)}
-                        </p>
+                        {identity.name && (
+                          <p className="text-sm text-muted-foreground truncate" title={toUnicodeEmail(identity.email)}>
+                            {toUnicodeEmail(identity.email)}
+                          </p>
+                        )}
 
                         {/* Additional Info */}
                         <div className="mt-2 space-y-1 text-xs text-muted-foreground">
@@ -338,65 +308,49 @@ export function IdentityManagerModal({ isOpen, onClose }: IdentityManagerModalPr
                               {t('display.bcc')} {identity.bcc.map((a) => toUnicodeEmail(a.email)).join(', ')}
                             </p>
                           )}
-                          {identity.textSignature && (
+                          {/* An HTML-only signature shows as its text, not as none. */}
+                          {showOwnSignature && getPlainTextSignature(identity) && (
                             <p className="line-clamp-2">
-                              {t('display.signature')} {identity.textSignature}
+                              {t('display.signature')} {getPlainTextSignature(identity)}
                             </p>
                           )}
                         </div>
                       </div>
 
                       {/* Actions */}
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-1">
                         {identities[0]?.id !== identity.id && identities.length > 1 && (
-                          <Button
-                            variant="ghost"
-                            size="sm"
+                          <IconButton
+                            label={t('set_as_primary')}
                             onClick={() => handleSetPrimary(identity)}
                             disabled={!!editingId || isCreating}
-                            title={t('set_as_primary')}
                           >
-                            <Star className="w-4 h-4" />
-                          </Button>
+                            <Star />
+                          </IconButton>
                         )}
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          data-testid="identity-edit"
+                        <IconButton
+                          label={t('edit_identity')}
                           onClick={() => setEditingId(identity.id)}
                           disabled={!!editingId || isCreating}
                         >
-                          <Pencil className="w-4 h-4" />
-                        </Button>
-                        {/* Delete is hidden when identity management is
-                            disabled (#1790): members may not remove the
-                            relay-provisioned identities. */}
-                        {identityManagementEnabled && (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            data-testid="identity-delete"
+                          <Pencil />
+                        </IconButton>
+                        {/* Read-only identities show no Delete (R11); the line below says why. */}
+                        {identityManagementEnabled && identity.mayDelete && (
+                          <IconButton
+                            label={t('delete_button')}
                             onClick={() => handleDelete(identity)}
-                            disabled={
-                              !identity.mayDelete ||
-                              !!editingId ||
-                              isCreating ||
-                              deletingId === identity.id
-                            }
-                            className={!identity.mayDelete ? 'opacity-30' : ''}
+                            disabled={!!editingId || isCreating || deletingId === identity.id}
+                            className="text-destructive hover:text-destructive"
                           >
-                            {!identity.mayDelete ? (
-                              <AlertTriangle className="w-4 h-4 text-yellow-500" />
-                            ) : (
-                              <Trash2 className="w-4 h-4 text-destructive" />
-                            )}
-                          </Button>
+                            <Trash2 />
+                          </IconButton>
                         )}
                       </div>
                     </div>
 
                     {identityManagementEnabled && !identity.mayDelete && (
-                      <p className="text-xs text-yellow-600 dark:text-yellow-500 mt-2 flex items-center gap-1">
+                      <p className="text-xs text-amber-600 dark:text-amber-400 mt-2 flex items-center gap-1">
                         <AlertTriangle className="w-3 h-3" />
                         {t('cannot_delete')}
                       </p>
@@ -414,9 +368,9 @@ export function IdentityManagerModal({ isOpen, onClose }: IdentityManagerModalPr
             )}
           </div>
         </div>
-      </div>
-
-      <ConfirmDialog {...confirmDialogProps} />
-    </div>
+    </Dialog>
+    <ConfirmDialog {...confirmDialogProps} />
+    {discardDialog}
+    </>
   );
 }

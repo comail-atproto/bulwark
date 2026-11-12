@@ -36,6 +36,14 @@ const SEPARATOR_SELECTORS = [
   // quoted message body follows as siblings.
   '#divRplyFwdMsg',
   '#appendonsend',
+  // Outlook for Windows: the same header block without the id, marked only by
+  // its top rule (#1476). Older versions draw it in #B5C4DF.
+  'div[style*="border-top:solid #E1E1E1" i]',
+  'div[style*="border-top: solid #E1E1E1" i]',
+  'div[style*="border-top:solid #B5C4DF" i]',
+  'div[style*="border-top: solid #B5C4DF" i]',
+  // Outlook for iOS and Android.
+  '#mail-editor-reference-message-container',
   // Thunderbird attribution line ("On …, X wrote:"); the blockquote follows.
   'div.moz-cite-prefix',
 ];
@@ -79,6 +87,29 @@ function hasVisibleContent(body: HTMLElement, marker: Element, side: 'before' | 
 }
 
 /**
+ * True when every visible piece of content after `marker` sits inside a quote
+ * container. iPhone Mail puts its attribution line in a cite blockquote of its
+ * own and the original in a second one, so the first quote is followed by
+ * more quote, not by a reply below it (#1476).
+ */
+function onlyQuotesAfter(body: HTMLElement, marker: Element): boolean {
+  const containers = CONTAINER_SELECTORS.join(',');
+  const walker = body.ownerDocument.createTreeWalker(body, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const rel = marker.compareDocumentPosition(node);
+    if (rel & Node.DOCUMENT_POSITION_CONTAINED_BY) continue;
+    if (!(rel & Node.DOCUMENT_POSITION_FOLLOWING)) continue;
+    const visible = node.nodeType === Node.TEXT_NODE
+      ? (node.nodeValue || '').trim() !== ''
+      : (node as Element).tagName === 'IMG' && !(node as Element).hasAttribute('data-blocked-src');
+    if (!visible) continue;
+    const el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node as Element;
+    if (!el?.closest(containers)) return false;
+  }
+  return true;
+}
+
+/**
  * Fallback for replies whose quote is a bare <blockquote> (no type/class -
  * e.g. Bulwark's own reply to a plain-text original, and various mobile
  * clients): an outermost blockquote directly preceded by an attribution line.
@@ -86,25 +117,22 @@ function hasVisibleContent(body: HTMLElement, marker: Element, side: 'before' | 
  * ending with a colon ("On …, X wrote:", "Am … schrieb X:", "… a écrit :").
  */
 function findAttributedBlockquote(body: HTMLElement): Element | null {
-  for (const bq of Array.from(body.querySelectorAll('blockquote'))) {
-    if (bq.parentElement?.closest('blockquote')) continue; // outermost only
-    if (precedingTextEndsWithColon(body, bq)) return bq;
-  }
-  return null;
-}
-
-/** True when the last non-blank text node before `el` ends with a colon. */
-function precedingTextEndsWithColon(body: HTMLElement, el: Element): boolean {
-  const walker = body.ownerDocument.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+  // One walk in document order, remembering the last non-blank text: a
+  // blockquote is reached before its own text, so that is the text preceding
+  // it. Walking from the start again per blockquote cost quadratic time.
+  const walker = body.ownerDocument.createTreeWalker(body, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
   let last: string | null = null;
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-    const rel = el.compareDocumentPosition(node);
-    if (rel & Node.DOCUMENT_POSITION_CONTAINED_BY) continue;
-    if (!(rel & Node.DOCUMENT_POSITION_PRECEDING)) break; // reached/passed el
-    const text = (node.nodeValue || '').trim();
-    if (text !== '') last = text;
+    if (node.nodeType === Node.TEXT_NODE) {
+      const text = (node.nodeValue || '').trim();
+      if (text !== '') last = text;
+      continue;
+    }
+    const el = node as Element;
+    if (el.tagName !== 'BLOCKQUOTE' || el.parentElement?.closest('blockquote')) continue; // outermost only
+    if (last !== null && last.endsWith(':')) return el;
   }
-  return last !== null && last.endsWith(':');
+  return null;
 }
 
 /** Hide an element, remembering its original inline display for restore. */
@@ -147,12 +175,16 @@ export function setupQuoteCollapse(doc: Document, labels: QuoteCollapseLabels): 
   const marker = body.querySelector(ALL_SELECTORS) ?? findAttributedBlockquote(body);
   if (!marker) return false;
 
-  const isSeparator = SEPARATOR_SELECTORS.some((sel) => marker.matches(sel));
+  let isSeparator = SEPARATOR_SELECTORS.some((sel) => marker.matches(sel));
 
   // Never collapse the entire message down to just the toggle.
   if (!hasVisibleContent(body, marker, 'before')) return false;
-  // Interleaved reply: real content after the quote container - leave as is.
-  if (!isSeparator && hasVisibleContent(body, marker, 'after')) return false;
+  if (!isSeparator && hasVisibleContent(body, marker, 'after')) {
+    // Interleaved reply: real content after the quote container - leave as is.
+    if (!onlyQuotesAfter(body, marker)) return false;
+    // More quote follows: fold the whole run from here to the end.
+    isSeparator = true;
+  }
 
   const hidden = isSeparator
     ? collectSeparatorRange(body, marker)

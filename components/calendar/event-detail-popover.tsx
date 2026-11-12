@@ -4,10 +4,11 @@ import { useState, useEffect, useRef, useMemo, useCallback, useLayoutEffect } fr
 import { useTranslations, useLocale } from "next-intl";
 import { createPortal } from "react-dom";
 import { Button } from "@/components/ui/button";
+import { IconButton } from "@/components/ui/icon-button";
 import { LinkifiedText } from "@/components/ui/linkified-text";
 import {
   X, Clock, MapPin, Video, Users, Repeat, Bell, AlignLeft,
-  Pencil, Trash2, Copy, Send, Check,
+  Pencil, Trash2, Copy, CopyPlus, Send, Check, MoreVertical, ExternalLink, Printer, Calendar as CalendarIcon,
 } from "@/components/icons";
 import { format, isSameDay } from "date-fns";
 import { cn } from "@/lib/utils";
@@ -15,15 +16,26 @@ import type { CalendarEvent, Calendar, CalendarParticipant } from "@/lib/jmap/ty
 import { parseDuration, getEventColor } from "./event-card";
 import { getEventDisplayEndDate, getEventEndDate, getEventStartDate } from "@/lib/calendar-utils";
 import { buildRecurrenceSummary } from "./recurrence-editor";
+import { formatEventAlertsLabel } from "./alert-list-editor";
 import {
   getUserParticipantId,
-  getUserStatus,
   getParticipantList,
 } from "@/lib/calendar-participants";
-import { canUserRsvp, getEventEditability, type EditabilityContext } from "@/lib/calendar-editability";
+import { canUserEditPrivate, canUserRsvp, getEventEditability, isPublicAtprotoEvent, publicAtprotoOriginalLink, type EditabilityContext } from "@/lib/calendar-editability";
 import { useFormatEventDate } from "@/hooks/use-format-event-date";
 import { useContactNameResolver } from "@/hooks/use-contact-name-resolver";
 import { findMeetingLink, locationAction, mapsUrl, primaryLocationName } from "@/lib/event-links";
+import { descriptionAsText } from "@/lib/calendar-description";
+import { useNoThirdPartyTraffic } from "@/hooks/use-third-party-mode";
+import { PluginSlot } from "@/components/plugins/plugin-slot";
+import { eventToView } from "@/lib/plugin-projection";
+import { ParticipantStatusBadge } from "./rsvp-buttons";
+import { AnswerBars, useAnswerView } from "./answer-bars";
+import type { AnswerTarget } from "@/lib/calendar-delegate";
+import { isEditableEventTarget } from "@/lib/keyboard";
+import { isSingleKeyShortcutOff } from "@/lib/single-key-shortcuts";
+import { useCvdColor } from "@/hooks/use-cvd-color";
+import { gateLinkClick } from "@/lib/plugin-hook-result";
 
 interface EventDetailPopoverProps {
   event: CalendarEvent;
@@ -32,21 +44,40 @@ interface EventDetailPopoverProps {
   onEdit: () => void;
   onDelete: () => void;
   onDuplicate: () => void;
+  /** Opens the event's full action menu (export, copy, ...) at the click. */
+  onMore?: (e: React.MouseEvent) => void;
+  /** Prints the event on a sheet of its own. */
+  onPrint?: () => void;
   onClose: () => void;
   onSaveNote: (note: string) => void;
-  onRsvp?: (status: CalendarParticipant["participationStatus"]) => void;
+  /** Without a target: the user's own answer on this event. */
+  onRsvp?: (status: CalendarParticipant["participationStatus"], target?: AnswerTarget) => void;
+  onSubscribePublic?: () => void;
+  onPublicRsvp?: (status: 'going' | 'interested' | 'notgoing') => void;
+  onPublishPublic?: () => void;
   onMouseEnter?: () => void;
   onMouseLeave?: () => void;
   currentUserEmails?: string[];
   isSubscriptionCalendar?: (calendarId: string) => boolean;
   timeFormat?: "12h" | "24h";
   isMobile?: boolean;
+  /**
+   * Opened by a click or Enter rather than shown on hover: it takes the
+   * focus, and gives it back to the event when it closes.
+   */
+  pinned?: boolean;
 }
 
 const POPOVER_WIDTH = 360;
+const HEADER_BUTTON = "text-muted-foreground hover:text-foreground";
 const POPOVER_GAP = 8;
 const VIEWPORT_MARGIN = 12;
 const MAX_HEIGHT = 480;
+
+/** As tall as MAX_HEIGHT, but never taller than the window. */
+function maxPopoverHeight(): number {
+  return Math.max(0, Math.min(MAX_HEIGHT, window.innerHeight - 2 * VIEWPORT_MARGIN));
+}
 
 function computePosition(
   anchorRect: DOMRect,
@@ -54,7 +85,7 @@ function computePosition(
 ): { top: number; left: number } {
   const vw = window.innerWidth;
   const vh = window.innerHeight;
-  const clampedHeight = Math.min(popoverHeight, MAX_HEIGHT);
+  const clampedHeight = Math.min(popoverHeight, maxPopoverHeight());
 
   const clampTop = (top: number) =>
     Math.min(Math.max(VIEWPORT_MARGIN, top), vh - clampedHeight - VIEWPORT_MARGIN);
@@ -91,21 +122,6 @@ function formatDurationDisplay(minutes: number): string {
   return `${h}h${m}min`;
 }
 
-function getAlertLabel(event: CalendarEvent, t: ReturnType<typeof useTranslations>): string | null {
-  if (!event.alerts) return null;
-  const first = Object.values(event.alerts)[0];
-  if (!first || !first.trigger || first.trigger["@type"] !== "OffsetTrigger") return null;
-  const offset = first.trigger.offset;
-  if (offset === "PT0S") return t("alerts.at_time");
-  const minMatch = offset.match(/-?PT?(\d+)M$/);
-  if (minMatch) return t("alerts.minutes_before", { count: parseInt(minMatch[1]) });
-  const hourMatch = offset.match(/-?PT?(\d+)H$/);
-  if (hourMatch) return t("alerts.hours_before", { count: parseInt(hourMatch[1]) });
-  const dayMatch = offset.match(/-?P(\d+)D/);
-  if (dayMatch) return t("alerts.days_before", { count: parseInt(dayMatch[1]) });
-  return null;
-}
-
 function getRecurrenceLabel(event: CalendarEvent, t: ReturnType<typeof useTranslations>, locale: string): string | null {
   if (!event.recurrenceRules?.length) return null;
   return buildRecurrenceSummary(event.recurrenceRules[0], t, locale);
@@ -118,17 +134,25 @@ export function EventDetailPopover({
   onEdit,
   onDelete,
   onDuplicate,
+  onMore,
+  onPrint,
   onClose,
   onSaveNote,
   onRsvp,
+  onSubscribePublic,
+  onPublicRsvp,
+  onPublishPublic,
   onMouseEnter,
   onMouseLeave,
   currentUserEmails = [],
   isSubscriptionCalendar,
   timeFormat = "24h",
   isMobile,
+  pinned = false,
 }: EventDetailPopoverProps) {
   const t = useTranslations("calendar");
+  const paint = useCvdColor();
+  const tCommon = useTranslations("common");
   const locale = useLocale();
   const popoverRef = useRef<HTMLDivElement>(null);
   const noteInputRef = useRef<HTMLTextAreaElement>(null);
@@ -136,14 +160,13 @@ export function EventDetailPopover({
   const [ready, setReady] = useState(false);
   const [noteText, setNoteText] = useState("");
   const [noteExpanded, setNoteExpanded] = useState(false);
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [isSavingNote, setIsSavingNote] = useState(false);
 
   // Bare addresses (the organizer above all — Stalwart drops its display name)
   // render with the contact card's name instead of the raw email.
   const resolveContactName = useContactNameResolver();
 
-  const color = getEventColor(event, calendar);
+  const color = paint(getEventColor(event, calendar));
   const startDate = getEventStartDate(event);
   const durationMinutes = parseDuration(event.duration);
   const endDate = getEventEndDate(event);
@@ -151,10 +174,14 @@ export function EventDetailPopover({
   const isMultiDay = !isSameDay(startDate, displayEndDate);
 
   const locationName = useMemo(() => primaryLocationName(event) ?? null, [event]);
+  // Re-computes the location link once the config is known (#903).
+  const noThirdParty = useNoThirdPartyTraffic();
 
   // Invitations (Teams above all) leave virtualLocations empty and bury the
   // join URL in the description; surface it as the meeting link anyway.
   const meeting = useMemo(() => findMeetingLink(event), [event]);
+  const pluginProps = useMemo(() => ({ event: eventToView(event) }), [event]);
+  const description = useMemo(() => descriptionAsText(event), [event]);
   const virtualLocation = meeting?.uri ?? null;
 
   // A URL opens as a link, a location that only names the service joins the
@@ -162,8 +189,10 @@ export function EventDetailPopover({
   const locationHref = useMemo(() => {
     if (!locationName) return null;
     const action = locationAction(locationName, meeting);
-    return action.kind === "url" ? action.uri : mapsUrl(action.query);
-  }, [locationName, meeting]);
+    if (action.kind === "url") return action.uri;
+    // No Google Maps link while third-party traffic is off (#903).
+    return noThirdParty ? null : mapsUrl(action.query);
+  }, [locationName, meeting, noThirdParty]);
   const [locationCopied, setLocationCopied] = useState(false);
   const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => {
@@ -186,7 +215,7 @@ export function EventDetailPopover({
     [event, resolveContactName]
   );
   const recurrenceLabel = useMemo(() => getRecurrenceLabel(event, t, locale), [event, t, locale]);
-  const alertLabel = useMemo(() => getAlertLabel(event, t), [event, t]);
+  const alertLabel = useMemo(() => formatEventAlertsLabel(event, calendar ? [calendar] : [], t), [event, calendar, t]);
 
   // Gate affordances on calendar rights, not identity (see calendar-editability).
   const editabilityCtx = useMemo<EditabilityContext>(() => {
@@ -202,7 +231,17 @@ export function EventDetailPopover({
     () => getEventEditability(event, editabilityCtx),
     [event, editabilityCtx]
   );
+  const originalLink = publicAtprotoOriginalLink(event);
+  const attendance = isPublicAtprotoEvent(event) && ['hosting', 'going', 'interested'].includes(event.atmoAttendance ?? '')
+    ? event.atmoAttendance : undefined;
   const canEditBody = editability === "editable";
+  const canEditPrivate = useMemo(
+    () => canUserEditPrivate(event, editabilityCtx),
+    [event, editabilityCtx]
+  );
+  const isPublicOverlay = event.source === 'atproto-public' && Boolean(event.atprotoUri && event.atprotoCid);
+  const isLinkedPublicCopy = event.source === 'atproto-space' && Boolean(event.atprotoUri && event.atprotoCid);
+  const canPublishPublic = event.source === 'atproto-space' && !event.atprotoUri && !event.atprotoCid;
 
   // Asked separately from editability: a received invite lands in the user's own
   // calendar and resolves to 'editable', which renders no RSVP bar (#937).
@@ -216,10 +255,7 @@ export function EventDetailPopover({
     [event, currentUserEmails]
   );
 
-  const userCurrentStatus = useMemo(
-    () => getUserStatus(event, currentUserEmails),
-    [event, currentUserEmails]
-  );
+  const answerView = useAnswerView(event, calendar, currentUserEmails, canRsvp && !!userParticipantId);
 
   const formatTime = useCallback(
     (d: Date) => format(d, timeFormat === "12h" ? "h:mm a" : "HH:mm"),
@@ -231,16 +267,62 @@ export function EventDetailPopover({
     const height = popoverRef.current.offsetHeight;
     setPosition(computePosition(anchorRect, height));
     if (!ready) requestAnimationFrame(() => setReady(true));
-  }, [anchorRect, noteExpanded, showDeleteConfirm, ready]);
+  }, [anchorRect, noteExpanded, ready]);
+
+  // Content that grows after the popover was placed (a plugin section reports
+  // its height a moment later) moves it again, so it stays in the window.
+  useEffect(() => {
+    const node = popoverRef.current;
+    if (!node || isMobile || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      const next = computePosition(anchorRect, node.offsetHeight);
+      setPosition((prev) => (prev && prev.top === next.top && prev.left === next.left ? prev : next));
+    });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [anchorRect, isMobile]);
+
+  // A card opened by click or Enter takes the focus, and gives it back to
+  // the event when it closes.
+  useEffect(() => {
+    if (!pinned) return;
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const node = popoverRef.current;
+    return () => {
+      const active = document.activeElement;
+      if (opener?.isConnected && (!active || active === document.body || node?.contains(active))) opener.focus({ preventScroll: true });
+    };
+  }, [pinned]);
+
+  // The focus goes in once the card is placed: before, it is hidden and
+  // can't take the focus, which stayed on the event. A card that just
+  // turned visible can still count as hidden for a frame, so it tries again
+  // on the next ones, unless the focus moved somewhere else meanwhile.
+  const placed = position !== null;
+  useEffect(() => {
+    const node = popoverRef.current;
+    if (!pinned || !placed || !node) return;
+    const from = document.activeElement;
+    let frame = 0;
+    let tries = 0;
+    const attempt = () => {
+      const active = document.activeElement;
+      if (node.contains(active) || active !== from) return;
+      const first = node.querySelector<HTMLElement>("button");
+      first?.focus({ preventScroll: true });
+      if (first && document.activeElement !== first && ++tries < 30) frame = requestAnimationFrame(attempt);
+    };
+    attempt();
+    return () => cancelAnimationFrame(frame);
+  }, [pinned, placed]);
 
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
-      const target = e.target as HTMLElement;
-      const tag = target?.tagName?.toLowerCase();
-      if (tag === "input" || tag === "textarea" || tag === "select") return;
-      if (target?.getAttribute("contenteditable") === "true") return;
-      if (e.key === "e" && !noteExpanded && canEditBody) {
+      if (isEditableEventTarget(e)) return;
+      if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+      if (isSingleKeyShortcutOff(e)) return;
+      if (e.code === "KeyE" && !noteExpanded && canEditBody) {
         e.preventDefault();
         onEdit();
       }
@@ -309,14 +391,14 @@ export function EventDetailPopover({
         "fixed z-[60] bg-background border border-border shadow-xl overflow-hidden transition-[opacity,transform] duration-150 ease-out",
         isMobile
           ? "inset-0 rounded-none flex flex-col"
-          : "rounded-lg"
+          : "rounded-lg flex flex-col"
       )}
       style={isMobile ? {
         opacity: 1,
         transform: "none",
       } : {
         width: POPOVER_WIDTH,
-        maxHeight: MAX_HEIGHT,
+        maxHeight: maxPopoverHeight(),
         top: position?.top ?? -9999,
         left: position?.left ?? -9999,
         opacity: ready ? 1 : 0,
@@ -324,53 +406,82 @@ export function EventDetailPopover({
         visibility: position ? "visible" : "hidden",
       }}
     >
-      {/* Color accent bar */}
-      <div className="h-1 w-full" style={{ backgroundColor: color }} />
-
-      {/* Header */}
-      <div className="flex items-start justify-between gap-2 px-4 pt-3 pb-1">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span
-              className="w-2.5 h-2.5 rounded-full flex-shrink-0"
-              style={{ backgroundColor: color }}
-            />
-            <h3 className={cn(
-              "text-base font-semibold truncate text-foreground",
-              event.status === "cancelled" && "line-through text-muted-foreground"
-            )}>
-              {event.title || t("events.no_title")}
-            </h3>
-          </div>
-          {calendar && (
-            <p className="text-xs text-muted-foreground mt-0.5 ps-[18px]">
-              {calendar.name}
-              {event.status === "tentative" && (
-                <span className="ms-2 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-warning/15 text-warning">
-                  {t("detail.tentative")}
-                </span>
-              )}
-              {event.status === "cancelled" && (
-                <span className="ms-2 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400 line-through">
-                  {t("detail.cancelled")}
-                </span>
-              )}
-            </p>
-          )}
-        </div>
-        <button
+      {/* Actions sit at the top, the event's colour square beside its title. */}
+      <div className="flex items-center justify-end gap-0.5 px-2 pt-2">
+        {(canEditBody || canEditPrivate) && (
+          <IconButton
+            onClick={onEdit}
+            className={HEADER_BUTTON}
+            label={t("events.edit")}
+          >
+            <Pencil className="w-4 h-4" />
+          </IconButton>
+        )}
+        {canEditBody && (
+          <IconButton
+            onClick={onDelete}
+            className={HEADER_BUTTON}
+            label={t("events.delete")}
+          >
+            <Trash2 className="w-4 h-4" />
+          </IconButton>
+        )}
+        {onPrint && (
+          <IconButton
+            onClick={onPrint}
+            className={HEADER_BUTTON}
+            label={tCommon("print")}
+          >
+            <Printer className="w-4 h-4" />
+          </IconButton>
+        )}
+        {!isPublicAtprotoEvent(event) && <IconButton
+          onClick={onMore ?? onDuplicate}
+          className={HEADER_BUTTON}
+          label={onMore ? t("toolbar.more") : t("events.duplicate")}
+        >
+          {onMore ? <MoreVertical className="w-4 h-4" /> : <CopyPlus className="w-4 h-4" />}
+        </IconButton>}
+        <IconButton
           onClick={onClose}
-          className="p-1.5 rounded-md hover:bg-muted transition-colors duration-150 flex-shrink-0 mt-0.5 text-muted-foreground hover:text-foreground"
-          aria-label={t("form.cancel")}
+          className={HEADER_BUTTON}
+          label={tCommon("close")}
         >
           <X className="w-4 h-4" />
-        </button>
+        </IconButton>
+      </div>
+
+      <div className="flex items-start gap-2.5 px-4 pb-1">
+        <span
+          className="w-4 h-4 rounded-sm flex-shrink-0 mt-1"
+          style={{ backgroundColor: color }}
+          aria-hidden="true"
+        />
+        <div className="min-w-0 flex-1">
+          <h3 className={cn(
+            "text-lg font-semibold leading-snug break-words text-foreground",
+            event.status === "cancelled" && "line-through text-muted-foreground"
+          )}>
+            {/* Its own direction, next to the colour square. */}
+            <bdi>{event.title || t("events.no_title")}</bdi>
+          </h3>
+          {event.status === "tentative" && (
+            <span className="mt-1 inline-flex items-center px-1.5 py-0.5 rounded text-[0.625rem] font-medium bg-warning/15 text-amber-600 dark:text-amber-400">
+              {t("detail.tentative")}
+            </span>
+          )}
+          {event.status === "cancelled" && (
+            <span className="mt-1 inline-flex items-center px-1.5 py-0.5 rounded text-[0.625rem] font-medium bg-destructive/10 text-red-600 dark:text-red-400 line-through">
+              {t("detail.cancelled")}
+            </span>
+          )}
+        </div>
       </div>
 
       {/* Content */}
       <div className={cn(
         "px-4 py-2 space-y-2.5 overflow-y-auto",
-        isMobile ? "flex-1" : ""
+        isMobile ? "flex-1" : "min-h-0"
       )} style={isMobile ? undefined : { maxHeight: MAX_HEIGHT - 140 }}>
         {/* Date & Time */}
         <div className="flex items-start gap-2.5">
@@ -415,14 +526,31 @@ export function EventDetailPopover({
                   <span className="text-muted-foreground ms-1.5">{t("events.all_day")}</span>
                 ) : (
                   <div className="text-muted-foreground">
-                    {formatTime(startDate)} – {formatTime(endDate)}
-                    <span className="ms-1.5 text-xs">({formatDurationDisplay(durationMinutes)})</span>
+                    <bdi dir="ltr">{formatTime(startDate)}</bdi>
+                    {isPublicAtprotoEvent(event) && event.atmoEndUnspecified ? (
+                      <span className="ms-1.5">{t("atmo.end_unspecified")}</span>
+                    ) : (
+                      <>
+                        <bdi dir="ltr">{" – "}{formatTime(endDate)}</bdi>
+                        <span className="ms-1.5 text-xs">({formatDurationDisplay(durationMinutes)})</span>
+                      </>
+                    )}
                   </div>
                 )}
               </>
             )}
           </div>
         </div>
+
+        {originalLink && (
+          <div className="flex items-center gap-2.5">
+            <ExternalLink className="w-4 h-4 text-muted-foreground flex-shrink-0" />
+            <a href={originalLink} target="_blank" rel="noreferrer" className="text-sm text-primary hover:underline">
+              {t("atmo.open_original")}
+            </a>
+            {attendance && <span className="text-xs text-muted-foreground">{t(`atmo.${attendance}`)}</span>}
+          </div>
+        )}
 
         {/* Location */}
         {locationName && (
@@ -432,7 +560,10 @@ export function EventDetailPopover({
               href={locationHref ?? undefined}
               target="_blank"
               rel="noreferrer"
-              className="text-sm text-primary hover:underline min-w-0 break-words"
+              onClick={gateLinkClick}
+              onAuxClick={gateLinkClick}
+              className={cn("text-sm min-w-0 break-words", locationHref ? "text-primary hover:underline" : "text-foreground")}
+              dir="auto"
               title={locationName}
             >
               {/^https?:\/\//i.test(locationName)
@@ -461,6 +592,8 @@ export function EventDetailPopover({
               href={virtualLocation}
               target="_blank"
               rel="noreferrer"
+              onClick={gateLinkClick}
+              onAuxClick={gateLinkClick}
               className="text-sm text-primary hover:underline truncate"
               title={virtualLocation}
             >
@@ -486,15 +619,15 @@ export function EventDetailPopover({
               <div className="mt-1 space-y-0.5">
                 {participants.slice(0, 5).map((p) => (
                   <div key={p.id} className="flex items-center justify-between gap-2 text-xs">
-                    <span className="truncate text-foreground">
+                    <span dir="auto" className="truncate text-foreground" title={p.email}>
                       {p.name || p.email}
                       {p.isOrganizer && (
                         <span className="text-muted-foreground ms-1">
-                          ({t("participants.organizer").toLowerCase()})
+                          ({t("participants.organizer_role")})
                         </span>
                       )}
                     </span>
-                    <ParticipantStatusBadge status={p.status} t={t} />
+                    <ParticipantStatusBadge status={p.status} className="text-[0.625rem]" />
                   </div>
                 ))}
                 {participants.length > 5 && (
@@ -523,15 +656,25 @@ export function EventDetailPopover({
           </div>
         )}
 
+        {/* Calendar */}
+        {calendar && (
+          <div className="flex items-start gap-2.5">
+            <CalendarIcon className="w-4 h-4 text-muted-foreground mt-0.5 flex-shrink-0" />
+            <span dir="auto" className="text-sm text-foreground truncate" title={calendar.name}>{calendar.name}</span>
+          </div>
+        )}
+
         {/* Description */}
-        {event.description && (
+        {description && (
           <div className="flex items-start gap-2.5">
             <AlignLeft className="w-4 h-4 text-muted-foreground mt-0.5 flex-shrink-0" />
-            <p className="text-sm text-muted-foreground whitespace-pre-line line-clamp-3 break-words">
-              <LinkifiedText text={event.description} />
+            <p dir="auto" className="text-sm text-muted-foreground whitespace-pre-line line-clamp-3 break-words">
+              <LinkifiedText text={description} />
             </p>
           </div>
         )}
+
+        <PluginSlot name="calendar-event-detail" className="w-full" extraProps={pluginProps} />
       </div>
 
       {/* Quick Note */}
@@ -540,6 +683,7 @@ export function EventDetailPopover({
           {noteExpanded ? (
             <div className="space-y-2">
               <textarea
+                aria-label={t("detail.add_note")}
                 ref={noteInputRef}
                 value={noteText}
                 onChange={(e) => setNoteText(e.target.value)}
@@ -547,25 +691,23 @@ export function EventDetailPopover({
                 placeholder={t("detail.add_note")}
                 rows={2}
                 autoFocus
-                className="w-full rounded-md border border-input bg-muted/30 px-3 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-ring"
+                className="w-full rounded-md border border-input bg-muted/30 px-3 py-2 text-sm resize-none focus:outline-hidden"
               />
               <div className="flex justify-end gap-1.5">
                 <Button
                   variant="ghost"
-                  size="sm"
+                  size="xs"
                   onClick={() => {
                     setNoteText("");
                     setNoteExpanded(false);
                   }}
-                  className="h-7 text-xs"
                 >
                   {t("form.cancel")}
                 </Button>
                 <Button
-                  size="sm"
+                  size="xs"
                   onClick={handleSaveNote}
                   disabled={!noteText.trim() || isSavingNote}
-                  className="h-7 text-xs"
                 >
                   <Send className="w-3 h-3 me-1" />
                   {t("detail.save_note")}
@@ -584,141 +726,51 @@ export function EventDetailPopover({
         </div>
       )}
 
-      {/* RSVP Bar (for attendees) */}
-      {canRsvp && onRsvp && userParticipantId && (
-        <div className="px-4 py-3 border-t border-border">
-          <p className="text-xs font-medium text-muted-foreground mb-2">
-            {t("participants.rsvp_label")}
-          </p>
-          <div className="flex gap-2">
-            <Button
-              size="sm"
-              variant={userCurrentStatus === "accepted" ? "default" : "outline"}
-              onClick={() => onRsvp("accepted")}
-              className={
-                userCurrentStatus === "accepted"
-                  ? "bg-success hover:bg-success/80 text-success-foreground"
-                  : "text-success border-success/30 hover:bg-success/10"
-              }
-            >
-              {userCurrentStatus === "accepted" && <Check className="w-3.5 h-3.5 me-1" />}
-              {t("participants.accepted")}
+      {/* RSVP bars: the user's own, and "Answer for <owner>" in a calendar shared with them. */}
+      {onRsvp && (
+        <AnswerBars
+          view={answerView}
+          size="xs"
+          className="px-4 py-3 border-t border-border empty:hidden"
+          onRespond={(target, status) => onRsvp(status, target)}
+        />
+      )}
+
+      {(isPublicOverlay || isLinkedPublicCopy) && (onSubscribePublic || onPublicRsvp) && (
+        <div className="px-4 py-3 border-t border-border space-y-2">
+          {onSubscribePublic && (
+            <Button size="sm" variant="outline" className="w-full" onClick={onSubscribePublic}>
+              {t(isLinkedPublicCopy ? "atmo.refresh_my_calendar" : "atmo.add_to_my_calendar")}
             </Button>
-            <Button
-              size="sm"
-              variant={userCurrentStatus === "tentative" ? "default" : "outline"}
-              onClick={() => onRsvp("tentative")}
-              className={
-                userCurrentStatus === "tentative"
-                  ? "bg-warning hover:bg-warning/80 text-warning-foreground"
-                  : "border border-warning/30 text-warning hover:bg-warning/10"
-              }
-            >
-              {userCurrentStatus === "tentative" && <Check className="w-3.5 h-3.5 me-1" />}
-              {t("participants.tentative")}
-            </Button>
-            <Button
-              size="sm"
-              variant={userCurrentStatus === "declined" ? "default" : "ghost"}
-              onClick={() => onRsvp("declined")}
-              className={
-                userCurrentStatus === "declined"
-                  ? "bg-destructive hover:bg-destructive/80 text-destructive-foreground"
-                  : "text-destructive hover:bg-destructive/10"
-              }
-            >
-              {userCurrentStatus === "declined" && <Check className="w-3.5 h-3.5 me-1" />}
-              {t("participants.declined")}
-            </Button>
-          </div>
+          )}
+          {onPublicRsvp && (
+            <div className="flex gap-2">
+              {(['going', 'interested', 'notgoing'] as const).map((status) => (
+                <Button
+                  key={status}
+                  size="sm"
+                  variant={event.atmoAttendance === status ? 'default' : 'outline'}
+                  onClick={() => onPublicRsvp(status)}
+                  aria-label={t(`atmo.rsvp_${status}`)}
+                >
+                  {t(`atmo.rsvp_${status}`)}
+                </Button>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
-      {/* Action Bar */}
-      <div className="px-4 py-2.5 border-t border-border flex items-center gap-1.5">
-        {showDeleteConfirm ? (
-          <div className="flex items-center gap-2 w-full">
-            <span className="text-sm text-destructive flex-1">
-              {t("form.delete_confirm")}
-            </span>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onDelete}
-              className="text-red-600 dark:text-red-400 border-red-300 dark:border-red-700 h-7 text-xs"
-            >
-              {t("events.delete")}
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setShowDeleteConfirm(false)}
-              className="h-7 text-xs"
-            >
-              {t("form.cancel")}
-            </Button>
-          </div>
-        ) : (
-          <>
-            {canEditBody && (
-              <Button variant="default" size="sm" onClick={onEdit} className="h-7 text-xs">
-                <Pencil className="w-3.5 h-3.5 me-1" />
-                {t("events.edit")}
-              </Button>
-            )}
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={onDuplicate}
-              className="h-7 text-xs"
-              title={t("events.duplicate")}
-            >
-              <Copy className="w-3.5 h-3.5 me-1" />
-              {t("events.duplicate")}
-            </Button>
-            <div className="flex-1" />
-            {canEditBody && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setShowDeleteConfirm(true)}
-                className="h-7 text-xs text-red-600 dark:text-red-400"
-                title={t("events.delete")}
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-              </Button>
-            )}
-          </>
-        )}
-      </div>
+      {canPublishPublic && onPublishPublic && (
+        <div className="px-4 py-3 border-t border-border">
+          <Button size="sm" variant="outline" className="w-full" onClick={onPublishPublic}>
+            {t("atmo.publish_event")}
+          </Button>
+        </div>
+      )}
+
     </div>
   );
 
   return createPortal(popover, document.body);
-}
-
-function ParticipantStatusBadge({
-  status,
-  t,
-}: {
-  status: CalendarParticipant["participationStatus"];
-  t: ReturnType<typeof useTranslations>;
-}) {
-  const colors: Record<string, string> = {
-    accepted: "text-success",
-    declined: "text-destructive",
-    tentative: "text-warning",
-    "needs-action": "text-muted-foreground",
-  };
-  const labels: Record<string, string> = {
-    accepted: "participants.accepted",
-    declined: "participants.declined",
-    tentative: "participants.tentative",
-    "needs-action": "participants.needs_action",
-  };
-  return (
-    <span className={`text-[10px] flex-shrink-0 ${colors[status] || ""}`}>
-      {t(labels[status] || labels["needs-action"])}
-    </span>
-  );
 }
