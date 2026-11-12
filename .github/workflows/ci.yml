@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
+  checks:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -26,9 +26,51 @@ jobs:
       - run: npm audit --omit=dev --audit-level=high
       - run: npm run lint
       - run: npm run typecheck
+
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
       - run: npx playwright install --with-deps chromium
-      - run: COMAIL_BROWSER_TESTS=1 npm test
+      - run: COMAIL_BROWSER_TESTS=1 npm test -- --shard=${{ matrix.shard }}/4
+
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
       - run: node scripts/build-plugin-sandbox.mjs
       - run: npx next build --webpack
         env:
           NEXT_TELEMETRY_DISABLED: '1'
+
+  test:
+    needs: [checks, unit, build]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Require all checks
+        env:
+          CHECKS_RESULT: ${{ needs.checks.result }}
+          UNIT_RESULT: ${{ needs.unit.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+        run: |
+          test "$CHECKS_RESULT" = success
+          test "$UNIT_RESULT" = success
+          test "$BUILD_RESULT" = success

@@ -2,7 +2,7 @@
   "deployed_at": "2026-11-12T02:12:54Z",
   "eligible_at": "2026-11-19T02:12:54Z",
   "license": "AGPL-3.0-only",
-  "payload_sha256": "ef70cbf34d2eb2b9d12cb4b8a7d491b9a918b6772d967f973ff458e8944258fd",
+  "payload_sha256": "185800fa8b3d7ddd2d27bfb2628eabd059a521f50b25753365577aac6cbca9a5",
   "release_identity": "fdfe28782be9668063cb0738cfe2ed00e0e310bd-1e3d1067a206def6",
   "schema": 1,
   "source_sha": "fdfe28782be9668063cb0738cfe2ed00e0e310bd",
