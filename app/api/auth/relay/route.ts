@@ -1,4 +1,5 @@
 import { inboxSetting } from '@/lib/auth/inbox-config';
+import { MAIL_CLIENT_UPDATE_MESSAGE } from '@/lib/space-mail/wire';
 import { randomBytes } from 'node:crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
@@ -98,7 +99,7 @@ async function grantSession(credential: RelaySsoCredential): Promise<NextRespons
   const normalizedServerUrl = normalizeJmapServerUrl(serverUrl);
   const { did, mailbox, appPassword } = credential;
   const authHeader = `Basic ${Buffer.from(`${mailbox}:${appPassword}`).toString('base64')}`;
-  validateProxyAuthHeader(authHeader);
+  if (credential.mailMode !== 'pds') validateProxyAuthHeader(authHeader);
 
   const cookieStore = await cookies();
   let freeSlot: number | undefined;
@@ -125,11 +126,11 @@ async function grantSession(credential: RelaySsoCredential): Promise<NextRespons
     sessionCookieName(slot),
     encryptSession(normalizedServerUrl, mailbox, appPassword, {
       did, groupwareEnabled: credential.groupwareEnabled, buildersEnabled: credential.buildersEnabled,
-      credentialId: credential.credentialId,
+      credentialId: credential.credentialId, mailMode: credential.mailMode,
     }),
     options,
   );
-  setStalwartAuthContextInStore(cookieStore, slot, {
+  if (credential.mailMode !== 'pds') setStalwartAuthContextInStore(cookieStore, slot, {
     serverUrl: normalizedServerUrl,
     username: mailbox,
     authHeader,
@@ -187,6 +188,9 @@ export async function POST(request: NextRequest) {
       ...(err instanceof DOMException && err.name === 'TimeoutError' ? { reason: 'timeout' } : {}),
       error_type: err instanceof Error ? err.name : 'unknown',
     });
+    if (err instanceof RelayRedemptionStatusError && err.clientUpdateRequired) {
+      return errorResponse(MAIL_CLIENT_UPDATE_MESSAGE, 403);
+    }
     if (err instanceof RelayRedemptionStatusError && err.credentialCapacity) {
       return errorResponse('Your account has reached its sign-in and mail-client limit. In an existing session, open Settings → Connect mail client and revoke a credential you no longer use, then start sign-in again.', 429);
     }

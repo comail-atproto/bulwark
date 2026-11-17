@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { JMAPClient } from '@/lib/jmap/client';
+import { createComailClient, type ComailJMAPClient as JMAPClient } from '@/lib/jmap/comail-client';
 import { AtmoCalendarAdapter } from '@/lib/jmap/atmo-calendar-adapter';
 import { SpaceCalendarError } from '@/lib/jmap/space-calendar-adapter';
 import type { Calendar, CalendarEvent } from '@/lib/jmap/types';
@@ -13,7 +13,7 @@ const calendar = { id: CALENDAR_ID, originalId: CALENDAR_ID, source: 'atproto-pu
 const event = { id: EVENT_ID, originalId: EVENT_ID, source: 'atproto-public', calendarIds: { [CALENDAR_ID]: true } } as unknown as CalendarEvent;
 
 function makeClient() {
-  const client = new JMAPClient('https://mail.example.test', 'owner@example.test', 'synthetic');
+  const client = createComailClient('https://mail.example.test', 'owner@example.test', 'synthetic');
   Object.assign(client, {
     accountId: 'acct-1',
     accounts: { 'acct-1': { name: 'Owner', isPersonal: true, accountCapabilities: { 'urn:ietf:params:jmap:calendars': {} } } },
@@ -184,7 +184,6 @@ describe('AT Protocol public calendar integration in JMAPClient', () => {
     const getEvents = vi.spyOn(adapter, 'getEvents')
       .mockResolvedValueOnce([event])
       .mockResolvedValueOnce([{ ...event, id: `${EVENT_ID}-next` }])
-      .mockRejectedValueOnce(new SpaceCalendarError('Public calendar unavailable', 'provider_unavailable', 503))
       .mockRejectedValueOnce(new SpaceCalendarError('Public calendar unavailable', 'provider_unavailable', 503));
     vi.spyOn(adapter, 'isLastRefreshComplete').mockReturnValue(true);
     const first = ['2026-10-08T00:00:00Z', '2026-10-09T00:00:00Z'] as const;
@@ -195,9 +194,12 @@ describe('AT Protocol public calendar integration in JMAPClient', () => {
     await expect(client.getAtmoPublicCalendarEvents(...first)).resolves.toEqual([]);
     expect(client.getAtmoCalendarStale()).toBe(true);
     client.disconnect();
+    const afterDisconnect = vi.spyOn(adapterOf(client), 'getEvents')
+      .mockRejectedValue(new SpaceCalendarError('Public calendar unavailable', 'provider_unavailable', 503));
     await expect(client.getAtmoPublicCalendarEvents(...next)).resolves.toEqual([]);
     expect(latest).toContainEqual(expect.objectContaining({ id: `${EVENT_ID}-next` }));
-    expect(getEvents).toHaveBeenCalledTimes(4);
+    expect(getEvents).toHaveBeenCalledTimes(3);
+    expect(afterDisconnect).toHaveBeenCalledOnce();
   });
 
   it('rejects public calendar destinations supplied as JMAP patch pointers', async () => {

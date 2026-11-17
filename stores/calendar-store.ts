@@ -53,7 +53,6 @@ import { registerCalendarSubscriptionSyncBridge } from './settings-store';
 import { currentStoreEpoch } from '@/lib/store-epoch';
 import { sentByPatchValue } from '@/lib/calendar-delegate';
 
-
 /**
  * A new calendar without a sortOrder gets 0 and, once the user has reordered
  * the account's calendars (1, 2, 3...), would jump to the top. Give it the
@@ -1285,9 +1284,7 @@ export const useCalendarStore = create<CalendarStore>()(
         try {
           // Resolve shared event IDs and client-side expanded occurrence IDs
           const target = resolveMutationTarget(get().events, id, 'occurrence');
-          requireWritableEvent({ ...target.storeEvent, id }, get().calendars);
           const { storeEvent, realId, targetAccountId } = target;
-          requireWritableEvent(updates, get().calendars);
           client = resolveAccountClient(client, target.localAccountId);
           debug.log('calendar', 'Calendar updateEvent', {
             storeId: id,
@@ -1301,6 +1298,8 @@ export const useCalendarStore = create<CalendarStore>()(
           // A change built on the base event as the server holds it now (a
           // raise of its SEQUENCE), read where the write goes.
           if (options?.fromCurrent && !target.isOccurrence && !target.isBrowserOccurrence) {
+            requireWritableEvent({ ...storeEvent, id }, get().calendars);
+            requireWritableEvent(updates, get().calendars);
             const current = await client.getCalendarEvent(realId, targetAccountId);
             if (current) updates = options.fromCurrent(current);
           }
@@ -1321,6 +1320,16 @@ export const useCalendarStore = create<CalendarStore>()(
             if (keys.length === 0) return true;
             const privateKeys = keys.filter(key => SPACE_PERSONAL_EVENT_FIELDS.has(key));
             if (privateKeys.length > 0) {
+              // Only a linked Space copy may keep private settings for a public event.
+              if (!storeEvent.atprotoUri || !storeEvent.atprotoCid
+                || isPublicAtprotoCalendar({ id, originalId: storeEvent.originalId })
+                || isPublicAtprotoCalendar({ id: storeEvent.baseEventId ?? undefined })
+                || storeEvent.recurrenceId || storeEvent.recurrenceRules?.length
+                || Object.keys(storeEvent.recurrenceOverrides ?? {}).length
+                || storeEvent.participants != null) {
+                requireWritableEvent({ ...storeEvent, id }, get().calendars);
+              }
+              requireWritableEvent(updates, get().calendars);
               const isOccurrence = target.isOccurrence || target.isBrowserOccurrence;
               const canonical = await updateSpacePrivateEvent(client, storeEvent, realId, cleanUpdates, get().calendars, !!isOccurrence);
               set(state => ({ events: state.events.map(e => {
@@ -1332,8 +1341,10 @@ export const useCalendarStore = create<CalendarStore>()(
               if (isOccurrence || hasExpandedOccurrencesOf(get().events, realId, target)) await refetchAfterOccurrenceMutation();
               return true;
             }
-            prepareSpaceSharedOverrides(storeEvent, cleanUpdates);
           }
+          requireWritableEvent({ ...storeEvent, id }, get().calendars);
+          requireWritableEvent(updates, get().calendars);
+          if (storeEvent?.source === 'atproto-space') prepareSpaceSharedOverrides(storeEvent, cleanUpdates);
           // An occurrence's alerts that turn the calendar's defaults off.
           const stopsDefaultAlerts = cleanUpdates.useDefaultAlerts === false && 'alerts' in cleanUpdates;
           const inTwoSteps = !!storeEvent && (target.isOccurrence || !!target.isBrowserOccurrence)

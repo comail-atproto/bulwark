@@ -195,7 +195,7 @@ export function CalendarApp({ linkSegments: routeSegments }: CalendarAppProps = 
   // Account configuration and server policy must both enable the calendar.
   const { calendarEnabled: calendarConfigEnabled, isLoading: configLoading } = useConfig();
   const calendarPolicyEnabled = usePolicyStore((s) => s.isFeatureEnabled('calendarEnabled'));
-  const calendarEnabled = calendarConfigEnabled && calendarPolicyEnabled;
+  const calendarEnabled = calendarConfigEnabled === true && calendarPolicyEnabled;
   const { firstDayOfWeek, timeFormat, showWeekNumbers, enableCalendarTasks, showTasksOnCalendar, calendarHoverPreview, showBirthdayCalendar, birthdayCalendarColor, updateSetting } = useSettingsStore();
   const sharedCalendarColors = useSettingsStore((s) => s.sharedCalendarColors);
   const setSharedCalendarColor = useSettingsStore((s) => s.setSharedCalendarColor);

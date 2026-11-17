@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { JMAPClient } from '@/lib/jmap/client';
+import { createComailClient } from '@/lib/jmap/comail-client';
 import { useAccountStore } from '@/stores/account-store';
 
 afterEach(() => { vi.unstubAllGlobals(); useAccountStore.setState({ accounts: [], activeAccountId: null }); });
@@ -8,7 +8,7 @@ describe('JMAP groupware transport', () => {
   it('uses the selected account server gate and cannot fall back after denial', async () => {
     const id = useAccountStore.getState().addAccount({ label: 'Owner', authMode: 'basic', rememberMe: true, username: 'owner@example.test', serverUrl: 'https://mail.example.test', displayName: 'Owner', email: 'owner@example.test', lastLoginAt: 0, isConnected: true, hasError: false, isDefault: true });
     useAccountStore.getState().updateAccount(id, { cookieSlot: 2 });
-    const client = new JMAPClient('https://mail.example.test', 'owner@example.test', 'synthetic');
+    const client = createComailClient('https://mail.example.test', 'owner@example.test', 'synthetic');
     const session = { apiUrl: 'https://mail.example.test/jmap', accounts: { a: { name: 'Owner', isPersonal: true, accountCapabilities: {} } }, primaryAccounts: { 'urn:ietf:params:jmap:mail': 'a', 'urn:ietf:params:jmap:contacts': 'a' }, capabilities: {}, downloadUrl: '', uploadUrl: '', eventSourceUrl: '' };
     const fetchMock = vi.fn().mockResolvedValueOnce(Response.json(session));
     vi.stubGlobal('fetch', fetchMock);

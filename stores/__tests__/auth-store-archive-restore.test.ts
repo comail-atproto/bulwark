@@ -11,6 +11,7 @@ vi.mock('@/lib/jmap/client', () => {
     async connect() { if (this.password === 'wrong') throw new Error('Authentication failed'); }
     getSessionUsername() { return this.username; }
     getUsername() { return this.username; }
+    getServerUrl() { return this.serverUrl; }
     async getIdentities() { return [{ id: 'a', email: this.username, name: this.username, mayDelete: false }]; }
     getAuthHeader() { return 'Basic eA=='; }
     onConnectionChange() {}
@@ -20,6 +21,7 @@ vi.mock('@/lib/jmap/client', () => {
     supportsPrincipals() { return false; }
     supportsVacationResponse() { return false; }
     supportsCalendars() { return false; }
+    supportsFiles() { return false; }
     supportsSieve() { return false; }
     disconnect() {}
     getAccountId() { return 'acct'; }

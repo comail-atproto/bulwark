@@ -100,7 +100,17 @@ describe('/api/auth/relay opaque-code route', () => {
     vi.unstubAllGlobals();
   });
 
-  it.each([401, 409, 410, 429, 502])('reports backchannel status %s without logging its response body', async (status) => {
+  it('seals PDS mail mode without creating a Stalwart auth context', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({
+      did: 'did:plc:abcdefghijklmnopqrstuvwx', mailbox: 'alice@example.test', app_password: 'synthetic-password',
+      groupware_enabled: false, builders_enabled: false, mail_mode: 'pds',
+    })));
+    expect((await POST(postRequest('https://inbox.example'))).status).toBe(303);
+    expect(mocks.encryptSession).toHaveBeenCalledWith('https://inbox.example', 'alice@example.test', 'synthetic-password', expect.objectContaining({ mailMode: 'pds' }));
+    expect(mocks.setAuthContext).not.toHaveBeenCalled();
+  });
+
+  it.each([401, 403, 409, 410, 429, 502])('reports backchannel status %s without logging its response body', async (status) => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('private synthetic response', { status })));
     const response = await POST(postRequest('https://inbox.example'));
     expect(response.status).toBe(401);
@@ -108,6 +118,17 @@ describe('/api/auth/relay opaque-code route', () => {
       event: 'relay_sso_redeem_failed', stage: 'redemption', status,
     }));
     expect(JSON.stringify(mocks.loggerWarn.mock.calls)).not.toContain('private synthetic response');
+  });
+
+  it('shows the update message without granting a session or exposing upstream text', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({
+      error: 'client_update_required', message: 'private upstream message',
+    }, { status: 403 })));
+    const response = await POST(postRequest('https://inbox.example'));
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: 'Update Comail to access your PDS mailbox.' });
+    expect(mocks.cookieSet).not.toHaveBeenCalled();
+    expect(JSON.stringify(mocks.loggerWarn.mock.calls)).not.toContain('private upstream message');
   });
 
   it('explains exhausted credential capacity without exposing the upstream body', async () => {

@@ -535,6 +535,19 @@ describe('oauth token route - sign-out (#905)', () => {
     if (idToken) cookieStore.set(`jmap_idt${suffix}`, idToken);
   }
 
+  it.each([false, true])('clears hosted tokens locally without provider revocation (all=%s)', async (all) => {
+    seedSlot(0); seedSlot(2);
+    const { status, body } = await callRoute('DELETE', all
+      ? { all: 'true', local_only: 'true', end_session_slot: '0' }
+      : { slot: '0', local_only: 'true', end_session: 'true' });
+    expect(status).toBe(200);
+    expect(body.end_session_url).toBeUndefined();
+    expect(getMetadata).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+    for (const name of ['jmap_rt', 'jmap_at', 'jmap_idt']) expect(cookieStore.get(name)).toBeUndefined();
+    expect(cookieStore.get('jmap_rt_2')?.value).toBe(all ? undefined : 'refresh-2');
+  });
+
   it('builds the provider logout with client_id and id_token_hint', async () => {
     seedSlot(0);
 

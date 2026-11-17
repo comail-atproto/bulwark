@@ -9,9 +9,11 @@ vi.mock('@/lib/jmap/client', () => {
   class JMAPClient {
     constructor(public serverUrl: string, public username: string, public password: string) {}
     static withBearer(serverUrl: string, _token: string, username: string) { return new JMAPClient(serverUrl, username, ''); }
+    upgradeToBearer() {}
     async connect() {}
     getSessionUsername() { return this.username; }
     getUsername() { return this.username; }
+    getServerUrl() { return this.serverUrl; }
     async getIdentities() { return [{ id: 'a', email: this.username, name: this.username, mayDelete: false }]; }
     getAuthHeader() { return 'Bearer at'; }
     onConnectionChange() {}
@@ -21,6 +23,7 @@ vi.mock('@/lib/jmap/client', () => {
     supportsPrincipals() { return false; }
     supportsVacationResponse() { return false; }
     supportsCalendars() { return false; }
+    supportsFiles() { return false; }
     supportsSieve() { return false; }
     disconnect() {}
     getAccountId() { return 'acct'; }

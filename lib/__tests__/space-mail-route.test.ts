@@ -30,7 +30,7 @@ const state = (version = hash('b'), height = 1): MailState => ({
 function request(operation: string, body: string, slot = '0', origin = 'https://bulwark.test') {
   const cookie = `jmap_session=${encryptSession('https://stalwart.test', 'alice@example.test', 'synthetic', { did })}`;
   return new NextRequest(`https://bulwark.test/api/mail/${operation}?slot=${slot}`, {
-    method: 'POST', headers: { cookie, origin, host: 'bulwark.test', 'content-type': 'application/json' }, body,
+    method: 'POST', headers: { cookie, origin, host: 'bulwark.test', 'content-type': 'application/json', 'X-Comail-Mail-Protocol': '1' }, body,
   });
 }
 const params = (operation: string) => ({ params: Promise.resolve({ seg: operation.split('/') }) });
@@ -43,6 +43,54 @@ describe('private mail browser bridge', () => {
   });
   afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
 
+  it('refuses an old browser build before it contacts the PDS bridge', async () => {
+    const fetcher = vi.fn().mockResolvedValue(Response.json({ did, mailbox: 'alice@example.test', identities: ['alice@example.test'], capabilities: {
+      messageCreate: true, draftReplace: true, messageRead: true, inventory: true, submission: false,
+    } }));
+    vi.stubGlobal('fetch', fetcher);
+    for (const protocol of ['', '0']) {
+      const req = request('bootstrap', '{}');
+      if (protocol) req.headers.set('X-Comail-Mail-Protocol', protocol);
+      else req.headers.delete('X-Comail-Mail-Protocol');
+      const response = await POST(req, params('bootstrap'));
+      expect(response.status).toBe(403);
+      // Older browser builds display the error field directly.
+      expect(await response.json()).toMatchObject({ error: 'Update Comail to access your PDS mailbox.', code: 'client_update_required' });
+    }
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('returns only a bootstrap bound to the signed mailbox and DID', async () => {
+    const bootstrap = { did, mailbox: 'alice@example.test', identities: ['alice@example.test'], capabilities: {
+      messageCreate: true, draftReplace: true, messageRead: true, inventory: true, submission: false,
+    } };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(Response.json(bootstrap))
+      .mockResolvedValueOnce(Response.json({ ...bootstrap, did: 'did:plc:other' })));
+    expect((await POST(request('bootstrap', '{}'), params('bootstrap'))).status).toBe(200);
+    expect((await POST(request('bootstrap', '{}'), params('bootstrap'))).status).toBe(502);
+  });
+
+  it('passes submission status and cancellation through the signed account bridge', async () => {
+    const status = { id: 'submission-1', status: 'queued', logicalMessageId: hash('a'), fingerprint: hash('b'),
+      sender: 'alice@example.test', recipients: [{ address: 'to@example.test', status: 'queued' }], notBefore: 0, dsnNotify: [] };
+    const fetcher = vi.fn().mockResolvedValueOnce(Response.json(status)).mockResolvedValueOnce(Response.json({ cancelled: true }));
+    vi.stubGlobal('fetch', fetcher);
+    expect((await POST(request('submissions/status', JSON.stringify({ submissionId: 'submission-1' })), params('submissions/status'))).status).toBe(200);
+    expect((await POST(request('submissions/cancel', JSON.stringify({ submissionId: 'submission-1' })), params('submissions/cancel'))).status).toBe(200);
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
+      'https://inbox.test/webmail/mail/api/v1/submissions/status', 'https://inbox.test/webmail/mail/api/v1/submissions/cancel',
+    ]);
+  });
+
+  it('accepts only a valid submission inventory page', async () => {
+    const entry = { id: 'submission-1', operationId: 'operation-1', status: 'queued', logicalMessageId: hash('a'), fingerprint: hash('b'),
+      sender: 'alice@example.test', recipients: [{ address: 'to@example.test', status: 'queued' }], notBefore: 100, dsnNotify: ['FAILURE'] };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(Response.json({ snapshotId: hash('c'), total: 1, entries: [entry] }))
+      .mockResolvedValueOnce(Response.json({ snapshotId: hash('c'), total: 1, entries: [{ ...entry, operationId: '' }] })));
+    expect((await POST(request('submissions/inventory', '{"limit":100}'), params('submissions/inventory'))).status).toBe(200);
+    expect((await POST(request('submissions/inventory', '{"limit":100}'), params('submissions/inventory'))).status).toBe(502);
+  });
+
   it('saves, edits and reopens exact draft bytes without contacting Stalwart', async () => {
     let raw = ''; let saved = state(); let writes = 0; let loseResponse = false;
     const operations = new Map<string, string>();
@@ -54,6 +102,7 @@ describe('private mail browser bridge', () => {
       if (!url.startsWith('https://inbox.test/webmail/mail/api/v1/')) throw new Error('Stalwart unreachable');
       const token = new Headers(init.headers).get('authorization')!.slice(7);
       expect(JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString())).toMatchObject({ mailbox: 'alice@example.test', sub: did, aud: 'comail-mail' });
+      expect(new Headers(init.headers).get('X-Comail-Mail-Protocol')).toBe('1');
       expect(init.cache).toBe('no-store'); expect(init.redirect).toBe('error');
       const input = JSON.parse(init.body as string);
       if (url.endsWith('/messages/read')) return Response.json({ snapshotId: saved.snapshotId, state: saved, folders: [], message: {
@@ -106,6 +155,16 @@ describe('private mail browser bridge', () => {
     vi.stubGlobal('fetch', fetcher);
     expect((await POST(incoming, params('messages'))).status).toBe(200);
     expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('proxies authenticated inventory and state operations without weakening account binding', async () => {
+    const message = { uri: `at://did:plc:spaceauthority/space/email.atmos.mailbox/primary/${did}/email.atmos.message/message`, rkey: 'message', fingerprint: hash('b'), logicalMessageId: hash('a'), sha256: 'a'.repeat(64), size: 9 };
+    const fetcher = vi.fn().mockResolvedValueOnce(Response.json({ snapshotId: hash('c'), folders: [], entries: [{ message, state: state() }], total: 1 }))
+      .mockResolvedValueOnce(Response.json(state()));
+    vi.stubGlobal('fetch', fetcher);
+    expect((await POST(request('inventory', '{"limit":100}'), params('inventory'))).status).toBe(200);
+    expect((await POST(request('state', JSON.stringify({ logicalMessageId: hash('a'), version: hash('b'), mailboxIds: ['drafts'], keywords: ['$draft'], tombstone: false, deletePending: false })), params('state'))).status).toBe(200);
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual(['https://inbox.test/webmail/mail/api/v1/inventory', 'https://inbox.test/webmail/mail/api/v1/state']);
   });
 
   it('rejects another origin, missing account slots and unexpected paths before storage access', async () => {

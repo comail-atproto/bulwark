@@ -1,4 +1,6 @@
+import { createComailClient, createComailBearerClient, isComailClient, type ComailJMAPClient } from '@/lib/jmap/comail-client';
 import { subscribeConfig } from '@/lib/groupware/config-events';
+import { MAIL_CLIENT_UPDATE_MESSAGE } from '@/lib/space-mail/wire';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { JMAPClient, RateLimitError, RequestTimeoutError } from '@/lib/jmap/client';
@@ -165,12 +167,17 @@ const ERROR_PATTERNS: Array<{ key: string; matches: string[] }> = [
 ];
 
 function classifyLoginError(error: unknown): string {
+  if (isMailClientUpdateError(error)) return 'client_update_required';
   if (!(error instanceof Error)) return 'generic';
   const msg = error.message;
   for (const { key, matches } of ERROR_PATTERNS) {
     if (matches.some((pattern) => msg.includes(pattern))) return key;
   }
   return 'generic';
+}
+
+function isMailClientUpdateError(error: unknown): error is Error {
+  return error instanceof Error && 'code' in error && error.code === 'client_update_required';
 }
 
 function isRateLimitError(error: unknown): error is RateLimitError {
@@ -544,13 +551,39 @@ type RememberedSession = (
 ) & {
   /** The session an impersonation handoff opened (set by the server). */
   impersonated?: boolean;
+  mailMode?: 'pds';
 };
 
 /** A client for remembered credentials. */
 function clientForSession(session: RememberedSession): JMAPClient {
   return session.token !== undefined
-    ? JMAPClient.withBearer(session.serverUrl, session.token, session.username)
-    : new JMAPClient(session.serverUrl, session.username, session.password);
+    ? createComailBearerClient(session.serverUrl, session.token, session.username)
+    : createComailClient(session.serverUrl, session.username, session.password);
+}
+
+async function connectRememberedClient(client: JMAPClient, account: AccountEntry, did?: string, mailMode?: 'pds'): Promise<boolean> {
+  if (IS_LITE) {
+    if (mailMode === 'pds') throw new TransientAuthError('PDS mail unavailable', 503);
+    await client.connect();
+    return false;
+  }
+  const config = await fetchAccountConfig(account.cookieSlot);
+  if (mailMode === 'pds' && !config.privateMailEnabled) throw new TransientAuthError('PDS mail unavailable', 503);
+  if (config.privateMailEnabled) {
+    if (!did || client.getUsername() !== account.username) throw new Error('mail_unavailable');
+    if (account.did !== did) useAccountStore.getState().updateAccount(account.id, { did });
+    client.configurePrivateMail(account.cookieSlot, { accountId: did, did, username: account.username });
+  }
+  try {
+    await client.connect();
+  } catch (error) {
+    if (isMailClientUpdateError(error)) throw error;
+    if (config.privateMailEnabled && error instanceof Error && error.message !== 'unauthorized') {
+      throw new TransientAuthError('PDS mail unavailable', 503);
+    }
+    throw error;
+  }
+  return config.privateMailEnabled === true;
 }
 
 /** POST /api/auth/session?slot=N - remember a password or access token for `slot`. */
@@ -747,7 +780,7 @@ function hostedInboxLogoutConfig(): HostedInboxLogoutConfig | null {
   const config = getCachedConfig();
   if (!config || config.appName !== 'Comail') return null;
   try {
-    const login = new URL(config.atprotoLoginUrl);
+    const login = new URL(config.atprotoLoginUrl ?? '');
     const destination = new URL(config.hostedInboxLogoutDestination ?? '');
     if (typeof window === 'undefined' || login.origin !== window.location.origin || login.pathname !== '/webmail/login'
       || login.search || login.hash || destination.protocol !== 'https:' || destination.username || destination.password) return null;
@@ -1106,7 +1139,7 @@ function finishSignOut(endSessionUrl: string | null, userInitiated: boolean): vo
   navigateToLogin();
 }
 
-function configurePrivateCapabilities(client: JMAPClient, account: AccountEntry, config: ReturnType<typeof getCachedConfig>): void {
+function configurePrivateCapabilities(client: ComailJMAPClient, account: AccountEntry, config: ReturnType<typeof getCachedConfig>): void {
   const previousContacts = client.supportsContacts();
   const previousCalendars = client.supportsCalendars();
   const previousFiles = client.supportsFiles();
@@ -1122,7 +1155,7 @@ function configurePrivateCapabilities(client: JMAPClient, account: AccountEntry,
 
 function initializeFeatureStores(client: IJMAPClient, providedConfig?: ReturnType<typeof getCachedConfig>): void {
   let config: ReturnType<typeof getCachedConfig> = providedConfig ?? null;
-  const privateClient = client instanceof JMAPClient && typeof client.configurePrivateGroupware === 'function';
+  const privateClient = isComailClient(client);
   if (privateClient || client.supportsContacts() || client.supportsCalendars()) {
     const accounts = useAccountStore.getState();
     const account = accounts.getAccountById(generateAccountId(client.getUsername(), client.getServerUrl()));
@@ -1610,7 +1643,7 @@ export const useAuthStore = create<AuthState>()(
             }
 
             if (bearerToken) {
-              client = JMAPClient.withBearer(serverUrl, bearerToken, username, () => get().refreshAccessToken({ accountId }));
+              client = createComailBearerClient(serverUrl, bearerToken, username, () => get().refreshAccessToken({ accountId }));
               await client.connect();
               oauthAccessToken = bearerToken;
               upgradedToOAuth = true;
@@ -1620,7 +1653,7 @@ export const useAuthStore = create<AuthState>()(
               if (await precheckCredentials(serverUrl, { username, password: `${password}$${totp}` })) {
                 throw new Error('Invalid username or password');
               }
-              client = new JMAPClient(serverUrl, username, `${password}$${totp}`);
+              client = createComailClient(serverUrl, username, `${password}$${totp}`);
               await client.connect();
               const { useTotpReauthStore } = await import('@/stores/totp-reauth-store');
               client.enableTotpReauth(password, () => useTotpReauthStore.getState().requestTotp());
@@ -1629,14 +1662,14 @@ export const useAuthStore = create<AuthState>()(
               // Lite on a server without token login (or one that blocks the
               // browser's /api/auth call): plain Basic auth; the session is
               // then kept with the tab only, see persistSession.
-              client = new JMAPClient(serverUrl, username, password);
+              client = createComailClient(serverUrl, username, password);
               await client.connect();
             }
           } else {
             if (await precheckCredentials(serverUrl, { username, password })) {
               throw new Error('Invalid username or password');
             }
-            client = new JMAPClient(serverUrl, username, password);
+            client = createComailClient(serverUrl, username, password);
             await client.connect();
           }
 
@@ -1782,7 +1815,7 @@ export const useAuthStore = create<AuthState>()(
           }
 
           // No refresh callback: a pasted token cannot be renewed.
-          const client = JMAPClient.withBearer(serverUrl, token, '');
+          const client = createComailBearerClient(serverUrl, token, '');
           try {
             await client.connect();
           } catch (err) {
@@ -2005,7 +2038,7 @@ export const useAuthStore = create<AuthState>()(
           // The account id comes from the session, so the refresh hook reads
           // it once it is known below.
           let boundAccountId: string | undefined;
-          const client = JMAPClient.withBearer(serverUrl, access_token, '', () => get().refreshAccessToken({ accountId: boundAccountId }));
+          const client = createComailBearerClient(serverUrl, access_token, '', () => get().refreshAccessToken({ accountId: boundAccountId }));
           await client.connect();
 
           const jmapUsername = client.getUsername();
@@ -2161,7 +2194,7 @@ export const useAuthStore = create<AuthState>()(
           }
 
           let boundAccountId: string | undefined;
-          const client = JMAPClient.withBearer(ssoServerUrl, access_token, '', () => get().refreshAccessToken({ accountId: boundAccountId }));
+          const client = createComailBearerClient(ssoServerUrl, access_token, '', () => get().refreshAccessToken({ accountId: boundAccountId }));
           await client.connect();
 
           const jmapUsername = client.getUsername();
@@ -2677,12 +2710,12 @@ export const useAuthStore = create<AuthState>()(
                 const { access_token, expires_in } = await res.json();
                 effectiveServerUrl = await resolveAuthoritativeServerUrl(targetAccount.serverUrl);
                 const refreshFn = get().refreshAccessToken;
-                targetClient = JMAPClient.withBearer(effectiveServerUrl, access_token, targetAccount.username, () => refreshFn({ accountId }));
+                targetClient = createComailBearerClient(effectiveServerUrl, access_token, targetAccount.username, () => refreshFn({ accountId }));
                 bindClientStatusHandlers(targetClient, set, get, accountId);
-                await targetClient.connect();
+                const pdsMail = await connectRememberedClient(targetClient, targetAccount, targetAccount.did);
                 clients.set(accountId, targetClient);
                 scheduleRefresh(expires_in, () => get().refreshAccessToken({ accountId }), accountId);
-                await syncStalwartAuthContext(
+                if (!pdsMail) await syncStalwartAuthContext(
                   effectiveServerUrl,
                   targetAccount.username,
                   targetClient.getAuthHeader(),
@@ -2699,9 +2732,9 @@ export const useAuthStore = create<AuthState>()(
                 effectiveServerUrl = await resolveAuthoritativeServerUrl(session.serverUrl);
                 targetClient = clientForSession({ ...session, serverUrl: effectiveServerUrl });
                 bindClientStatusHandlers(targetClient, set, get, accountId);
-                await targetClient.connect();
+                const pdsMail = await connectRememberedClient(targetClient, targetAccount, session.did ?? targetAccount.did, session.mailMode);
                 clients.set(accountId, targetClient);
-                await syncStalwartAuthContext(effectiveServerUrl, session.username, targetClient.getAuthHeader(), targetAccount.cookieSlot);
+                if (!pdsMail) await syncStalwartAuthContext(effectiveServerUrl, session.username, targetClient.getAuthHeader(), targetAccount.cookieSlot);
                 if (effectiveServerUrl !== session.serverUrl) {
                   useAccountStore.getState().updateAccount(accountId, { serverUrl: effectiveServerUrl });
                 }
@@ -2990,13 +3023,12 @@ export const useAuthStore = create<AuthState>()(
                   const { access_token, expires_in } = await res.json();
                   const effectiveServerUrl = await resolveAuthoritativeServerUrl(account.serverUrl);
                   const refreshFn = get().refreshAccessToken;
-                  const client = JMAPClient.withBearer(effectiveServerUrl, access_token, account.username, () => refreshFn({ accountId: account.id }));
+                  const client = createComailBearerClient(effectiveServerUrl, access_token, account.username, () => refreshFn({ accountId: account.id }));
                   bindClientStatusHandlers(client, set, get, account.id);
-                  const contextSync = syncStalwartAuthContext(effectiveServerUrl, account.username, client.getAuthHeader(), account.cookieSlot);
-                  await client.connect();
+                  const pdsMail = await connectRememberedClient(client, account, account.did);
                   clients.set(account.id, client);
                   scheduleRefresh(expires_in, () => get().refreshAccessToken({ accountId: account.id }), account.id);
-                  await contextSync;
+                  if (!pdsMail) await syncStalwartAuthContext(effectiveServerUrl, account.username, client.getAuthHeader(), account.cookieSlot);
                   accountStore.updateAccount(account.id, {
                     isConnected: true,
                     hasError: false,
@@ -3019,10 +3051,9 @@ export const useAuthStore = create<AuthState>()(
                   const effectiveServerUrl = await resolveAuthoritativeServerUrl(session.serverUrl);
                   const client = clientForSession({ ...session, serverUrl: effectiveServerUrl });
                   bindClientStatusHandlers(client, set, get, account.id);
-                  const contextSync = syncStalwartAuthContext(effectiveServerUrl, session.username, client.getAuthHeader(), account.cookieSlot);
-                  await client.connect();
+                  const pdsMail = await connectRememberedClient(client, account, did ?? account.did, session.mailMode);
                   clients.set(account.id, client);
-                  await contextSync;
+                  if (!pdsMail) await syncStalwartAuthContext(effectiveServerUrl, session.username, client.getAuthHeader(), account.cookieSlot);
                   accountStore.updateAccount(account.id, {
                     isConnected: true,
                     hasError: false,
@@ -3040,7 +3071,7 @@ export const useAuthStore = create<AuthState>()(
               const restored = clients.get(account.id);
               const bound = accountStore.getAccountById(account.id);
               if (!IS_LITE && account.id !== targetId && restored && bound
-                && typeof restored.configurePrivateGroupware === 'function') {
+                && isComailClient(restored)) {
                 void fetchAccountConfig(bound.cookieSlot).then(config => {
                   const current = useAccountStore.getState().getAccountById(bound.id);
                   if (clients.get(bound.id) !== restored || current?.cookieSlot !== bound.cookieSlot || current.did !== bound.did) return;
@@ -3050,6 +3081,12 @@ export const useAuthStore = create<AuthState>()(
               }
             } catch (err) {
               debug.error(`Failed to restore account ${account.id}:`, err);
+              if (isMailClientUpdateError(err)) {
+                accountStore.updateAccount(account.id, {
+                  isConnected: false, hasError: true, errorMessage: MAIL_CLIENT_UPDATE_MESSAGE,
+                });
+                return;
+              }
               if (isRateLimitError(err)) {
                 accountStore.updateAccount(account.id, {
                   isConnected: false,
@@ -3209,7 +3246,8 @@ export const useAuthStore = create<AuthState>()(
               isRateLimited: false,
               rateLimitUntil: null,
               client: null,
-              error: 'connection_failed',
+              error: accounts.some(account => accountStore.getAccountById(account.id)?.errorMessage === MAIL_CLIENT_UPDATE_MESSAGE)
+                ? 'client_update_required' : 'connection_failed',
             });
             return;
           }
@@ -3244,7 +3282,7 @@ export const useAuthStore = create<AuthState>()(
               const token = await get().refreshAccessToken({ allowCached: true });
               if (token && state.serverUrl) {
                 const refreshFn = get().refreshAccessToken;
-                const client = JMAPClient.withBearer(state.serverUrl, token, state.username || '', () => refreshFn());
+                const client = createComailBearerClient(state.serverUrl, token, state.username || '', () => refreshFn());
                 await client.connect();
 
                 const accountId = generateAccountId(state.username || '', state.serverUrl);
@@ -3312,7 +3350,7 @@ export const useAuthStore = create<AuthState>()(
                   throw new Error('Incomplete session data');
                 }
                 const { serverUrl, username, password } = data;
-                const client = new JMAPClient(serverUrl, username, password);
+                const client = createComailClient(serverUrl, username, password);
                 await client.connect();
 
                 const accountId = generateAccountId(username, serverUrl);
@@ -3414,7 +3452,7 @@ export const useAuthStore = create<AuthState>()(
         if (!account || account.authMode !== 'basic' || clients.has(accountId)) return false;
         const { serverUrl, username, cookieSlot } = account;
         if (await precheckCredentials(serverUrl, { username, password })) return false;
-        const client = new JMAPClient(serverUrl, username, password);
+        const client = createComailClient(serverUrl, username, password);
         try {
           await client.connect();
         } catch (err) {
@@ -3569,11 +3607,11 @@ useAuthStore.subscribe((state, prev) => {
 subscribeConfig((_config, slot) => {
   const { client, activeAccountId } = useAuthStore.getState();
   const account = activeAccountId ? useAccountStore.getState().getAccountById(activeAccountId) : null;
-  if (client instanceof JMAPClient && typeof client.configurePrivateGroupware === 'function' && account?.cookieSlot === slot) initializeFeatureStores(client);
+  if (isComailClient(client) && account?.cookieSlot === slot) initializeFeatureStores(client);
 });
 
 useAuthStore.subscribe((state, previous) => {
-  if (!state.isAuthenticated || !(state.client instanceof JMAPClient) || typeof state.client.configurePrivateGroupware !== 'function' || state.client === previous.client) return;
+  if (!state.isAuthenticated || !isComailClient(state.client) || state.client === previous.client) return;
   const account = useAccountStore.getState().getActiveAccount();
   if (!account || account.id !== state.activeAccountId
     || account.id !== generateAccountId(state.client.getUsername(), state.client.getServerUrl())) return;

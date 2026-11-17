@@ -85,7 +85,7 @@
           pname = "comail-bulwark";
           version = (builtins.fromJSON (builtins.readFile ./.upstream.json)).version;
           inherit src;
-          npmDepsHash = "sha256-YQBFmjzrZfGtbAFDYuHxiOhlUuRYc4rLJy9HIuRGHKs=";
+          npmDepsHash = "sha256-qziA8yIogNCSI1+VLOh/eFsHsVqPmGnZqo6vcYkWtNg=";
           # Standalone packaging requires webpack's output tracing.
           buildPhase = ''
             runHook preBuild

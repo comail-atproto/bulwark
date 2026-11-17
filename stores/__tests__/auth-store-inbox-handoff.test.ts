@@ -7,6 +7,7 @@ vi.mock('@/lib/jmap/client', () => {
     async connect() {}
     disconnect() {}
     getUsername() { return this.username; }
+    getServerUrl() { return this.serverUrl; }
     getSessionUsername() { return this.username; }
     getAuthHeader() { return `Basic ${btoa(`${this.username}:${this.password}`)}`; }
     getAccountId() { return this.username; }
@@ -15,6 +16,7 @@ vi.mock('@/lib/jmap/client', () => {
     onRateLimit() {}
     getRateLimitRemainingMs() { return 0; }
     supportsContacts() { return false; }
+    supportsFiles() { return false; }
     supportsPrincipals() { return false; }
     supportsVacationResponse() { return false; }
     supportsCalendars() { return false; }

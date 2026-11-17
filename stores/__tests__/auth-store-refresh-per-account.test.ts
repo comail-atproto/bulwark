@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createConfig } from '@/lib/__tests__/fixtures/config';
 import { applyLiteConfig } from '@/lib/lite-config';
 
 // Each test loads a fresh store: the clients and refresh timers live at module level.
@@ -114,6 +115,10 @@ describe('auth-store: token refresh is scoped to the account that needs it', () 
       if (url.startsWith('/api/config')) return jsonResponse(200, applyLiteConfig({ jmapServerUrl: SERVER, calendarEnabled: false, contactsEnabled: false, filesEnabled: false }));
       const headers = new Headers(init?.headers);
 
+      if (url === '/api/config') {
+        return jsonResponse(200, createConfig({ jmapServerUrl: SERVER, stalwartJmapPassthroughEnabled: false }));
+      }
+
       // Bulwark token route: plain PUT hands back the cached token for the
       // slot; force=true mints a fresh one for that slot.
       const m = url.match(/^\/api\/auth\/token\?slot=(\d+)(&force=true)?$/);
@@ -146,6 +151,12 @@ describe('auth-store: token refresh is scoped to the account that needs it', () 
         if (auth === 'Bearer B-cached' && bCachedExpired) return jsonResponse(401, {});
         const owner = auth.includes('Bearer A') ? 'A' : 'B';
         return jsonResponse(200, session(`${owner}@example.test`));
+      }
+      if (url === `${SERVER}/jmap` && method === 'POST') {
+        const body = JSON.parse(String(init?.body)) as { methodCalls: [string, Record<string, unknown>, string][] };
+        return jsonResponse(200, { methodResponses: body.methodCalls.map(([name, args, id]) => [
+          name, name === 'Identity/get' ? { accountId: 'acc', list: [] } : args, id,
+        ]) });
       }
       // Anything else (display-name lookups etc.) is irrelevant here.
       return jsonResponse(404, {});

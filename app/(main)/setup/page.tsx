@@ -142,12 +142,23 @@ export default function SetupWizardPage() {
         setAuthenticated(data.authenticated);
         if (data.partialConfig) {
           setConfig((prev) => mergePartial(prev, data.partialConfig!));
-          // If auth is OK and we already have a JMAP URL persisted, jump
-          // ahead to the next unfilled step.
-          if (data.authenticated && data.partialConfig.jmapServerUrl) {
-            setStepIndex(2);
-          } else if (data.authenticated) {
+          if (data.authenticated) {
             setStepIndex(1);
+            // A saved selection may come from an unsuccessful connection
+            // test. Resume only after checking it; otherwise allow editing.
+            if (!data.readOnly && data.partialConfig.jmapServerUrl) {
+              try {
+                const response = await apiFetch('/api/setup/test-jmap', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ url: data.partialConfig.jmapServerUrl }),
+                });
+                const result = await response.json();
+                if (!cancelled && response.ok && result.status === 'jmap_detected') setStepIndex(2);
+              } catch {
+                // The server step keeps the saved address for edit/retest.
+              }
+            }
           }
         }
       } catch (e) {
@@ -259,6 +270,7 @@ export default function SetupWizardPage() {
               stepIndex={stepIndex}
               config={config}
               setConfig={setConfig}
+              onSave={saveStep}
               onNext={async (step, values) => {
                 try {
                   await saveStep(step, values);
@@ -538,16 +550,17 @@ interface StepProps {
   stepIndex: number;
   config: WizardConfig;
   setConfig: React.Dispatch<React.SetStateAction<WizardConfig>>;
+  onSave: (step: string, values: Record<string, unknown>) => Promise<void>;
   onNext: (step: string, values: Record<string, unknown>) => Promise<void>;
   onBack: () => void;
   onFinish: () => void;
 }
 
-function StepContent({ stepIndex, config, setConfig, onNext, onBack, onFinish }: StepProps) {
+function StepContent({ stepIndex, config, setConfig, onSave, onNext, onBack, onFinish }: StepProps) {
   const t = useTranslations('setup');
   switch (stepIndex) {
     case 1:
-      return <ServerStep config={config} setConfig={setConfig} onNext={onNext} />;
+      return <ServerStep config={config} setConfig={setConfig} onSave={onSave} onNext={onNext} />;
     case 2:
       return <AuthStep config={config} setConfig={setConfig} onNext={onNext} onBack={onBack} />;
     case 3:
@@ -567,7 +580,7 @@ function StepContent({ stepIndex, config, setConfig, onNext, onBack, onFinish }:
 
 type ProbeStatus = 'jmap_detected' | 'reachable_no_jmap' | 'unreachable' | 'invalid_url';
 
-function ServerStep({ config, setConfig, onNext }: Pick<StepProps, 'config' | 'setConfig' | 'onNext'>) {
+function ServerStep({ config, setConfig, onSave, onNext }: Pick<StepProps, 'config' | 'setConfig' | 'onSave' | 'onNext'>) {
   const t = useTranslations('setup');
   const [submitting, setSubmitting] = useState(false);
   const [probe, setProbe] = useState<{ status: ProbeStatus; message: string; url: string } | null>(null);
@@ -582,6 +595,7 @@ function ServerStep({ config, setConfig, onNext }: Pick<StepProps, 'config' | 's
     setProbing(true);
     setConfirmedNonJmap(false);
     try {
+      await onSave('server', { jmapServerUrl: config.jmapServerUrl });
       const res = await apiFetch('/api/setup/test-jmap', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

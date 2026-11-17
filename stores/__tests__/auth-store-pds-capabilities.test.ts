@@ -4,7 +4,7 @@ import { useAccountStore } from '../account-store';
 import { useCalendarStore } from '../calendar-store';
 import { useContactStore } from '../contact-store';
 import { resetConfigCache } from '@/hooks/use-config';
-import { JMAPClient } from '@/lib/jmap/client';
+import { createComailClient } from '@/lib/jmap/comail-client';
 import { createConfig } from '@/lib/__tests__/fixtures/config';
 import { jmapSession } from '@/lib/__tests__/fixtures/jmap-session';
 
@@ -29,7 +29,7 @@ afterEach(() => {
 async function member(username: string) {
   const serverUrl = 'https://mail.example.com';
   const id = useAccountStore.getState().addAccount({ serverUrl, username, label: username, displayName: username, email: username, authMode: 'basic', rememberMe: true, lastLoginAt: 1, isConnected: true, hasError: false, isDefault: false });
-  const client = new JMAPClient(serverUrl, username, 'synthetic');
+  const client = createComailClient(serverUrl, username, 'synthetic');
   await client.connect();
   return { id, client };
 }
@@ -107,4 +107,44 @@ it('discovers an inactive account restored in the background without selecting i
   expect(useAuthStore.getState().activeAccountId).toBe(alice);
   expect(useAuthStore.getState().client?.supportsCalendars()).toBe(false);
   expect(useCalendarStore.getState().supportsCalendar).toBe(false);
+});
+
+it.each(['ready', 'update', 'other-update'])('restores PDS mail or explains a required update without Stalwart: %s', async (scenario) => {
+  const updateRequired = scenario !== 'ready';
+  const username = `${scenario}@example.test`;
+  const serverUrl = 'https://pds-mail.example.test';
+  const did = 'did:plc:abcdefghijklmnopqrstuvwx';
+  const add = (email: string, address = serverUrl) => useAccountStore.getState().addAccount({ serverUrl: address, username: email, did, label: email, displayName: email, email, authMode: 'basic', rememberMe: true, lastLoginAt: 1, isConnected: false, hasError: false, isDefault: false });
+  const legacyProbe = 'https://unreachable.example.test/.well-known/jmap';
+  const targetId = scenario === 'other-update' ? add('unreachable@example.test', 'https://unreachable.example.test') : undefined;
+  const id = add(username);
+  const slot = targetId ? 1 : 0;
+  useAccountStore.getState().setActiveAccount(targetId ?? id);
+  const requests: string[] = [];
+  const methods: string[] = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const url = String(input);
+    requests.push(url);
+    methods.push(init?.method ?? 'GET');
+    if (targetId && url === legacyProbe) return new Response(null, { status: 503 });
+    if (url === '/api/config') return Response.json(createConfig({ privateMailEnabled: true }));
+    if (targetId && url === '/api/auth/session?slot=0') return new Response(null, { status: 503 });
+    if (url === `/api/auth/session?slot=${slot}`) return Response.json({ serverUrl, username, password: 'synthetic', did, mailMode: 'pds' });
+    if (url === `/api/mail/bootstrap?slot=${slot}`) return updateRequired
+      ? Response.json({ error: 'Update Comail to access your PDS mailbox.', code: 'client_update_required' }, { status: 403 })
+      : Response.json({ did, mailbox: username, identities: [username], capabilities: { messageCreate: true, draftReplace: true, messageRead: true, inventory: true, submission: false } });
+    if (url === `/api/mail/inventory?slot=${slot}`) return Response.json({ snapshotId: 'snapshot', folders: [], entries: [], total: 0 });
+    throw new Error(`Unexpected request: ${url}`);
+  });
+  await useAuthStore.getState().checkAuth();
+  expect(requests).toContain(`/api/mail/bootstrap?slot=${slot}`);
+  if (updateRequired) {
+    expect(useAuthStore.getState().error).toBe('client_update_required');
+    expect(useAccountStore.getState().getAccountById(id)).toMatchObject({
+      hasError: true, isConnected: false, errorMessage: 'Update Comail to access your PDS mailbox.',
+    });
+    expect(methods).not.toContain('DELETE');
+  } else expect(useAuthStore.getState().client?.isPDSMail?.()).toBe(true);
+  expect(requests.filter(url => (url.includes('/.well-known/jmap') || url.includes('/jmap/api'))
+    && !(targetId && url === legacyProbe))).toEqual([]);
 });

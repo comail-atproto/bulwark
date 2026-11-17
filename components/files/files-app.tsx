@@ -65,7 +65,7 @@ export function FilesApp({ linkSegments: routeSegments }: FilesAppProps = {}) {
   const tDeepLink = useTranslations("deep_link");
   const { filesEnabled: filesConfigEnabled, isLoading: configLoading } = useConfig();
   const filesPolicyEnabled = usePolicyStore((s) => s.isFeatureEnabled("filesEnabled"));
-  const filesEnabled = filesConfigEnabled && filesPolicyEnabled;
+  const filesEnabled = filesConfigEnabled === true && filesPolicyEnabled;
   const { isAuthenticated, logout, checkAuth, isLoading: authLoading, client } = useAuthStore();
   const activeAccountId = useAuthStore((s) => s.activeAccountId);
   const getClientForAccount = useAuthStore((s) => s.getClientForAccount);
@@ -817,6 +817,7 @@ export function FilesApp({ linkSegments: routeSegments }: FilesAppProps = {}) {
   const handleSelectAccount = useCallback((accountId: string) => {
     const nextClient = getClientForAccount(accountId);
     if (!nextClient) return;
+    filesBootstrapRef.current = false;
     const store = useFileStore.getState();
     store.initClient(nextClient, accountId);
     // Reset supportsFiles so the existing checkSupport effect re-runs for

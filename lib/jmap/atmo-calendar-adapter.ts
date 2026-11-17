@@ -24,18 +24,29 @@ export class AtmoCalendarAdapter {
 
   constructor(private readonly getCookieSlot: () => number | undefined, private readonly fetcher: Fetcher = apiFetch) {}
 
+  private checkSlot(slot: number | undefined): void {
+    if (this.getCookieSlot() !== slot) throw new SpaceCalendarError('Calendar account changed', 'account_changed', 403);
+  }
+
   private async readSource(input: string): Promise<{ response: Response; body: unknown }> {
+    const slot = this.getCookieSlot();
     let response: Response;
     try {
       response = await this.fetcher(input, { cache: 'no-store' });
     } catch {
+      this.checkSlot(slot);
       throw new SpaceCalendarError('Atmosphere calendar is unavailable', 'provider_unavailable', 502);
     }
+    this.checkSlot(slot);
+    let body: unknown;
     try {
-      return { response, body: await response.json() };
+      body = await response.json();
     } catch {
+      this.checkSlot(slot);
       throw new SpaceCalendarError('Invalid Atmosphere response', 'invalid_response', 502);
     }
+    this.checkSlot(slot);
+    return { response, body };
   }
 
   async getCalendars(): Promise<Calendar[]> {
@@ -127,7 +138,9 @@ export class AtmoCalendarAdapter {
     const slot = this.getCookieSlot();
     if (slot === undefined || !this.pendingActor) throw new SpaceCalendarError('Source authorization is unavailable', 'invalid_request', 400);
     const response = await this.fetcher(`/api/calendar/sources/start?slot=${slot}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requestId: generateUUID() }) });
+    this.checkSlot(slot);
     const body = await response.json() as { status?: unknown; authorizationUrl?: unknown };
+    this.checkSlot(slot);
     if (response.status !== 202 || body.status !== 'authorization_required' || typeof body.authorizationUrl !== 'string') throw new SpaceCalendarError('Source authorization failed', 'provider_unavailable', response.status);
     let url: URL;
     try { url = new URL(body.authorizationUrl); } catch { throw new SpaceCalendarError('Invalid source authorization URL', 'invalid_response', 502); }
@@ -151,9 +164,11 @@ export class AtmoCalendarAdapter {
     const command = this.pendingCommand?.enabled === enabled ? this.pendingCommand : { requestId: generateUUID(), baseState: this.catalog.state, enabled };
     this.pendingCommand = command;
     const response = await this.fetcher(`/api/calendar/sources/atmo?slot=${slot}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(command) });
+    this.checkSlot(slot);
     if (response.status === 409) this.pendingCommand = null;
     if (!response.ok) throw new SpaceCalendarError('Private source setting was not accepted', response.status === 409 ? 'conflict' : 'provider_unavailable', response.status);
     const body: unknown = await response.json();
+    this.checkSlot(slot);
     if (!isAtmoSourceCatalog(body, actor)) throw new SpaceCalendarError('Invalid private source setting', 'invalid_response', 502);
     this.catalog = body;
     this.pendingCommand = null;

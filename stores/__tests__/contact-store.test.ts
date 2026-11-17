@@ -1432,7 +1432,7 @@ describe('private contacts authorization',()=>{
  it('retains the consent action instead of silently using another contact source',async()=>{
   const {SpaceContactError}=await import('@/lib/jmap/space-contact-adapter');
   const authorizationUrl=`https://inbox.comail.at/oauth/contacts/tickets/${'A'.repeat(43)}`;
-  const client={getAllContacts:vi.fn().mockRejectedValue(new SpaceContactError('authorization_required',authorizationUrl))} as unknown as IJMAPClient;
+  const client={getUsername:()=> 'alice@example.test',getServerUrl:()=> 'https://mail.example.test',getAllContacts:vi.fn().mockRejectedValue(new SpaceContactError('authorization_required',authorizationUrl))} as unknown as IJMAPClient;
   useContactStore.setState({contacts:[],error:null});
   await useContactStore.getState().fetchContacts(client);
   expect(useContactStore.getState().spaceContactsAuthorizationUrl).toBe(authorizationUrl);

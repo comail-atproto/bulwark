@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import React from 'react';
 import { EmailComposer } from '../email-composer';
@@ -274,23 +274,51 @@ describe('composer placeholder warning', () => {
     expect(updateSetting).toHaveBeenCalledWith('placeholderWarningEnabled', false);
   });
 
-  it('goes back to editing with the placeholder selected', async () => {
+  it('focuses To when focus has not moved since opening the composer', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const opener = document.createElement('button');
+    document.body.append(opener);
+    opener.focus();
+    const { unmount } = render(<EmailComposer initialData={DRAFT_WITH_PLACEHOLDER} />);
+
+    try {
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+      expect(screen.getAllByRole('combobox')[0]).toHaveFocus();
+    } finally {
+      unmount();
+      opener.remove();
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the placeholder selected when initial autofocus is still pending', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const onSend = vi.fn();
-    render(
+    const { unmount } = render(
       <EmailComposer
         initialData={{ ...DRAFT_WITH_PLACEHOLDER, subject: 'Hi {{name}}', body: '<p>Hello</p>' }}
         onSend={onSend}
       />
     );
 
-    fireEvent.click(sendButton());
-    fireEvent.click(await screen.findByText('placeholder_warning.back'));
+    try {
+      await act(async () => { fireEvent.click(sendButton()); });
+      fireEvent.click(screen.getByText('placeholder_warning.back'));
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
 
-    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
-    const subject = screen.getByDisplayValue('Hi {{name}}') as HTMLInputElement;
-    await waitFor(() => expect(document.activeElement).toBe(subject));
-    expect([subject.selectionStart, subject.selectionEnd]).toEqual([3, 11]);
-    expect(onSend).not.toHaveBeenCalled();
+      expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+      const subject = screen.getByDisplayValue('Hi {{name}}') as HTMLInputElement;
+      expect(subject).toHaveFocus();
+      expect([subject.selectionStart, subject.selectionEnd]).toEqual([3, 11]);
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+      expect(subject).toHaveFocus();
+      expect([subject.selectionStart, subject.selectionEnd]).toEqual([3, 11]);
+      expect(onSend).not.toHaveBeenCalled();
+    } finally {
+      unmount();
+      vi.useRealTimers();
+    }
   });
 
   it('does not ask again after Send anyway and a trip back to add an attachment', async () => {

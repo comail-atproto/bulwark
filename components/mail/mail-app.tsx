@@ -343,7 +343,7 @@ export function MailApp({ linkSegments: routeSegments }: MailAppProps = {}) {
   const { identities } = useIdentityStore(useShallow((state) => ({ identities: state.identities })));
   const multiAccountIdentities = useProMultiAccountIdentities();
   useIdentitySync();
-  const { contactsEnabled, calendarEnabled } = useConfig();
+  const { contactsEnabled, calendarEnabled, atprotoLoginUrl } = useConfig();
   const trustedSendersAddressBook = useSettingsStore((state) => state.trustedSendersAddressBook);
   const sendDelaySeconds = useSettingsStore((state) => state.sendDelaySeconds);
   const { loadTrustedSendersBook, trustedSendersLoaded, loadRecentRecipients } = useContactStore(useShallow((state) => ({ loadTrustedSendersBook: state.loadTrustedSendersBook, trustedSendersLoaded: state.trustedSendersLoaded, loadRecentRecipients: state.loadRecentRecipients })));
@@ -647,6 +647,20 @@ export function MailApp({ linkSegments: routeSegments }: MailAppProps = {}) {
     return sent ? sent.originalId || sent.id : null;
   }, [mailboxes]);
   useEffect(() => {
+    if (!client?.isPDSMail?.() || !client.getUnsubmittedPrivateMail) return;
+    let active = true;
+    void client.getUnsubmittedPrivateMail().then((emails) => {
+      if (active && emails.length) toast.warning('Some Sent copies were not submitted', {
+        message: `${emails.length} message${emails.length === 1 ? '' : 's'} has no delivery record. Check Sent before sending again.`,
+      });
+    }).catch(() => {
+      if (active) toast.warning('Delivery status could not be checked', {
+        message: 'Check Sent before trying an earlier message again.',
+      });
+    });
+    return () => { active = false; };
+  }, [client]);
+  useEffect(() => {
     if (!client || !sentMailboxId) return;
     const run = () => { void loadRecentRecipients(client, sentMailboxId); };
     if (typeof window.requestIdleCallback === 'function') {
@@ -663,6 +677,7 @@ export function MailApp({ linkSegments: routeSegments }: MailAppProps = {}) {
 
   const enableUnifiedMailbox = useSettingsStore((s) => s.enableUnifiedMailbox);
   const delayedSendSupported = client?.hasDelayedSend() ?? true;
+  const scheduledMailboxVisible = client?.isPDSMail?.() || delayedSendSupported;
 
   // Cross-account "All accounts" views: a sub-feature of the unified mailbox, so
   // they require Unified Mailbox to be enabled, plus the admin gate and the
@@ -787,7 +802,7 @@ export function MailApp({ linkSegments: routeSegments }: MailAppProps = {}) {
     // Restore mailbox selection. selectMailbox clears the current email,
     // which is fine because we re-apply the saved email below.
     if (state.mailboxId === SCHEDULED_MAILBOX_ID) {
-      if (!ctx.client?.hasDelayedSend()) {
+      if (!ctx.client?.isPDSMail?.() && !ctx.client?.hasDelayedSend()) {
         setScheduledView(false);
         selectEmail(null);
         return;
@@ -1279,10 +1294,10 @@ export function MailApp({ linkSegments: routeSegments }: MailAppProps = {}) {
   });
 
   useEffect(() => {
-    if (!delayedSendSupported && isScheduledView) {
+    if (!scheduledMailboxVisible && isScheduledView) {
       setScheduledView(false);
     }
-  }, [delayedSendSupported, isScheduledView, setScheduledView]);
+  }, [scheduledMailboxVisible, isScheduledView, setScheduledView]);
 
   useEffect(() => {
     if (!pendingUndoSend) return;
@@ -2248,6 +2263,12 @@ export function MailApp({ linkSegments: routeSegments }: MailAppProps = {}) {
           duration: 15000,
         });
       }
+      if (result.privateSubmissionStatus && !result.scheduled) {
+        const uncertain = ['ambiguous', 'partial', 'failed'].includes(result.privateSubmissionStatus)
+          || result.privateRecipientOutcomes?.some(recipient => ['ambiguous', 'failed'].includes(recipient.status));
+        if (uncertain) toast.warning('Delivery is uncertain or failed. Check Scheduled and each recipient before sending again.');
+        else if (['queued', 'retry'].includes(result.privateSubmissionStatus)) toast.info('Delivery is pending. Check Scheduled for status.');
+      }
       // Mark the original email with $answered or $forwarded keyword. Route the
       // write to the email's own account so the flag lands on shared/group-mailbox
       // messages instead of being dropped against the reaching account. (#281)
@@ -2309,7 +2330,8 @@ export function MailApp({ linkSegments: routeSegments }: MailAppProps = {}) {
       // Delayed sends get the undo toast instead; a filing error or a refused
       // recipient already warned.
       // A message kept in the offline outbox said so itself (#523).
-      if (!result.filingError && !result.rejectedRecipients?.length && !result.queued) toast.success(t('notifications.email_sent'));
+      if (!result.filingError && !result.rejectedRecipients?.length && !result.queued
+        && (!result.privateSubmissionStatus || ['accepted', 'complete'].includes(result.privateSubmissionStatus))) toast.success(t('notifications.email_sent'));
 
       // Refresh the current mailbox to update the UI
       if (!isScheduledView) {
@@ -2581,6 +2603,11 @@ export function MailApp({ linkSegments: routeSegments }: MailAppProps = {}) {
    */
   const cancelScheduledForEdit = async (email: Email): Promise<Email | null | undefined> => {
     if (!client) return undefined;
+    if (client.isPDSMail?.() && email.scheduledDeliveryStatus && Object.values(email.scheduledDeliveryStatus)
+      .some(value => value.delivered === 'yes' || value.delivered === 'unknown')) {
+      toast.warning('This message may already have reached some recipients', 'Cancel the remaining delivery in Scheduled. Keep the Sent copy for your records.');
+      return undefined;
+    }
     try {
       return await cancelScheduledEmailForEdit(client, email);
     } catch (error) {
@@ -2595,6 +2622,15 @@ export function MailApp({ linkSegments: routeSegments }: MailAppProps = {}) {
   // and compose again".
   const handleCancelScheduledSend = async (email: Email) => {
     if (email.isSmimeScheduled || email.scheduledUndoStatus !== 'pending') return;
+    if (client?.isPDSMail?.() && email.scheduledDeliveryStatus && Object.values(email.scheduledDeliveryStatus)
+      .some(value => value.delivered === 'yes' || value.delivered === 'unknown')) {
+      try {
+        await client.cancelEmailSubmission(email.emailSubmissionId!, email.scheduledAccountId);
+        toast.warning('Remaining delivery cancelled', 'Some recipients may have received this message. Its copy stays in Sent.');
+        await fetchScheduledEmails(client);
+      } catch (error) { toastCancelFailure(error, tViewer('cancel_scheduled_failed')); }
+      return;
+    }
     const wasOpen = useEmailStore.getState().selectedEmail?.id === email.id;
     const restored = await cancelScheduledForEdit(email);
     if (restored === undefined) return;
@@ -3094,11 +3130,12 @@ export function MailApp({ linkSegments: routeSegments }: MailAppProps = {}) {
       });
       if (!archiveMailbox) return; // a plugin refused the Archive folder
 
+      const archiveDate = emailToArchive.receivedAt || emailToArchive.sentAt || '';
       let destination: Mailbox;
-      if (archiveMode === 'single') {
+      if (archiveMode === 'single' || !Number.isFinite(Date.parse(archiveDate))) {
         destination = archiveMailbox;
       } else {
-        const emailDate = new Date(emailToArchive.receivedAt);
+        const emailDate = new Date(archiveDate);
         const year = emailDate.getFullYear().toString();
         const month = (emailDate.getMonth() + 1).toString().padStart(2, '0');
         const archiveId = archiveMailbox.originalId || archiveMailbox.id;
@@ -3393,7 +3430,7 @@ export function MailApp({ linkSegments: routeSegments }: MailAppProps = {}) {
     // the store only ever sees the plain virtual id plus the account scope.
     const scheduledSelection = parseScheduledMailboxId(mailboxId);
     if (scheduledSelection.isScheduled) {
-      if (!delayedSendSupported) {
+      if (!scheduledMailboxVisible) {
         setScheduledView(false);
         return;
       }
@@ -4621,16 +4658,22 @@ export function MailApp({ linkSegments: routeSegments }: MailAppProps = {}) {
         const annotated = annotateScheduledEmail(fullEmail, scheduledSubmissionByEmailId);
         if (annotated.isScheduled) {
           fullEmail.scheduledSendAt = annotated.scheduledSendAt;
+          fullEmail.privateSendPending = annotated.privateSendPending;
+          fullEmail.privateSendUncertain = annotated.privateSendUncertain;
           fullEmail.emailSubmissionId = annotated.emailSubmissionId;
           fullEmail.scheduledIdentityId = annotated.scheduledIdentityId;
           fullEmail.scheduledUndoStatus = annotated.scheduledUndoStatus;
+          fullEmail.scheduledDeliveryStatus = annotated.scheduledDeliveryStatus;
           fullEmail.scheduledAccountId = annotated.scheduledAccountId;
           fullEmail.isScheduled = true;
         } else if (listEmail?.isScheduled) {
           fullEmail.scheduledSendAt = listEmail.scheduledSendAt;
+          fullEmail.privateSendPending = listEmail.privateSendPending;
+          fullEmail.privateSendUncertain = listEmail.privateSendUncertain;
           fullEmail.emailSubmissionId = listEmail.emailSubmissionId;
           fullEmail.scheduledIdentityId = listEmail.scheduledIdentityId;
           fullEmail.scheduledUndoStatus = listEmail.scheduledUndoStatus;
+          fullEmail.scheduledDeliveryStatus = listEmail.scheduledDeliveryStatus;
           fullEmail.scheduledAccountId = listEmail.scheduledAccountId;
           fullEmail.isScheduled = true;
           fullEmail.isSmimeScheduled = listEmail.isSmimeScheduled;
@@ -4923,6 +4966,16 @@ export function MailApp({ linkSegments: routeSegments }: MailAppProps = {}) {
         </a>
         <AppTopBannerSlot />
         {refreshIndicator}
+        {client.needsPrivateMailReauthorization?.() && (
+          <div role="status" className="flex items-center justify-center gap-3 border-b border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm">
+            <span>Reconnect this mailbox to enable sending. Your saved mail is still available.</span>
+            <Button type="button" variant="outline" size="sm" disabled={!atprotoLoginUrl} onClick={() => {
+              const url = new URL(atprotoLoginUrl);
+              url.searchParams.set('handle', client.getAccountId());
+              window.location.assign(url.href);
+            }}>Reconnect mailbox</Button>
+          </div>
+        )}
         {isRateLimited && rateLimitSecondsLeft !== null && (
           <div className="flex items-center justify-center gap-2 bg-amber-500/10 border-b border-amber-500/30 text-amber-700 dark:text-amber-300 text-sm py-1.5 px-4 flex-shrink-0">
             <AlertTriangle className="h-3.5 w-3.5" />
@@ -5052,7 +5105,7 @@ export function MailApp({ linkSegments: routeSegments }: MailAppProps = {}) {
               scheduledTotal={scheduledTotal}
               scheduledTotalByAccount={scheduledTotalByAccount}
               scheduledAccountScope={scheduledAccountScope}
-              showScheduledMailbox={delayedSendSupported}
+              showScheduledMailbox={scheduledMailboxVisible}
               crossAccountActive={crossAccountActive}
               showCrossUnread={showCrossUnread}
               showCrossStarred={showCrossStarred}

@@ -8,6 +8,7 @@ vi.mock('@/lib/jmap/client', () => {
   class JMAPClient {
     constructor(public serverUrl: string, public username: string, public password: string) {}
     static withBearer(serverUrl: string, _token: string, username: string) { return new JMAPClient(serverUrl, username, ''); }
+    upgradeToBearer() {}
     async connect() { throw new Error('Authentication failed'); }
     getAuthHeader() { return 'Bearer at'; }
     onConnectionChange() {}

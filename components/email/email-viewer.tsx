@@ -744,7 +744,7 @@ function MvConversationCard({ email, onOpen, timeFormat, compact }: { email: Ema
           {email.isScheduled && (
             <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[0.6875rem] font-medium bg-primary/10 text-primary shrink-0">
               <CalendarClock className="w-3 h-3" />
-              {email.scheduledSendAt ? formatScheduledSendAt(email.scheduledSendAt, timeFormat) : tSidebar('scheduled')}
+              {email.privateSendUncertain ? 'Delivery outcome uncertain' : email.privateSendPending ? 'Waiting for delivery' : email.scheduledSendAt ? formatScheduledSendAt(email.scheduledSendAt, timeFormat) : tSidebar('scheduled')}
             </span>
           )}
           <span className="ms-auto ps-2 text-xs text-muted-foreground whitespace-nowrap">
@@ -868,7 +868,7 @@ export function MvExpandedConversationCard({
             {email.isScheduled && (
               <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[0.6875rem] font-medium bg-primary/10 text-primary shrink-0">
                 <CalendarClock className="w-3 h-3" />
-                {email.scheduledSendAt ? formatScheduledSendAt(email.scheduledSendAt, timeFormat) : tSidebar('scheduled')}
+                {email.privateSendUncertain ? 'Delivery outcome uncertain' : email.privateSendPending ? 'Waiting for delivery' : email.scheduledSendAt ? formatScheduledSendAt(email.scheduledSendAt, timeFormat) : tSidebar('scheduled')}
               </span>
             )}
             {!compact && sender?.name && sender.email && (
@@ -927,8 +927,11 @@ export function MvExpandedConversationCard({
         <div className={cn("border-b border-border bg-primary/10 py-2 flex items-center gap-2 text-primary text-xs font-medium", compact ? "px-4" : "ps-[80px] pe-6")}>
           <CalendarClock className="w-3.5 h-3.5 shrink-0" />
           <span>
-            {t('scheduled_banner', { date: email.scheduledSendAt ? formatScheduledSendAt(email.scheduledSendAt, timeFormat) : '' })}
+            {email.privateSendUncertain ? 'Delivery outcome uncertain. Check recipient results before sending again.' : email.privateSendPending ? 'Waiting for delivery. The delivery result is not final.' : t('scheduled_banner', { date: email.scheduledSendAt ? formatScheduledSendAt(email.scheduledSendAt, timeFormat) : '' })}
           </span>
+          {email.scheduledDeliveryStatus && Object.values(email.scheduledDeliveryStatus).some(value => value.delivered !== 'queued') && (
+            <span>{Object.entries(email.scheduledDeliveryStatus).map(([address, value]) => `${address}: ${value.smtpReply}`).join(', ')}</span>
+          )}
         </div>
       )}
       {showDetails && <MvConversationDetails email={email} timeFormat={timeFormat} className={compact ? "px-4" : "ps-[80px] pe-6"} />}
@@ -5533,8 +5536,11 @@ ${printWatermark ? printWatermark.html : ''}
               <div className="flex items-center gap-2 text-primary">
                 <CalendarClock className="w-4 h-4" />
                 <span className="text-sm font-medium">
-                  {t('scheduled_banner', { date: email.scheduledSendAt ? formatScheduledSendAt(email.scheduledSendAt, timeFormat) : '' })}
+                  {email.privateSendUncertain ? 'Delivery outcome uncertain. Check recipient results before sending again.' : email.privateSendPending ? 'Waiting for delivery. The delivery result is not final.' : t('scheduled_banner', { date: email.scheduledSendAt ? formatScheduledSendAt(email.scheduledSendAt, timeFormat) : '' })}
                 </span>
+                {email.scheduledDeliveryStatus && Object.values(email.scheduledDeliveryStatus).some(value => value.delivered !== 'queued') && (
+                  <span className="text-xs">{Object.entries(email.scheduledDeliveryStatus).map(([address, value]) => `${address}: ${value.smtpReply}`).join(', ')}</span>
+                )}
               </div>
               {/* The toolbar has these from sm up; on the phone it has no room. */}
               <div className="flex flex-wrap items-center gap-2 sm:hidden">

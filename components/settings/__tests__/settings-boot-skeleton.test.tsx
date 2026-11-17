@@ -19,7 +19,8 @@ vi.mock('@/hooks/use-media-query', async (importOriginal) => ({
   useMediaQuery: () => false,
   useDeviceDetection: () => ({ isMobile: false, isTablet: false, isDesktop: true }),
 }));
-vi.mock('@/hooks/use-config', () => ({ useConfig: () => ({ appName: 'Mail', stalwartFeaturesEnabled: true }) }));
+const config = vi.hoisted(() => ({ appName: 'Mail', stalwartFeaturesEnabled: true, passwordSecurityEnabled: true }));
+vi.mock('@/hooks/use-config', () => ({ useConfig: () => config }));
 vi.mock('@/components/layout/navigation-rail', () => ({ NavigationRail: () => null }));
 vi.mock('@/components/layout/sidebar-apps-modal', () => ({ SidebarAppsModal: () => null }));
 vi.mock('@/components/plugins/app-top-banner-slot', () => ({ AppTopBannerSlot: () => null }));
@@ -54,6 +55,7 @@ const bareClient = new Proxy({}, {
 const skeleton = () => document.querySelector('[data-boot-skeleton="settings"]');
 
 beforeEach(() => {
+  config.passwordSecurityEnabled = true;
   vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('Unexpected network request')));
   localStorage.clear();
   resetRailHintsMemo();
@@ -94,6 +96,14 @@ describe('Settings while the session restores', () => {
     // Recovery waits for a server probe this test doesn't answer.
     const drawn = SETTINGS_NAV_GROUPS.flatMap((g) => g.tabs).filter((tab) => tab !== 'recovery');
     expect(shown).toEqual(drawn);
+  });
+
+  it('omits password security from the nav when it is disabled', () => {
+    config.passwordSecurityEnabled = false;
+    useAuthStore.setState({ isAuthenticated: true, isLoading: false, client: fullClient as never });
+    render(<SettingsApp linkSegments={[]} />);
+    expect(screen.queryByTestId('settings-tab-security')).toBeNull();
+    expect(screen.getByTestId('settings-tab-account')).toBeInTheDocument();
   });
 
   it('leaves the next load the pages this account has', () => {

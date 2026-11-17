@@ -52,6 +52,7 @@ export interface ConfigData {
   privateCalendarEnabled?: boolean;
   privateContactsEnabled?: boolean;
   privateFilesEnabled?: boolean;
+  privateMailEnabled?: boolean;
   contactsEnabled: boolean;
   filesEnabled: boolean;
   appsEnabled: boolean;

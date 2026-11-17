@@ -105,6 +105,10 @@ export interface SearchEmailsResult {
 }
 
 export interface IJMAPClient {
+  /** PDS mailbox operations use Inbox's private Mail API. */
+  isPDSMail?(): boolean;
+  needsPrivateMailReauthorization?(): boolean;
+  getUnsubmittedPrivateMail?(): Promise<Email[]>;
   // ── Connection lifecycle ──────────────────────────────────────
   connect(): Promise<void>;
   disconnect(): void;

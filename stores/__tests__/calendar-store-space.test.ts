@@ -406,6 +406,47 @@ describe('Space actor-private event saves', () => {
 
   beforeEach(() => useCalendarStore.setState({ calendars: [privateCalendar], events: [privateEvent] }));
 
+  it('saves actor-private settings for a nonrecurring linked public Space copy', async () => {
+    const uri = 'at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/community.lexicon.calendar.event/3m3z2a2b3c4d5';
+    const linked = { ...privateEvent, uid: uri, atprotoUri: uri,
+      atprotoCid: `bafyreia${'a'.repeat(50)}a`, participants: null, recurrenceRules: null, recurrenceOverrides: null };
+    useCalendarStore.setState({ events: [linked] });
+    const api = client({ updateAtprotoSpaceCalendarPrivateEvent: vi.fn().mockResolvedValue({
+      ...linked, color: '#123456', spacePersonalRevisionId: nextPrivateRevision,
+    }) });
+
+    expect(await useCalendarStore.getState().updateEvent(api, linked.id, { title: linked.title, color: '#123456' })).toBe(true);
+    expect(api.updateAtprotoSpaceCalendarPrivateEvent).toHaveBeenCalledWith('event1', privateRevision, { color: '#123456' }, undefined);
+    expect(api.updateAtprotoSpaceCalendarEvent).not.toHaveBeenCalled();
+    expect(api.updateCalendarEvent).not.toHaveBeenCalled();
+    expect(useCalendarStore.getState().events[0]).toMatchObject({ atprotoUri: uri, title: linked.title, color: '#123456', spacePersonalRevisionId: nextPrivateRevision });
+  });
+
+  it('rejects private edits to an invalid recurring linked public snapshot', async () => {
+    const uri = 'at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/community.lexicon.calendar.event/3m3z2a2b3c4d5';
+    const invalid = { ...privateEvent, uid: uri, atprotoUri: uri, atprotoCid: `bafyreia${'a'.repeat(50)}a`,
+      participants: null, recurrenceRules: [createRecurrenceRule('weekly', { count: 2 })] };
+    useCalendarStore.setState({ events: [invalid] });
+    const api = client({ updateAtprotoSpaceCalendarPrivateEvent: vi.fn().mockResolvedValue({ ...invalid, color: '#123456', spacePersonalRevisionId: nextPrivateRevision }) });
+    await expect(useCalendarStore.getState().updateEvent(api, invalid.id, { color: '#123456' }))
+      .rejects.toMatchObject({ code: 'unsupported_operation' });
+    expect(api.updateAtprotoSpaceCalendarPrivateEvent).not.toHaveBeenCalled();
+  });
+
+  it.each(['shared', 'mixed', 'no private right'] as const)('refuses %s changes to a linked public Space copy', async (kind) => {
+    const uri = 'at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/community.lexicon.calendar.event/3m3z2a2b3c4d5';
+    const linked = { ...privateEvent, uid: uri, atprotoUri: uri,
+      atprotoCid: `bafyreia${'a'.repeat(50)}a`, participants: null, recurrenceRules: null, recurrenceOverrides: null };
+    useCalendarStore.setState({ events: [linked], calendars: [kind === 'no private right' ? calendar : privateCalendar] });
+    const api = client();
+    const patch = kind === 'shared' ? { title: 'Changed' }
+      : kind === 'mixed' ? { title: 'Changed', color: '#123456' } : { color: '#123456' };
+    await expect(useCalendarStore.getState().updateEvent(api, linked.id, patch)).rejects.toBeInstanceOf(SpaceCalendarError);
+    expect(api.updateAtprotoSpaceCalendarPrivateEvent).not.toHaveBeenCalled();
+    expect(api.updateAtprotoSpaceCalendarEvent).not.toHaveBeenCalled();
+    expect(api.updateCalendarEvent).not.toHaveBeenCalled();
+  });
+
   it('saves a viewer’s own private values from the unchanged shared form without shared writes', async () => {
     const api = client({ updateAtprotoSpaceCalendarPrivateEvent: vi.fn().mockResolvedValue({
       ...privateEvent, color: '#123456', freeBusyStatus: 'free', spacePersonalRevisionId: nextPrivateRevision,

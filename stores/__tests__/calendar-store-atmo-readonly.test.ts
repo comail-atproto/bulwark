@@ -49,6 +49,37 @@ describe('public Atmosphere sources have no calendar write path', () => {
     for (const spy of Object.values(spies)) expect(spy).not.toHaveBeenCalled();
   });
 
+  it('does not send actor-private settings for a plain public overlay', async () => {
+    const { api } = client();
+    const privateWrite = vi.fn();
+    Object.assign(api, { updateAtprotoSpaceCalendarPrivateEvent: privateWrite });
+    await expect(useCalendarStore.getState().updateEvent(api, event.id, { color: '#123456' }))
+      .rejects.toMatchObject({ code: 'unsupported_operation' });
+    expect(privateWrite).not.toHaveBeenCalled();
+  });
+
+  it.each(['public ID', 'missing CID'] as const)('does not treat a forged %s as a linked Space copy', async (kind) => {
+    const forged: CalendarEvent = { ...event, source: 'atproto-space', calendarIds: { space: true },
+      ...(kind === 'missing CID' ? { id: 'space-event:forged', atprotoUri: 'at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/community.lexicon.calendar.event/3m3z2a2b3c4d5' } : {}),
+      spacePersonalRevisionId: `personal-state-${'a'.repeat(64)}` };
+    useCalendarStore.setState({ events: [forged], calendars: [{ id: 'space', source: 'atproto-space', myRights: writable } as unknown as Calendar] });
+    const { api } = client();
+    const privateWrite = vi.fn().mockResolvedValue({ ...forged, spacePersonalRevisionId: `personal-state-${'b'.repeat(64)}` });
+    Object.assign(api, { updateAtprotoSpaceCalendarPrivateEvent: privateWrite });
+    await expect(useCalendarStore.getState().updateEvent(api, forged.id, { color: '#123456' }))
+      .rejects.toMatchObject({ code: 'unsupported_operation' });
+    expect(privateWrite).not.toHaveBeenCalled();
+  });
+
+  it('does not fetch a public event through JMAP when an update requests current data', async () => {
+    const { api } = client();
+    const fetchEvent = vi.fn();
+    Object.assign(api, { getCalendarEvent: fetchEvent });
+    await expect(useCalendarStore.getState().updateEvent(api, event.id, { title: 'Changed' }, false,
+      { fromCurrent: () => ({ title: 'Changed' }) })).rejects.toMatchObject({ code: 'unsupported_operation' });
+    expect(fetchEvent).not.toHaveBeenCalled();
+  });
+
   it('rejects moving a writable event into a public source', async () => {
     const local = { ...event, id: 'local', source: 'jmap', calendarIds: { local: true } } as CalendarEvent;
     useCalendarStore.setState({ events: [local] });

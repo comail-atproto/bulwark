@@ -218,6 +218,26 @@ describe('archiving a group message by month', () => {
     expect(moveThreadToMailbox).toHaveBeenCalledWith(client, 'eaaaaab', 'ce:m1', 'login-a/ce:eaaaaab', expect.any(Function));
   });
 
+  it('uses the Archive root when a message has no known date', async () => {
+    const undated = { ...groupMessage, receivedAt: '', sentAt: undefined } as Email;
+    useEmailStore.setState({ selectedEmail: undated, emails: [undated], mailboxes: withMonth } as never);
+    render(<MailApp />);
+    fireEvent.click(await screen.findByText('stub archive', {}, { timeout: 5000 }));
+    await waitFor(() => expect(moveThreadToMailbox).toHaveBeenCalled());
+    expect(client.createMailbox).not.toHaveBeenCalled();
+    expect(moveThreadToMailbox).toHaveBeenCalledWith(client, 'eaaaaab', 'ce:k', 'login-a/ce:eaaaaab', expect.any(Function));
+  });
+
+  it('uses the sender Date for dated archives when receipt time is unknown', async () => {
+    const undelivered = { ...groupMessage, receivedAt: '', sentAt: '2026-10-26T10:00:00Z' } as Email;
+    useEmailStore.setState({ selectedEmail: undelivered, emails: [undelivered], mailboxes: withMonth } as never);
+    render(<MailApp />);
+    fireEvent.click(await screen.findByText('stub archive', {}, { timeout: 5000 }));
+    await waitFor(() => expect(moveThreadToMailbox).toHaveBeenCalled());
+    expect(client.createMailbox).not.toHaveBeenCalled();
+    expect(moveThreadToMailbox).toHaveBeenCalledWith(client, 'eaaaaab', 'ce:m1', 'login-a/ce:eaaaaab', expect.any(Function));
+  });
+
   it('reuses them with the group\'s Inbox open', async () => {
     const unstamped = { ...groupMessage, sourceClientAccountId: undefined, sourceAccountId: undefined } as Email;
     useEmailStore.setState({ mailboxes: withMonth, selectedMailbox: 'ce:a', selectedKeyword: null, emails: [unstamped], selectedEmail: unstamped } as never);

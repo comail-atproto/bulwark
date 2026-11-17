@@ -97,6 +97,8 @@ export interface Email {
   sourceFolder?: string;
   // Client-only scheduled-send metadata, populated from EmailSubmission/query.
   scheduledSendAt?: string;
+  privateSendPending?: boolean;
+  privateSendUncertain?: boolean;
   emailSubmissionId?: string;
   scheduledIdentityId?: string;
   scheduledUndoStatus?: 'pending' | 'final' | 'canceled';
@@ -151,6 +153,9 @@ export interface SendEmailResult {
    * instead.
    */
   rejectedRecipients?: RejectedRecipient[];
+  /** PDS delivery may still be queued or uncertain after the send request returns. */
+  privateSubmissionStatus?: string;
+  privateRecipientOutcomes?: { address: string; status: string }[];
 }
 
 /** A recipient refused at submission, with the SMTP reply the server gave. */

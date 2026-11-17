@@ -1,11 +1,12 @@
+import { jmapGroupwareFeatures } from '@/lib/groupware/jmap';
+import { apiFetch, getPathPrefix } from '@/lib/browser-navigation';
+import { useAccountStore } from '@/stores/account-store';
+import { generateAccountId } from '@/lib/account-utils';
 import { recordJmapCall, reportJmapFailure } from "@/lib/error-reporting/client";
 import { advertisesMailboxMetadata, bulwarkEntries, escapeMetadataPathSegment, MAX_METADATA_ENTRY_BYTES, METADATA_CAPABILITY, MetadataPatchError, MetadataRefusedError, MetadataTooLargeError, MetadataUnsupportedError, metadataValueBytes, namespaceFor } from "./bulwark-metadata";
 import { IncompleteDeleteError } from "./delete-error";
 import { downloadAllowed, saveBlobAs, type DownloadKind } from "@/lib/download-guard";
 import { ArchiveEmailsError } from "./archive-error";
-import { jmapGroupwareFeatures } from '@/lib/groupware/jmap';
-import { getPathPrefix } from '@/lib/browser-navigation';
-import { IS_LITE } from '@/lib/lite';
 import { generateUUID } from '@/lib/utils';
 import type { Attachment, Email, Mailbox, MailboxRights, StateChange, AccountStates, CollectionChanges, ShareNotification, BusyPeriod, CalendarParticipantIdentity, CalendarEventNotification, Thread, Identity, EmailAddress, ContactCard, AddressBook, AddressBookRights, VacationResponse, Calendar, CalendarComponentType, CalendarRights, CalendarEvent, CalendarEventFilter, CalendarTask, CreateCalendarOptions, FileNode, FileNodeFilter, FileNodeRights, Principal, PrincipalAvailability, PrincipalListing, PushSubscription, EmailPushConfig, DeliveryStatus, EmailSubmission, RejectedRecipient, ScheduledEmail, SendEmailResult, SharedAccount } from "./types";
 import type { SieveScript, SieveCapabilities } from "./sieve-types";
@@ -34,13 +35,7 @@ import type { ShareKind } from "./share-rights";
 import { ARCHIVED_ITEM_USING, STALWART_CAPABILITY, buildRestoreCalls, hasArchivedEmail, listArchivedEmailsPaged, readRestoreResults, type ArchiveIo, type ArchiveListResult, type ArchiveQueryPage, type RestoreResult } from "@/lib/recovery/archived-items";
 import { RescheduleRestoredError } from "./reschedule-error";
 import { applyPatchObject } from "./patch-object";
-import { AtmoCalendarAdapter } from "./atmo-calendar-adapter";
-import { isPublicAtprotoCalendar, isPublicAtprotoEvent } from "@/lib/calendar-editability";
-import { SpaceCalendarAdapter, SpaceCalendarError, type SpaceCalendarPersonalProperties } from "./space-calendar-adapter";
-import { SpaceContactAdapter, SpaceContactError } from "./space-contact-adapter";
-import { SpaceFileAdapter, SpaceFileError } from "./space-file-adapter";
-import { useAccountStore } from '@/stores/account-store';
-import { generateAccountId } from '@/lib/account-utils';
+import { SpaceMailAdapter, type PrivateMailAccount } from "@/lib/space-mail/adapter";
 
 export { SchedulingDeniedError, RescheduleRestoredError };
 import { acceptedFileName, fileNameRulesFrom, type FileNameRules } from "@/lib/file-name-rules";
@@ -55,7 +50,7 @@ import { downloadNameSegment } from "./download-name";
 import { getOfflineHooks, isNetworkFailure, OfflineUnavailableError, SendNotStartedError } from "./offline-hooks";
 import { toInertBlob } from "@/lib/file-preview";
 import { parseAuthenticationResults } from "@/lib/email-headers";
-import { IS_LITE_STALWART } from "@/lib/lite";
+import { IS_LITE, IS_LITE_STALWART } from "@/lib/lite";
 import { toStorageQuota, type JMAPQuota, type StorageQuota } from "@/lib/quota";
 import { messagePriorityHeaders, type MessagePriority } from "@/lib/message-priority";
 import { customHeaderProperties, withLabelHeaders } from "@/lib/outgoing/custom-headers";
@@ -83,9 +78,8 @@ function withDecodedName<T extends Pick<FileNode, 'name'>>(node: T): T {
 }
 
 function fromJmapCalendarEvent<T extends Partial<CalendarEvent>>(event: T): T & { source: 'jmap' } {
-  const normalized = normalizeCalendarEventLike(event);
   return {
-    ...normalized,
+    ...normalizeCalendarEventLike(event),
     source: 'jmap',
     spaceRevisionId: undefined,
     spacePersonalRevisionId: undefined,
@@ -1653,40 +1647,25 @@ export class JMAPClient implements IJMAPClient {
   // Serialises the first calendar/contacts request per account so Stalwart's
   // lazy default-calendar/address-book creation can't run twice (#907).
   private firstTouchGate = new FirstTouchGate();
-  private spaceCalendars: Calendar[] | null = null;
-  private atmoCalendarStale = false;
-  private atmoEventsCache: { range: string; events: CalendarEvent[] } | null = null;
-  private readonly spaceCalendarAdapter = new SpaceCalendarAdapter(() => {
-    const accountId = generateAccountId(this.username, this.serverUrl);
-    return useAccountStore.getState().getAccountById(accountId)?.cookieSlot;
-  });
+  private spaceMailAdapter?: SpaceMailAdapter;
+  private privateMailNeedsReauthorization = false;
 
-  private readonly atmoCalendarAdapter = new AtmoCalendarAdapter(() => {
-    const accountId = generateAccountId(this.username, this.serverUrl);
-    return useAccountStore.getState().getAccountById(accountId)?.cookieSlot;
-  });
-
-  private readonly spaceFileAdapter = new SpaceFileAdapter(() => {
-    const accountId = generateAccountId(this.username, this.serverUrl);
-    return useAccountStore.getState().getAccountById(accountId)?.cookieSlot;
-  });
-  private privateFiles = false;
-  private privateGroupware: { slot: number; calendar: boolean; contacts: boolean; files?: boolean } | null = null;
-
-  configurePrivateGroupware(slot: number, support: { calendar: boolean; contacts: boolean; files?: boolean }): void {
-    this.privateGroupware = { slot, ...support };
+  configurePrivateMail(slot: number, account: PrivateMailAccount, fetcher: (url: string, init?: RequestInit) => Promise<Response> = apiFetch): void {
+    if (account.username !== this.username || !account.did || account.accountId !== account.did) throw new Error('unauthorized');
+    this.privateMailNeedsReauthorization = false;
+    this.spaceMailAdapter = new SpaceMailAdapter(() => {
+      const selected = useAccountStore.getState().accounts.find(item => item.cookieSlot === slot);
+      return selected?.username === this.username && selected.did === account.did ? slot : undefined;
+    }, account, fetcher);
+    this.accountId = account.accountId;
   }
 
-  private supportsPrivateGroupware(resource: 'calendar' | 'contacts' | 'files'): boolean {
-    if (IS_LITE || !this.privateGroupware?.[resource]) return false;
-    const id = generateAccountId(this.username, this.serverUrl);
-    return useAccountStore.getState().getAccountById(id)?.cookieSlot === this.privateGroupware.slot;
+  isPDSMail(): boolean { return this.spaceMailAdapter !== undefined; }
+  needsPrivateMailReauthorization(): boolean { return this.privateMailNeedsReauthorization; }
+  async getUnsubmittedPrivateMail(): Promise<Email[]> {
+    return this.spaceMailAdapter ? this.spaceMailAdapter.unsubmittedSentCopies() : [];
   }
 
-  private readonly spaceContactAdapter = new SpaceContactAdapter(() => {
-    const accountId = generateAccountId(this.username, this.serverUrl);
-    return useAccountStore.getState().getAccountById(accountId)?.cookieSlot;
-  });
 
   /**
    * Started without the server (#523): the session comes from the copy kept
@@ -2037,6 +2016,25 @@ export class JMAPClient implements IJMAPClient {
   async connect(): Promise<void> {
     if (this.offlineOnly) throw new OfflineUnavailableError();
     this.intentionallyDisconnected = false;
+    if (this.spaceMailAdapter) {
+      const bootstrap = await this.spaceMailAdapter.bootstrap();
+      this.privateMailNeedsReauthorization = bootstrap.capabilities.submissionReauthorizationRequired === true;
+      const account = this.spaceMailAdapter.account;
+      this.accountId = account.accountId;
+      this.apiUrl = '/api/mail';
+      const core = { maxSizeUpload: 10 * 1024 * 1024, maxCallsInRequest: 16, maxObjectsInGet: 100, maxObjectsInSet: 100, maxConcurrentRequests: 4 };
+      const mail = { emailQuerySortOptions: ['receivedAt', 'sentAt', 'subject', 'from', 'to', 'size', 'hasKeyword'] };
+      const submission = this.spaceMailAdapter.canSubmit ? { submissionExtensions: bootstrap.capabilities.maxDelayedSendSeconds
+        ? ['DSN', 'FUTURERELEASE'] : ['DSN'], maxDelayedSend: bootstrap.capabilities.maxDelayedSendSeconds ?? 0 } : undefined;
+      this.capabilities = { 'urn:ietf:params:jmap:core': core, 'urn:ietf:params:jmap:mail': mail,
+        ...(submission ? { 'urn:ietf:params:jmap:submission': submission } : {}) };
+      this.accounts = { [account.accountId]: { name: account.username, isPersonal: true, isReadOnly: false, accountCapabilities: {
+        'urn:ietf:params:jmap:mail': mail, ...(submission ? { 'urn:ietf:params:jmap:submission': submission } : {}),
+      } } };
+      this.session = { username: account.username, apiUrl: this.apiUrl, downloadUrl: '', capabilities: this.capabilities, accounts: this.accounts, primaryAccounts: { 'urn:ietf:params:jmap:mail': account.accountId } };
+      await this.ping();
+      return;
+    }
     const sessionUrl = `${this.serverUrl}/.well-known/jmap`;
 
     try {
@@ -2182,6 +2180,8 @@ export class JMAPClient implements IJMAPClient {
 
   disconnect(): void {
     this.intentionallyDisconnected = true;
+    this.spaceMailAdapter?.clear();
+    this.privateMailNeedsReauthorization = false;
     this.stopKeepAlive();
     this.closePushNotifications();
     if (this.rateLimitTimeout) {
@@ -2192,8 +2192,6 @@ export class JMAPClient implements IJMAPClient {
     this.accountId = "";
     this.session = null;
     this.capabilities = {};
-    this.atmoCalendarStale = false;
-    this.atmoEventsCache = null;
   }
 
   private rewriteSessionUrl(url: string): string {
@@ -2245,6 +2243,7 @@ export class JMAPClient implements IJMAPClient {
     if (!this.apiUrl) {
       throw new Error('Not connected. Call connect() first.');
     }
+    this.spaceMailAdapter?.checkAccount();
     // Error reports keep the method names of the last calls, nothing else.
     recordJmapCall(methodCalls.map(([name]) => name));
     // Offline mode (#523, lib/offline/): answered from this device when the
@@ -2254,18 +2253,24 @@ export class JMAPClient implements IJMAPClient {
     const offline = getOfflineHooks();
     if (this.offlineOnly || offline?.skipNetwork(this)) {
       const local = offline ? await offline.answer(this, methodCalls) : null;
-      if (local) return local as JMAPResponse;
+      if (local) {
+        this.spaceMailAdapter?.checkAccount();
+        return local as JMAPResponse;
+      }
       throw new OfflineUnavailableError();
     }
     let answer: JMAPResponse;
     try {
-      answer = await this.networkRequest(methodCalls, using, opts);
+      answer = this.spaceMailAdapter ? await this.spaceMailAdapter.request(methodCalls) : await this.networkRequest(methodCalls, using, opts);
     } catch (error) {
       // Only when the server is really gone: a refusal without CORS
       // headers looks the same to the browser and must stay an error.
       if (offline && isNetworkFailure(error) && await offline.serverGone(this)) {
         const local = await offline.answer(this, methodCalls);
-        if (local) return local as JMAPResponse;
+        if (local) {
+          this.spaceMailAdapter?.checkAccount();
+          return local as JMAPResponse;
+        }
       }
       throw error;
     }
@@ -2292,8 +2297,7 @@ export class JMAPClient implements IJMAPClient {
         const headers = { 'Content-Type': 'application/json' };
         const init = { method: 'POST', body };
         if (gated) {
-          // Groupware cannot fall back to direct Stalwart access after the
-          // selected account's live feature gate refuses the request.
+          // A denied groupware request cannot fall back to direct Stalwart access.
           return this.timedFetch(apiUrl, init, { ...headers, 'X-JMAP-Cookie-Slot': String(account.cookieSlot) }, JMAPClient.REQUEST_TIMEOUT_MS);
         }
         return this.authenticatedFetch(apiUrl, { ...init, headers }, opts?.transfer ? { transfer: true } : undefined);
@@ -5124,6 +5128,8 @@ export class JMAPClient implements IJMAPClient {
     // previous version (re-opened draft with attachments) and fails with
     // blobNotFound, the destroy still went through - deleting the last good
     // copy of the draft. Worst case now is an orphaned old version.
+    if (this.spaceMailAdapter) return this.spaceMailAdapter.saveDraft({ ...emailData }, draftId);
+
     const response = await this.request([
       ["Email/set", {
         accountId: draftAccountId,
@@ -5336,6 +5342,30 @@ export class JMAPClient implements IJMAPClient {
       if (attachments?.length) {
         emailCreate.attachments = attachmentParts(attachments);
       }
+    }
+
+    if (this.spaceMailAdapter) {
+      if (options?.requireTls) throw new Error('Require TLS is unavailable for this account');
+      if (options?.noSentCopy) throw new Error('Sending without a Sent copy is unavailable for this account');
+      if (options?.draftAccountId && options.draftAccountId !== this.accountId) throw new Error('A draft in another account cannot be sent');
+      const recipients = normalizeEnvelopeRecipients([...to, ...(cc || []), ...(bcc || [])]).map(recipient => recipient.email);
+      if (!recipients.length) throw new Error('No recipients');
+      const { state, submission } = await this.spaceMailAdapter.sendComposed(emailCreate, {
+        sender: requestedMailFrom || identityMailFrom, recipients, sentMailboxId: sentMailbox.id,
+        delayedUntil, requestDsn: options?.requestDsn,
+      });
+      const rejected = submission.recipients.filter(recipient => ['rejected', 'failed'].includes(recipient.status))
+        .map(recipient => ({ email: recipient.address, smtpReply: recipient.status }));
+      const result: SendEmailResult = { scheduled: !!delayedUntil, emailId: state.logicalMessageId,
+        emailAccountId: this.accountId, emailSubmissionId: submission.id, submissionAccountId: this.accountId,
+        privateSubmissionStatus: submission.status, privateRecipientOutcomes: submission.recipients,
+        ...(delayedUntil ? { sendAt: delayedUntil } : {}), ...(rejected.length ? { rejectedRecipients: rejected } : {}) };
+      if (draftId) {
+        try {
+          await this.request([['Email/set', { accountId: this.accountId, destroy: [draftId] }, 'cleanup']]);
+        } catch { result.filingError = 'Old draft cleanup failed'; }
+      }
+      return result;
     }
 
     const methodCalls: JMAPMethodCall[] = [];
@@ -6258,6 +6288,19 @@ export class JMAPClient implements IJMAPClient {
       typeof optsOrAccountId === 'string'
         ? { accountId: optsOrAccountId }
         : optsOrAccountId ?? {};
+    if (this.spaceMailAdapter) {
+      this.spaceMailAdapter.checkAccount(opts.accountId);
+      const offline = getOfflineHooks();
+      if (this.offlineOnly || offline?.skipNetwork(this)) {
+        const held = offline ? await offline.holdUpload(this, file, opts.accountId || this.accountId) : null;
+        this.spaceMailAdapter.checkAccount(opts.accountId);
+        if (held) return held;
+        throw new OfflineUnavailableError();
+      }
+      const result = await this.spaceMailAdapter.upload(file, opts.signal);
+      opts.onProgress?.(result.size, result.size);
+      return result;
+    }
     if (!this.session) {
       throw new Error('Not connected. Call connect() first.');
     }
@@ -6457,7 +6500,7 @@ export class JMAPClient implements IJMAPClient {
   }
 
   getBlobDownloadUrl(blobId: string, name?: string, type?: string, accountId?: string): string {
-    if (blobId.startsWith('space-file:') || blobId.startsWith('space-upload:')) throw new SpaceFileError('unsupported_operation');
+    if (this.spaceMailAdapter) throw new Error('Private mail requires an authenticated blob fetch');
     if (!this.downloadUrl) {
       throw new Error('Download URL not available. Please reconnect.');
     }
@@ -6473,8 +6516,8 @@ export class JMAPClient implements IJMAPClient {
   }
 
   async fetchBlob(blobId: string, name?: string, type?: string, accountId?: string): Promise<Blob> {
-    if (blobId.startsWith('space-file:')) return this.spaceFileAdapter.download(blobId);
-    const url = this.getBlobDownloadUrl(blobId, name, type, accountId);
+    this.spaceMailAdapter?.checkAccount(accountId);
+    const url = this.spaceMailAdapter ? null : this.getBlobDownloadUrl(blobId, name, type, accountId);
     const response = await this.offlineAwareDownload(url, blobId, accountId);
     if (response instanceof Blob) return response;
     if (!response.ok) {
@@ -6489,20 +6532,32 @@ export class JMAPClient implements IJMAPClient {
    * A blob download, or the copy kept on this device (#523) when the
    * browser is offline or the network fails.
    */
-  private async offlineAwareDownload(url: string, blobId: string, accountId: string | undefined): Promise<Response | Blob> {
+  private async offlineAwareDownload(url: string | null, blobId: string, accountId: string | undefined): Promise<Response | Blob> {
     const offline = getOfflineHooks();
     const account = accountId || this.accountId;
     if (this.offlineOnly || offline?.skipNetwork(this)) {
       const local = offline ? await offline.blob(this, blobId, account) : null;
-      if (local) return local;
+      if (local) {
+        this.spaceMailAdapter?.checkAccount(accountId);
+        return local;
+      }
       throw new OfflineUnavailableError();
     }
     try {
+      if (this.spaceMailAdapter) {
+        const blob = await this.spaceMailAdapter.blob(blobId);
+        offline?.recordBlob(this, blobId, account, blob);
+        return blob;
+      }
+      if (url === null) throw new Error('Download URL not available. Please reconnect.');
       return await this.authenticatedFetch(url, {}, { timeoutMs: JMAPClient.TRANSFER_TIMEOUT_MS });
     } catch (error) {
       if (offline && isNetworkFailure(error) && await offline.serverGone(this)) {
         const local = await offline.blob(this, blobId, account);
-        if (local) return local;
+        if (local) {
+          this.spaceMailAdapter?.checkAccount(accountId);
+          return local;
+        }
       }
       throw error;
     }
@@ -6521,6 +6576,7 @@ export class JMAPClient implements IJMAPClient {
    * which renews the session or token.
    */
   async fetchBlobForTransfer(blobId: string, accountId: string | undefined, signal?: AbortSignal): Promise<Uint8Array> {
+    if (this.spaceMailAdapter) return new Uint8Array(await (await this.fetchBlob(blobId, 'message.eml', 'message/rfc822', accountId)).arrayBuffer());
     const url = this.getBlobDownloadUrl(blobId, 'message.eml', 'message/rfc822', accountId);
     const response = await this.timedFetch(url, { signal }, { Authorization: this.authHeader }, JMAPClient.TRANSFER_TIMEOUT_MS);
     if (response.status === 401) {
@@ -6757,6 +6813,12 @@ export class JMAPClient implements IJMAPClient {
   }
 
   private async getEmailSubmissionSendAt(submissionId: string, accountId?: string): Promise<string | undefined> {
+    if (this.spaceMailAdapter) {
+      try {
+        const status = await this.spaceMailAdapter.submissionStatus(submissionId);
+        return status.notBefore > 0 ? new Date(status.notBefore * 1000).toISOString() : undefined;
+      } catch { return undefined; }
+    }
     // Read back after the submission: the message is on its way whatever
     // happens here, so a failure (the network gone a moment later) must
     // never turn the send into a failed one (#523).
@@ -6986,6 +7048,7 @@ export class JMAPClient implements IJMAPClient {
   }
 
   supportsEmailSubmission(): boolean {
+    if (this.spaceMailAdapter) return this.spaceMailAdapter.canSubmit;
     return this.hasCapability("urn:ietf:params:jmap:submission");
   }
 
@@ -7018,20 +7081,16 @@ export class JMAPClient implements IJMAPClient {
     return account.isPersonal === false && !!this.capabilities?.[capability];
   }
 
-  // Once Comail configures PDS access, server capabilities cannot override it.
   supportsContacts(accountId?: string): boolean {
-    if (this.privateGroupware !== null) return this.supportsPrivateGroupware('contacts') && (!accountId || accountId === this.accountId);
     return this.accountSupports(accountId || this.accountId, "urn:ietf:params:jmap:contacts");
   }
 
   supportsCalendars(accountId?: string): boolean {
-    if (this.privateGroupware !== null) return this.supportsPrivateGroupware('calendar') && (!accountId || accountId === this.accountId);
     return this.accountSupports(accountId || this.accountId, "urn:ietf:params:jmap:calendars");
   }
 
-  private supportsNativeCalendars(): boolean {
-    return !this.supportsPrivateGroupware('calendar')
-      && this.accountSupports(this.getCalendarsAccountId(), 'urn:ietf:params:jmap:calendars');
+  protected supportsNativeCalendars(): boolean {
+    return this.accountSupports(this.getCalendarsAccountId(), 'urn:ietf:params:jmap:calendars');
   }
 
   supportsSieve(): boolean {
@@ -7355,7 +7414,6 @@ export class JMAPClient implements IJMAPClient {
   }
 
   private getCalendarCapableAccountIds(): string[] {
-    if (this.supportsPrivateGroupware('calendar')) return [];
     const primaryId = this.getCalendarsAccountId();
     const accountIds: string[] = [];
     for (const id of Object.keys(this.accounts)) {
@@ -7380,8 +7438,6 @@ export class JMAPClient implements IJMAPClient {
   }
 
   async getAddressBooks(options?: { throwOnError?: boolean }): Promise<AddressBook[]> {
-    const privateBooks = await this.spaceContactAdapter.addressBooks();
-    if (privateBooks) return privateBooks;
     try {
       const accountId = this.getContactsAccountId();
       const response = await this.request([
@@ -7403,8 +7459,6 @@ export class JMAPClient implements IJMAPClient {
   }
 
   async getAllAddressBooks(): Promise<AddressBook[]> {
-    const privateBooks = await this.spaceContactAdapter.addressBooks();
-    if (privateBooks) return privateBooks.map(book => ({ ...book, accountId: this.getContactsAccountId(), accountName: this.username, isShared: false }));
     try {
       const allBooks: AddressBook[] = [];
       const primaryId = this.getContactsAccountId();
@@ -7444,7 +7498,6 @@ export class JMAPClient implements IJMAPClient {
   }
 
   async createAddressBook(name: string): Promise<AddressBook> {
-    if (await this.spaceContactAdapter.configured()) throw new SpaceContactError('unsupported_address_book_operation');
     const accountId = this.getContactsAccountId();
     const response = await this.request([
       ["AddressBook/set", {
@@ -7466,7 +7519,6 @@ export class JMAPClient implements IJMAPClient {
   }
 
   async updateAddressBook(addressBookId: string, updates: Partial<AddressBook>, targetAccountId?: string): Promise<void> {
-    if (await this.spaceContactAdapter.configured()) throw new SpaceContactError('unsupported_address_book_operation');
     const accountId = targetAccountId || this.getContactsAccountId();
     // Only forward server-settable properties. `isDefault` is deliberately not
     // among them: it is read-only in AddressBook/set and including it fails the
@@ -7502,7 +7554,6 @@ export class JMAPClient implements IJMAPClient {
    * request argument instead (same shape as Calendar/set).
    */
   async setDefaultAddressBook(addressBookId: string, targetAccountId?: string): Promise<void> {
-    if (await this.spaceContactAdapter.configured()) throw new SpaceContactError('unsupported_address_book_operation');
     const accountId = targetAccountId || this.getContactsAccountId();
 
     const response = await this.request([
@@ -7527,7 +7578,6 @@ export class JMAPClient implements IJMAPClient {
     targetAccountId?: string,
     options?: { removeContents?: boolean },
   ): Promise<void> {
-    if (await this.spaceContactAdapter.configured()) throw new SpaceContactError('unsupported_address_book_operation');
     const accountId = targetAccountId || this.getContactsAccountId();
     // Without onDestroyRemoveContents a book that still holds cards is
     // refused with `addressBookHasContents` (RFC 9610 §2.3).
@@ -8080,7 +8130,6 @@ export class JMAPClient implements IJMAPClient {
     rights: AddressBookRights | null,
     targetAccountId?: string,
   ): Promise<void> {
-    if (await this.spaceContactAdapter.configured()) throw new SpaceContactError('unsupported_sharing');
     const accountId = targetAccountId || this.getContactsAccountId();
     const response = await this.request([
       ["AddressBook/set", {
@@ -8344,8 +8393,6 @@ export class JMAPClient implements IJMAPClient {
   }
 
   async getContacts(addressBookId?: string, options?: { throwOnError?: boolean }): Promise<ContactCard[]> {
-    const privateContacts = await this.spaceContactAdapter.contacts(addressBookId);
-    if (privateContacts) return privateContacts;
     try {
       const accountId = this.getContactsAccountId();
       const filter = addressBookId ? { inAddressBook: addressBookId } : undefined;
@@ -8358,8 +8405,6 @@ export class JMAPClient implements IJMAPClient {
   }
 
   async getAllContacts(): Promise<ContactCard[]> {
-    const privateContacts = await this.spaceContactAdapter.contacts();
-    if (privateContacts) return privateContacts.map(contact => ({ ...contact, accountId: this.getContactsAccountId(), accountName: this.username, isShared: false }));
     try {
       const allContacts: ContactCard[] = [];
       const primaryId = this.getContactsAccountId();
@@ -8396,10 +8441,6 @@ export class JMAPClient implements IJMAPClient {
   }
 
   async getContact(contactId: string, accountId?: string): Promise<ContactCard | null> {
-    if (await this.spaceContactAdapter.configured()) {
-      if (accountId && accountId !== this.getContactsAccountId()) throw new SpaceContactError('unsupported_account');
-      return (await this.spaceContactAdapter.contacts())?.find(contact => contact.id === contactId) ?? null;
-    }
     try {
       const targetAccountId = accountId || this.getContactsAccountId();
       const response = await this.request([
@@ -8421,10 +8462,6 @@ export class JMAPClient implements IJMAPClient {
   }
 
   async createContact(contact: Partial<ContactCard>, targetAccountId?: string): Promise<ContactCard> {
-    if (await this.spaceContactAdapter.configured()) {
-      if (targetAccountId && targetAccountId !== this.getContactsAccountId()) throw new SpaceContactError('unsupported_account');
-      return this.spaceContactAdapter.create(contact);
-    }
     const accountId = targetAccountId || this.getContactsAccountId();
     let addressBookIds = contact.addressBookIds;
     if (!addressBookIds || Object.keys(addressBookIds).length === 0) {
@@ -8470,10 +8507,6 @@ export class JMAPClient implements IJMAPClient {
   }
 
   async updateContact(contactId: string, updates: Partial<ContactCard>, targetAccountId?: string): Promise<void> {
-    if (await this.spaceContactAdapter.configured()) {
-      if (targetAccountId && targetAccountId !== this.getContactsAccountId()) throw new SpaceContactError('unsupported_account');
-      return this.spaceContactAdapter.update(contactId, updates);
-    }
     const accountId = targetAccountId || this.getContactsAccountId();
 
     const cleanUpdates = contactToWire(updates, 'update');
@@ -8501,10 +8534,6 @@ export class JMAPClient implements IJMAPClient {
   }
 
   async deleteContact(contactId: string, targetAccountId?: string): Promise<void> {
-    if (await this.spaceContactAdapter.configured()) {
-      if (targetAccountId && targetAccountId !== this.getContactsAccountId()) throw new SpaceContactError('unsupported_account');
-      return this.spaceContactAdapter.remove(contactId);
-    }
     const accountId = targetAccountId || this.getContactsAccountId();
 
     const response = await this.request([
@@ -8528,8 +8557,6 @@ export class JMAPClient implements IJMAPClient {
   }
 
   async searchContacts(query: string): Promise<ContactCard[]> {
-    const privateContacts = await this.spaceContactAdapter.contacts();
-    if (privateContacts) return privateContacts.filter(contact => JSON.stringify(contact).toLocaleLowerCase().includes(query.toLocaleLowerCase())).slice(0, 50);
     try {
       const allResults: ContactCard[] = [];
       const primaryId = this.getContactsAccountId();
@@ -8601,7 +8628,6 @@ export class JMAPClient implements IJMAPClient {
   }
 
   async getCalendars(): Promise<Calendar[]> {
-    if (this.supportsPrivateGroupware('calendar')) return this.getAtprotoSpaceCalendars();
     try {
       const accountId = this.getCalendarsAccountId();
       const response = await this.requestCalendars(accountId);
@@ -8726,166 +8752,51 @@ export class JMAPClient implements IJMAPClient {
    * calendar from the persisted selection.
    */
   async getAllCalendarsWithFailures(): Promise<{ calendars: Calendar[]; failedAccountIds: string[] }> {
-    const accountCalendars = async (): Promise<{ calendars: Calendar[]; failedAccountIds: string[] }> => {
-      const calendars: Calendar[] = [];
-      const failedAccountIds: string[] = [];
-      const primaryId = this.getCalendarsAccountId();
-      const accountIds = this.getCalendarCapableAccountIds();
+    const allCalendars: Calendar[] = [];
+    const failedAccountIds: string[] = [];
+    const primaryId = this.getCalendarsAccountId();
+    const accountIds = this.getCalendarCapableAccountIds();
 
-      for (const accountId of accountIds) {
-        const isPrimary = accountId === primaryId;
-        if (!isPrimary && this.calendarAccessDenied.has(accountId)) continue;
-        const account = this.accounts[accountId];
+    for (const accountId of accountIds) {
+      const isPrimary = accountId === primaryId;
+      if (!isPrimary && this.calendarAccessDenied.has(accountId)) continue;
+      const account = this.accounts[accountId];
 
-        try {
-          const response = await this.requestCalendars(accountId);
-          const [method, result] = response.methodResponses?.[0] ?? [];
+      try {
+        const response = await this.requestCalendars(accountId);
+        const [method, result] = response.methodResponses?.[0] ?? [];
 
-          if (method !== "Calendar/get") {
-            // Shared accounts are probed on suspicion (see
-            // getCalendarCapableAccountIds); one that grants no calendar access
-            // has no calendars to lose.
-            if (!isPrimary && isCalendarAccessDenial(result?.type, result?.description)) continue;
-            throw new Error(result?.description || result?.type || "Calendar/get failed");
-          }
-
-          const rawCalendars = (result.list || []) as Calendar[];
-          const tasksOnly = await this.getTasksOnlyCalendarIds(accountId, rawCalendars.map((c) => c.id));
-          calendars.push(...rawCalendars.map((cal) => ({
-            ...cal,
-            id: isPrimary ? cal.id : `${accountId}:${cal.id}`,
-            originalId: cal.id,
-            accountId,
-            accountName: account?.name || (isPrimary ? this.username : accountId),
-            isShared: !isPrimary,
-            isTasksOnly: tasksOnly.has(cal.id),
-          })));
-        } catch (error) {
-          if (isPrimary) throw error;
-          console.error(`Failed to fetch calendars for account ${accountId}:`, error);
-          failedAccountIds.push(accountId);
+        if (method !== "Calendar/get") {
+          // Shared accounts are probed on suspicion (see
+          // getCalendarCapableAccountIds); one that grants no calendar access
+          // has no calendars to lose.
+          if (!isPrimary && isCalendarAccessDenial(result?.type, result?.description)) continue;
+          throw new Error(result?.description || result?.type || "Calendar/get failed");
         }
+
+        const rawCalendars = (result.list || []) as Calendar[];
+        const tasksOnly = await this.getTasksOnlyCalendarIds(accountId, rawCalendars.map((c) => c.id));
+        const calendars = rawCalendars.map((cal) => ({
+          ...cal,
+          id: isPrimary ? cal.id : `${accountId}:${cal.id}`,
+          originalId: cal.id,
+          accountId,
+          accountName: account?.name || (isPrimary ? this.username : accountId),
+          isShared: !isPrimary,
+          isTasksOnly: tasksOnly.has(cal.id),
+        }));
+        allCalendars.push(...calendars);
+      } catch (error) {
+        if (isPrimary) throw error;
+        console.error(`Failed to fetch calendars for account ${accountId}:`, error);
+        failedAccountIds.push(accountId);
       }
-      return { calendars, failedAccountIds };
-    };
-    const atmoCalendars = this.getAtmoPublicCalendars().catch((error) => {
-      this.atmoCalendarStale = true;
-      console.error('Failed to fetch Atmosphere calendar:', error);
-      return [] as Calendar[];
-    });
-    const [accounts, spaceCalendars, publicCalendars] = await Promise.all([
-      accountCalendars(),
-      this.getAtprotoSpaceCalendars(),
-      atmoCalendars,
-    ]);
-
-    return {
-      calendars: [...accounts.calendars, ...spaceCalendars, ...publicCalendars],
-      failedAccountIds: accounts.failedAccountIds,
-    };
-  }
-
-  async getAtprotoSpaceCalendars(): Promise<Calendar[]> {
-    const calendars = (await this.spaceCalendarAdapter.getCalendars()).map((calendar) => ({
-      ...calendar,
-      accountId: this.getCalendarsAccountId(),
-      accountName: this.username,
-      isShared: false,
-    }));
-    this.spaceCalendars = calendars;
-    return calendars;
-  }
-
-  async getAtmoPublicCalendars(): Promise<Calendar[]> {
-    return (await this.atmoCalendarAdapter.getCalendars()).map(calendar => ({
-      ...calendar, accountId: this.getCalendarsAccountId(), accountName: this.username, isShared: false, atmoStale: this.atmoCalendarStale,
-    }));
-  }
-
-  async getAtmoPublicCalendarEvents(after: string, before: string): Promise<CalendarEvent[]> {
-    const range = `${after}|${before}`;
-    try {
-      const events = (await this.atmoCalendarAdapter.getEvents(after, before)).map(event => ({
-        ...event, accountId: this.getCalendarsAccountId(), accountName: this.username, isShared: false,
-      }));
-      const complete = this.atmoCalendarAdapter.isLastRefreshComplete();
-      this.atmoCalendarStale = !complete;
-      if (complete) this.atmoEventsCache = { range, events };
-      return !complete && this.atmoEventsCache?.range === range ? this.atmoEventsCache.events : events;
-    } catch (error) {
-      this.atmoCalendarStale = true;
-      console.error('Failed to refresh Atmosphere calendar events:', error);
-      return this.atmoEventsCache?.range === range ? this.atmoEventsCache.events : [];
     }
-  }
 
-  getAtmoCalendarStale(): boolean {
-    return this.atmoCalendarStale;
-  }
-
-  async setAtmoCalendarEnabled(enabled: boolean): Promise<Calendar> {
-    const calendar = await this.atmoCalendarAdapter.setEnabled(enabled);
-    return { ...calendar, accountId: this.getCalendarsAccountId(), accountName: this.username, isShared: false };
-  }
-
-  async startAtmoCalendarConsent(): Promise<string> {
-    return this.atmoCalendarAdapter.startAuthorization();
-  }
-
-  async getAtprotoSpacePrincipals() {
-    return this.spaceCalendarAdapter.getPrincipals();
-  }
-
-  async startAtprotoSpaceCalendarConsent(): Promise<string> {
-    return this.spaceCalendarAdapter.startAuthorization('member-calendar');
-  }
-
-  async getAtprotoSpaceCalendarEvents(after: string, before: string): Promise<CalendarEvent[]> {
-    const calendars = this.spaceCalendars ?? await this.getAtprotoSpaceCalendars();
-    if (calendars.length === 0 || calendars.some((calendar) => calendar.spaceConsentRequired)) return [];
-    return this.spaceCalendarAdapter.getEvents(after, before);
-  }
-
-  async updateAtprotoSpaceCalendarEvent(eventId: string, baseRevision: string, updates: Partial<CalendarEvent>): Promise<CalendarEvent> {
-    return this.spaceCalendarAdapter.updateEvent(eventId, baseRevision, updates);
-  }
-
-  async updateAtprotoSpaceCalendarPrivateEvent(eventId: string, basePersonalRevision: string, updates: Partial<SpaceCalendarPersonalProperties>, recurrenceId?: string, inherit?: Array<keyof SpaceCalendarPersonalProperties>): Promise<CalendarEvent> {
-    return this.spaceCalendarAdapter.updatePrivateEvent(eventId, basePersonalRevision, updates, recurrenceId, inherit);
-  }
-
-  async rsvpAtprotoSpaceCalendarEvent(eventId: string, baseRevision: string, status: string, recurrenceId?: string): Promise<CalendarEvent> {
-    return this.spaceCalendarAdapter.rsvpEvent(eventId, baseRevision, status, recurrenceId);
-  }
-
-  async cancelAtprotoSpaceCalendarEvent(eventId: string, baseRevision: string, calendarId: string): Promise<CalendarEvent> {
-    const calendar = this.spaceCalendars?.find((item) => (item.originalId || item.id) === calendarId);
-    if (!calendar?.spaceRole) throw new SpaceCalendarError('Space calendar role is unavailable', 'invalid_response');
-    return this.spaceCalendarAdapter.cancelEvent(eventId, baseRevision, calendar.spaceRole);
-  }
-
-  async createAtprotoSpaceCalendarEvent(calendarId: string, event: Partial<CalendarEvent>, sendSchedulingMessages = false): Promise<CalendarEvent> {
-    return this.spaceCalendarAdapter.createEvent(calendarId, event, sendSchedulingMessages);
-  }
-
-  async subscribeAtprotoPublicCalendarEvent(event: CalendarEvent): Promise<CalendarEvent> {
-    return this.spaceCalendarAdapter.subscribePublicEvent(event);
-  }
-
-  async rsvpAtprotoPublicCalendarEvent(event: CalendarEvent, status: 'going' | 'interested' | 'notgoing') {
-    return this.spaceCalendarAdapter.rsvpPublicEvent(event, status);
-  }
-
-  async publishAtprotoPublicCalendarEvent(event: CalendarEvent) {
-    return this.spaceCalendarAdapter.publishPublicEvent(event);
-  }
-
-  async shareAtprotoSpaceCalendar(calendarId: string, principalId: string, rights: CalendarRights | null): Promise<{ status: 'shared' | 'revoked' }> {
-    return this.spaceCalendarAdapter.shareCalendar(calendarId, principalId, rights);
+    return { calendars: allCalendars, failedAccountIds };
   }
 
   async createCalendar(calendar: Partial<Calendar>, targetAccountId?: string, options?: CreateCalendarOptions): Promise<Calendar> {
-    if (isPublicAtprotoCalendar(calendar)) throw new SpaceCalendarError("Atmosphere calendar is read-only", "unsupported_operation", 403);
     const accountId = targetAccountId || this.getCalendarsAccountId();
 
     // Stalwart's Calendar/set cannot express the CalDAV
@@ -9006,7 +8917,6 @@ export class JMAPClient implements IJMAPClient {
   }
 
   async updateCalendar(calendarId: string, updates: Partial<Calendar>, targetAccountId?: string): Promise<void> {
-    if (isPublicAtprotoCalendar({ id: calendarId }) || isPublicAtprotoCalendar(updates)) throw new SpaceCalendarError("Atmosphere calendar is read-only", "unsupported_operation", 403);
     const accountId = targetAccountId || this.getCalendarsAccountId();
 
     // Stalwart rejects the whole update with invalidProperties if any key is
@@ -9050,7 +8960,6 @@ export class JMAPClient implements IJMAPClient {
    * `onSuccessSetIsDefault` request argument instead.
    */
   async setDefaultCalendar(calendarId: string, targetAccountId?: string): Promise<void> {
-    if (isPublicAtprotoCalendar({ id: calendarId })) throw new SpaceCalendarError("Atmosphere calendar is read-only", "unsupported_operation", 403);
     const accountId = targetAccountId || this.getCalendarsAccountId();
 
     const response = await this.request([
@@ -9071,7 +8980,6 @@ export class JMAPClient implements IJMAPClient {
   }
 
   async deleteCalendar(calendarId: string, targetAccountId?: string): Promise<void> {
-    if (isPublicAtprotoCalendar({ id: calendarId })) throw new SpaceCalendarError("Atmosphere calendar is read-only", "unsupported_operation", 403);
     const accountId = targetAccountId || this.getCalendarsAccountId();
 
     const response = await this.request([
@@ -9318,7 +9226,6 @@ export class JMAPClient implements IJMAPClient {
     limit?: number,
     options?: CalendarQueryOptions,
   ): Promise<CalendarEvent[]> {
-    const accountEvents = async () => {
     const allEvents: CalendarEvent[] = [];
     const primaryId = this.getCalendarsAccountId();
     const accountIds = this.getCalendarCapableAccountIds();
@@ -9354,16 +9261,7 @@ export class JMAPClient implements IJMAPClient {
       })));
     }
 
-      return allEvents;
-    };
-    if (!filter.after || !filter.before) return accountEvents();
-    const [privateEvents, spaceEvents, publicEvents] = await Promise.all([
-      accountEvents(),
-      this.getAtprotoSpaceCalendarEvents(filter.after, filter.before),
-      this.getAtmoPublicCalendarEvents(filter.after, filter.before),
-    ]);
-    throwIfAborted(options?.signal);
-    return [...privateEvents, ...spaceEvents, ...publicEvents];
+    return allEvents;
   }
 
   async queryCalendarEvents(
@@ -9646,7 +9544,6 @@ export class JMAPClient implements IJMAPClient {
   }
 
   async createCalendarEvent(event: Partial<CalendarEvent>, sendSchedulingMessages?: boolean, targetAccountId?: string): Promise<CalendarEvent> {
-    if (isPublicAtprotoEvent(event)) throw new SpaceCalendarError("Atmosphere calendar is read-only", "unsupported_operation", 403);
     const accountId = targetAccountId || this.getCalendarsAccountId();
 
     // Strip client-only shared fields before sending to JMAP
@@ -9713,7 +9610,7 @@ export class JMAPClient implements IJMAPClient {
         }
         if (!created) {
           debug.warn('calendar', 'CalendarEvent/create returns the sent event for the created id', { createdId, targetAccountId });
-          created = normalizeCalendarEventLike({ ...cleanEvent, ...result.created["new-event"], id: createdId } as CalendarEvent);
+          created = fromJmapCalendarEvent({ ...cleanEvent, ...result.created["new-event"], id: createdId } as CalendarEvent);
         }
         debug.log('calendar', 'CalendarEvent/create fetched created event', {
           ...getCalendarEventDebugSnapshot(created),
@@ -9825,7 +9722,6 @@ export class JMAPClient implements IJMAPClient {
     targetAccountId?: string,
     options?: CalendarEventUpdateOptions,
   ): Promise<void> {
-    if (isPublicAtprotoEvent({ id: eventId }) || isPublicAtprotoEvent(updates)) throw new SpaceCalendarError("Atmosphere calendar is read-only", "unsupported_operation", 403);
     const accountId = targetAccountId || this.getCalendarsAccountId();
 
     // Strip client-only and server-immutable fields before sending to JMAP
@@ -9911,15 +9807,7 @@ export class JMAPClient implements IJMAPClient {
       const parsed = result.parsed?.[blobId];
       if (parsed) {
         return (Array.isArray(parsed) ? parsed : [parsed])
-          .map((event) => ({
-            ...normalizeCalendarEventLike(event as Partial<CalendarEvent>),
-            source: 'jmap' as const,
-            spaceRevisionId: undefined,
-            spacePersonalRevisionId: undefined,
-            spaceSharedRecurrenceOverrides: undefined,
-            spaceActorDid: undefined,
-            spaceOwnerDid: undefined,
-          }));
+          .map((event) => fromJmapCalendarEvent(event as Partial<CalendarEvent>));
       }
 
       return [];
@@ -9929,7 +9817,6 @@ export class JMAPClient implements IJMAPClient {
   }
 
   async deleteCalendarEvent(eventId: string, sendSchedulingMessages?: boolean, targetAccountId?: string): Promise<void> {
-    if (isPublicAtprotoEvent({ id: eventId })) throw new SpaceCalendarError("Atmosphere calendar is read-only", "unsupported_operation", 403);
     const accountId = targetAccountId || this.getCalendarsAccountId();
 
     const setArgs: Record<string, unknown> = {
@@ -10315,7 +10202,6 @@ export class JMAPClient implements IJMAPClient {
   // ─── JMAP FileNode methods (draft-ietf-jmap-filenode) ───
 
   supportsFiles(accountId?: string): boolean {
-    if (this.supportsPrivateGroupware('files') || this.privateFiles) return !accountId || accountId === this.getFilesAccountId();
     // Gate on the ACCOUNT capability, not the server-wide session capability.
     // A server can advertise urn:ietf:params:jmap:filenode while a specific
     // account has its jmap-file-node-* permissions revoked, in which case the
@@ -10325,7 +10211,6 @@ export class JMAPClient implements IJMAPClient {
   }
 
   async probeFileNodeSupport(): Promise<boolean> {
-    if (!IS_LITE && await this.spaceFileAdapter.configured()) { this.privateFiles = true; return true; }
     // Some servers support FileNode without advertising a specific capability.
     // Try a minimal FileNode/query to detect support at runtime.
     if (this.supportsFiles()) return true;
@@ -10401,7 +10286,6 @@ export class JMAPClient implements IJMAPClient {
   }
 
   async getFileNodes(ids: string[] | null, properties?: string[]): Promise<FileNode[]> {
-    if (!IS_LITE && await this.spaceFileAdapter.configured()) return (await this.spaceFileAdapter.list()).filter(node => ids === null || ids.includes(node.id));
     const accountId = this.getFilesAccountId();
     const args: Record<string, unknown> = { accountId, ids, properties: properties || JMAPClient.FILE_NODE_PROPERTIES };
 
@@ -10418,16 +10302,6 @@ export class JMAPClient implements IJMAPClient {
   }
 
   async queryFileNodes(filter: FileNodeFilter, sort?: { property: string; isAscending: boolean }[]): Promise<string[]> {
-    if (!IS_LITE && await this.spaceFileAdapter.configured()) {
-      const nodes = (await this.spaceFileAdapter.list()).filter(node => (filter.parentId === undefined || node.parentId === filter.parentId)
-        && (filter.name === undefined || node.name.includes(filter.name)) && (filter.type === undefined || node.type === filter.type));
-      for (const order of [...(sort || [])].reverse()) {
-        if (!['name', 'size', 'type'].includes(order.property)) throw new SpaceFileError('unsupported_operation');
-        nodes.sort((a, b) => { const left = a[order.property as 'name' | 'size' | 'type']; const right = b[order.property as 'name' | 'size' | 'type'];
-          return (left < right ? -1 : left > right ? 1 : 0) * (order.isAscending ? 1 : -1); });
-      }
-      return nodes.map(node => node.id);
-    }
     const accountId = this.getFilesAccountId();
     const args: Record<string, unknown> = { accountId, filter };
     if (sort) args.sort = sort;
@@ -10462,7 +10336,6 @@ export class JMAPClient implements IJMAPClient {
    * single root file).
    */
   async listAllFileNodes(): Promise<FileNode[]> {
-    if (!IS_LITE && await this.spaceFileAdapter.configured()) return this.spaceFileAdapter.list();
     const nodes = await this.fetchAllFileNodes(this.getFilesAccountId());
     return nodes.map(fromWireFileNode);
   }
@@ -10569,7 +10442,6 @@ export class JMAPClient implements IJMAPClient {
    * node are marked `discoverableOnly`. Mirrors getAllCalendars().
    */
   async listAllFileNodesAcrossAccounts(): Promise<FileNode[]> {
-    if (!IS_LITE && await this.spaceFileAdapter.configured()) return this.spaceFileAdapter.list();
     const primaryId = this.getFilesAccountId();
     const accountIds = this.getFilesCapableAccountIds();
     const all: FileNode[] = [];
@@ -10613,7 +10485,6 @@ export class JMAPClient implements IJMAPClient {
     rights: FileNodeRights | null,
     targetAccountId?: string,
   ): Promise<void> {
-    if (!IS_LITE && await this.spaceFileAdapter.configured()) throw new SpaceFileError('unsupported_sharing');
     const node = targetAccountId
       ? { accountId: targetAccountId, id: fileNodeId }
       : this.resolveFileNodeId(fileNodeId);
@@ -10654,15 +10525,6 @@ export class JMAPClient implements IJMAPClient {
       }
     }
     return { accountId: primary, id };
-  }
-
-  async uploadFileBlob(file: File, optsOrAccountId?: Parameters<IJMAPClient['uploadBlob']>[1]): Promise<{ blobId: string; size: number; type: string }> {
-    if (!IS_LITE && await this.spaceFileAdapter.configured()) {
-      const options = typeof optsOrAccountId === 'string' ? { accountId: optsOrAccountId } : optsOrAccountId;
-      if (options?.accountId && options.accountId !== this.getFilesAccountId()) throw new SpaceFileError('unsupported_account');
-      return this.spaceFileAdapter.stage(file, options);
-    }
-    return this.uploadBlob(file, optsOrAccountId);
   }
 
   private fileNodeCapability(accountId: string): Record<string, unknown> | undefined {
@@ -10784,7 +10646,6 @@ export class JMAPClient implements IJMAPClient {
   }
 
   async createFileDirectory(name: string, parentId: string | null): Promise<FileNode> {
-    if (!IS_LITE && await this.spaceFileAdapter.configured()) return this.spaceFileAdapter.createDirectory(name, parentId);
     const parent = this.resolveFileNodeId(parentId);
 
     // A FileNode is a folder (container) only when it has no content - i.e. no
@@ -10825,8 +10686,7 @@ export class JMAPClient implements IJMAPClient {
     return copied;
   }
 
-  async createFileNode(name: string, blobId: string, type: string, size: number, parentId: string | null): Promise<FileNode> {
-    if (!IS_LITE && await this.spaceFileAdapter.configured()) return this.spaceFileAdapter.create(name, blobId, type, size, parentId);
+  async createFileNode(name: string, blobId: string, type: string, _size: number, parentId: string | null): Promise<FileNode> {
     const parent = this.resolveFileNodeId(parentId);
 
     const fileProps: Record<string, unknown> = { name, type: this.fileNodeType(parent.accountId, type), blobId };
@@ -10839,7 +10699,6 @@ export class JMAPClient implements IJMAPClient {
   }
 
   async updateFileNode(id: string, updates: Partial<Pick<FileNode, 'name' | 'parentId'>>): Promise<void> {
-    if (!IS_LITE && await this.spaceFileAdapter.configured()) return this.spaceFileAdapter.update(id, updates);
     const node = this.resolveFileNodeId(id);
     const patch: Record<string, unknown> = { ...updates };
     if ('parentId' in updates) {
@@ -10905,19 +10764,6 @@ export class JMAPClient implements IJMAPClient {
    * throws for per-node failures (only for a whole-method error).
    */
   async updateFileNodes(updates: Record<string, Partial<Pick<FileNode, 'name' | 'parentId'>>>): Promise<{ updated: string[]; notUpdated: Record<string, string> }> {
-    if (!IS_LITE && await this.spaceFileAdapter.configured()) {
-      const updated: string[] = []; const notUpdated: Record<string, string> = {};
-      let failure: string | undefined;
-      for (const [id, change] of Object.entries(updates)) {
-        if (failure) { notUpdated[id] = failure; continue; }
-        try { await this.spaceFileAdapter.update(id, change); updated.push(id); }
-        catch (error) {
-          failure = error instanceof Error ? error.message : 'File update failed';
-          notUpdated[id] = failure;
-        }
-      }
-      return { updated, notUpdated };
-    }
     const entries = Object.entries(updates);
     if (entries.length === 0) return { updated: [], notUpdated: {} };
 
@@ -10969,11 +10815,6 @@ export class JMAPClient implements IJMAPClient {
   }
 
   async destroyFileNodes(ids: string[]): Promise<{ destroyed: string[]; notDestroyed: string[] }> {
-    if (!IS_LITE && await this.spaceFileAdapter.configured()) {
-      const destroyed: string[] = [];
-      for (const id of ids) { await this.spaceFileAdapter.remove(id); destroyed.push(id); }
-      return { destroyed, notDestroyed: [] };
-    }
     const destroyed: string[] = [];
 
     for (const [accountId, nodes] of this.groupFileNodeIds(ids.map(id => [id, null] as [string, null]))) {
@@ -11023,7 +10864,6 @@ export class JMAPClient implements IJMAPClient {
    * `listings` lets the copies of one paste share the trees they read.
    */
   async copyFileNode(id: string, newName: string, parentId: string | null, listings?: FileNodeListings): Promise<FileNode> {
-    if (!IS_LITE && await this.spaceFileAdapter.configured()) return this.spaceFileAdapter.copy(id, newName, parentId);
     const source = this.resolveFileNodeId(id);
     const target = this.resolveFileNodeId(parentId);
     const listing = (accountId: string): Promise<FileNode[]> => {
@@ -11548,6 +11388,10 @@ export class JMAPClient implements IJMAPClient {
     const { using, methodCalls } = this.buildStatePollingRequest();
     const responses: JMAPMethodResponse[] = [];
     for (const group of batched(methodCalls, this.getMaxCallsInRequest())) {
+      if (this.spaceMailAdapter) {
+        responses.push(...(await this.request(group, using)).methodResponses);
+        continue;
+      }
       const response = await this.firstTouchGate.run(group, () =>
         this.authenticatedFetch(this.apiUrl, {
           method: 'POST',
@@ -11818,6 +11662,10 @@ export class JMAPClient implements IJMAPClient {
 
   /** Fetch blob content as an ArrayBuffer (for S/MIME byte processing). */
   async fetchBlobArrayBuffer(blobId: string, name?: string, type?: string, accountId?: string, rangeHeader?: number): Promise<ArrayBuffer> {
+    if (this.spaceMailAdapter) {
+      const bytes = await (await this.fetchBlob(blobId, name, type, accountId)).arrayBuffer();
+      return rangeHeader ? bytes.slice(0, rangeHeader) : bytes;
+    }
     const url = this.getBlobDownloadUrl(blobId, name, type, accountId);
     const response = await this.offlineAwareDownload(url, blobId, accountId);
     if (response instanceof Blob) {
@@ -12034,6 +11882,22 @@ export class JMAPClient implements IJMAPClient {
     delayedUntil?: string,
     envelopeRecipients?: string[],
   ): Promise<SendEmailResult> {
+    if (this.spaceMailAdapter) {
+      if (identityId !== this.accountId) throw new Error('Choose the account that owns this identity');
+      if (delayedUntil) this.validateDelayedUntil(delayedUntil);
+      const { default: PostalMime } = await import('postal-mime');
+      const parsed = await PostalMime.parse(new Uint8Array(await blob.arrayBuffer()));
+      const flatten = (items: typeof parsed.to): string[] => (items ?? []).flatMap(item => item.group
+        ? item.group.map(member => member.address).filter((address): address is string => !!address)
+        : item.address ? [item.address] : []);
+      const recipients = envelopeRecipients?.length ? envelopeRecipients : [...flatten(parsed.to), ...flatten(parsed.cc), ...flatten(parsed.bcc)];
+      if (!recipients.length) throw new Error('No recipients');
+      const { state, submission } = await this.spaceMailAdapter.sendRaw(blob, { sender: this.username, recipients, sentMailboxId, delayedUntil });
+      return { scheduled: !!delayedUntil, emailId: state.logicalMessageId, emailAccountId: this.accountId,
+        emailSubmissionId: submission.id, submissionAccountId: this.accountId,
+        privateSubmissionStatus: submission.status, privateRecipientOutcomes: submission.recipients,
+        ...(delayedUntil ? { sendAt: delayedUntil } : {}), isSmime: true };
+    }
     const holdForSeconds = delayedUntil ? this.validateDelayedUntil(delayedUntil) : undefined;
     // Upload the raw message
     const file = new File([blob], 'message.eml', { type: 'message/rfc822' });
@@ -12104,6 +11968,7 @@ export class JMAPClient implements IJMAPClient {
     delayedUntil?: string,
     envelopeRecipients?: string[],
   ): Promise<SendEmailResult> {
+    if (this.spaceMailAdapter) throw new Error('Sending without a Sent copy is unavailable for this account');
     const mailboxes = await this.beforeSubmission(() => this.getMailboxes());
     const draftsMailbox = mailboxes.find(mb => mb.role === 'drafts');
     if (!draftsMailbox) {
@@ -12259,6 +12124,36 @@ export class JMAPClient implements IJMAPClient {
   }
 
   async getScheduledEmails(limit = 50, position = 0): Promise<{ emails: ScheduledEmail[]; hasMore: boolean; total: number; totalByAccount?: Record<string, number>; nextPosition: number }> {
+    if (this.spaceMailAdapter) {
+      const statuses = await this.spaceMailAdapter.scheduledSubmissions();
+      const total = statuses.length;
+      const page = statuses.slice(position, position + limit);
+      if (!page.length) return { emails: [], hasMore: false, total, totalByAccount: { [this.accountId]: total }, nextPosition: position };
+      const response = await this.request([['Email/get', { accountId: this.accountId, ids: page.map(status => status.logicalMessageId),
+        properties: ['id', 'threadId', 'mailboxIds', 'keywords', 'size', 'receivedAt', 'from', 'to', 'cc', 'bcc', 'replyTo',
+          'subject', 'preview', 'textBody', 'htmlBody', 'bodyValues', 'attachments', 'hasAttachment', 'sentAt', 'messageId',
+          'inReplyTo', 'references', 'headers', 'blobId', 'bodyStructure'] }, '0']]);
+      const loaded = new Map(((response.methodResponses[0]?.[1]?.list ?? []) as Email[]).map(email => [email.id, email]));
+      const emails = page.map(status => {
+        const email = loaded.get(status.logicalMessageId) ?? {
+          id: status.logicalMessageId, threadId: status.logicalMessageId, mailboxIds: {}, keywords: {}, size: 0,
+          receivedAt: '', hasAttachment: false, subject: 'Message unavailable',
+          from: [{ email: status.sender }], to: status.recipients.map(recipient => ({ email: recipient.address })),
+        };
+        return { ...email, scheduledSendAt: new Date((status.notBefore || Math.floor(Date.now() / 1000)) * 1000).toISOString(),
+          privateSendPending: status.notBefore === 0, emailSubmissionId: status.id,
+          privateSendUncertain: status.status === 'ambiguous' || status.recipients.some(recipient => recipient.status === 'ambiguous'),
+          scheduledIdentityId: this.accountId, scheduledUndoStatus: 'pending' as const, scheduledAccountId: this.accountId,
+          scheduledDeliveryStatus: Object.fromEntries(status.recipients.map(recipient => [recipient.address, {
+            delivered: recipient.status === 'accepted' ? 'yes' as const
+              : ['rejected', 'failed', 'canceled'].includes(recipient.status) ? 'no' as const
+                : recipient.status === 'ambiguous' ? 'unknown' as const : 'queued' as const,
+            displayed: 'unknown' as const, smtpReply: recipient.status,
+          }])),
+          isScheduled: true as const, isSmimeScheduled: isSmimeEmail(email) };
+      });
+      return { emails, hasMore: position + emails.length < total, total, totalByAccount: { [this.accountId]: total }, nextPosition: position + emails.length };
+    }
     // Scheduled mail composed from a shared identity lives in the shared
     // account, so gate on *any* reachable submission account supporting
     // delayed send rather than only the primary one.
@@ -12407,6 +12302,11 @@ export class JMAPClient implements IJMAPClient {
   }
 
   async cancelEmailSubmission(submissionId: string, accountId?: string): Promise<void> {
+    if (this.spaceMailAdapter) {
+      if (accountId && accountId !== this.accountId) throw new Error('Choose the account that owns this message');
+      await this.spaceMailAdapter.cancelSubmission(submissionId);
+      return;
+    }
     // A submission created from a shared identity belongs to the shared
     // account; cancelling it through the primary account answers `notFound`
     // and the message would still go out. See #874.
@@ -12435,6 +12335,15 @@ export class JMAPClient implements IJMAPClient {
   }
 
   async rescheduleEmailSubmission(submissionId: string, emailId: string, identityId: string, delayedUntil: string, accountId?: string): Promise<SendEmailResult> {
+    if (this.spaceMailAdapter) {
+      if (accountId && accountId !== this.accountId) throw new Error('Choose the account that owns this message');
+      this.validateDelayedUntil(delayedUntil);
+      const notBefore = Math.ceil(new Date(delayedUntil).getTime() / 1000);
+      const replacement = await this.spaceMailAdapter.rescheduleSubmission(submissionId, notBefore);
+      if (replacement.logicalMessageId !== emailId) throw new Error('The scheduled message changed');
+      return { scheduled: true, emailId, emailAccountId: this.accountId, emailSubmissionId: replacement.id,
+        submissionAccountId: this.accountId, sendAt: new Date(notBefore * 1000).toISOString() };
+    }
     // Keep the replacement in the same account as the original: a shared
     // submission rescheduled through the primary account would be recreated
     // in the wrong account (and the original left running). See #874.
@@ -12664,6 +12573,8 @@ export class JMAPClient implements IJMAPClient {
    * Resolves with the number of records destroyed; never rejects.
    */
   async pruneEmailSubmissions(options: { force?: boolean } = {}): Promise<number> {
+    // Native PDS submissions use the journal rather than JMAP submission quota.
+    if (this.spaceMailAdapter) return 0;
     let destroyed = 0;
     for (const accountId of this.getSubmissionAccountIds()) {
       destroyed += await this.pruneSubmissionAccount(accountId, options.force ?? false);

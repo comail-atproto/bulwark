@@ -1,6 +1,7 @@
 import { isValidEmail } from "@/lib/validation";
 import { splitMailbox } from "@/lib/rfc5322-mailbox";
 import { htmlToPlainText } from "@/lib/html-to-text";
+import { sanitizeComposerIslandHtml } from "@/lib/email-sanitization";
 import { hasMeaningfulHtmlBody } from "@/lib/signature-utils";
 import { emailHooks } from "@/lib/plugin-hooks";
 import { Ellipsis, Lock, TriangleAlert } from "@/components/icons";
@@ -575,7 +576,8 @@ export function replaceInlineImagePlaceholders(
 ): string {
   if (!html || cidToDataUrl.size === 0) return html;
   if (html.indexOf("data-cid") === -1) return html;
-  const doc = new DOMParser().parseFromString(`<body>${html}</body>`, "text/html");
+  const cleanHtml = sanitizeComposerIslandHtml(html);
+  const doc = new DOMParser().parseFromString(cleanHtml, "text/html");
   let changed = false;
   doc.querySelectorAll("img[data-cid]").forEach((img) => {
     const cid = img.getAttribute("data-cid");
@@ -587,7 +589,8 @@ export function replaceInlineImagePlaceholders(
     img.setAttribute("src", dataUrl);
     changed = true;
   });
-  return changed ? doc.body.innerHTML : html;
+  // Attachment MIME types can produce data URLs the composer must not render.
+  return changed ? sanitizeComposerIslandHtml(doc.body.innerHTML) : cleanHtml;
 }
 
 export type PendingUploadLike = {

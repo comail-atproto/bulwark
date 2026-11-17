@@ -145,6 +145,7 @@ export async function GET(request: NextRequest) {
       privateCalendarEnabled: calendarEnabled && !!inboxBridgeSecret() && !!calendarBridgeEndpoint(),
       privateContactsEnabled: contactsEnabled && !!inboxBridgeSecret() && !!inboxBridgeEndpoint('INBOX_CONTACTS_BRIDGE_URL'),
       privateFilesEnabled: filesEnabled && !!inboxBridgeSecret() && !!inboxBridgeEndpoint('INBOX_FILES_BRIDGE_URL'),
+      privateMailEnabled: session?.mailMode === 'pds' && !!session.did && !!inboxBridgeSecret() && !!inboxBridgeEndpoint('INBOX_MAIL_BRIDGE_URL'),
       contactsEnabled,
       filesEnabled,
       appsEnabled,

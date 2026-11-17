@@ -1859,9 +1859,10 @@ export function EmailComposer({
   // Auto-focus the To field when composing a new email or forwarding
   useEffect(() => {
     if (mode === 'forward' || mode === 'compose') {
-      // Small delay to ensure the input is rendered
+      // Do not replace focus the user moved while the input was rendering.
+      const initialFocus = document.activeElement;
       const timer = setTimeout(() => {
-        toInputRef.current?.focus();
+        if (document.activeElement === initialFocus) toInputRef.current?.focus();
       }, 100);
       return () => clearTimeout(timer);
     }

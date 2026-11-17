@@ -270,7 +270,7 @@ export async function GET(request: NextRequest) {
     const age = await checkSessionAge(cookieStore, slot, credentials);
     if ('maxHours' in age) return sessionTooOld(age.maxHours);
 
-    setStalwartAuthContextInStore(cookieStore, slot, {
+    if (credentials.mailMode !== 'pds') setStalwartAuthContextInStore(cookieStore, slot, {
       serverUrl: credentials.serverUrl,
       username: credentials.username,
       authHeader: sessionAuthHeader(credentials),
@@ -324,7 +324,7 @@ export async function PUT(request: NextRequest) {
     const age = await checkSessionAge(cookieStore, slot, credentials);
     if ('maxHours' in age) return sessionTooOld(age.maxHours);
 
-    setStalwartAuthContextInStore(cookieStore, slot, {
+    if (credentials.mailMode !== 'pds') setStalwartAuthContextInStore(cookieStore, slot, {
       serverUrl: credentials.serverUrl,
       username: credentials.username,
       authHeader: sessionAuthHeader(credentials),
@@ -337,7 +337,7 @@ export async function PUT(request: NextRequest) {
           resolved.serverUrl,
           resolved.username,
           resolved.token !== undefined ? { token: resolved.token } : resolved.password,
-          { signedInAt: age.signedInAt, did: resolved.did, groupwareEnabled: resolved.groupwareEnabled, buildersEnabled: resolved.buildersEnabled, credentialId: resolved.credentialId },
+          { signedInAt: age.signedInAt, did: resolved.did, groupwareEnabled: resolved.groupwareEnabled, buildersEnabled: resolved.buildersEnabled, credentialId: resolved.credentialId, mailMode: resolved.mailMode },
         );
         cookieStore.set(cookieName, reissued, sessionCookieOptions());
       } catch {

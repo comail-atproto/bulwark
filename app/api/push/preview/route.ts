@@ -1,7 +1,7 @@
 import { cookies } from 'next/headers';
 import { NextRequest, NextResponse } from 'next/server';
 import { logger } from '@/lib/logger';
-import { cleanPreview } from '@/lib/utils';
+import { cleanPreview } from '@/lib/preview-text';
 import { MAX_ACCOUNT_SLOTS } from '@/lib/account-utils';
 import { readStalwartAuthContextFromStore } from '@/lib/stalwart/auth-context';
 import {

@@ -50,6 +50,9 @@ type ScheduledSubmissionMetadata = {
   undoStatus: 'pending' | 'final' | 'canceled';
   /** Owning JMAP account when the submission lives in a shared account. */
   accountId?: string;
+  privateSendPending?: boolean;
+  privateSendUncertain?: boolean;
+  deliveryStatus?: ScheduledEmail['scheduledDeliveryStatus'];
 };
 
 const VIRTUAL_SCHEDULED_MAILBOX_ID = '__scheduled__';
@@ -771,6 +774,9 @@ function scheduledSubmissionMap(client: IJMAPClient, emails: ScheduledEmail[]): 
     identityId: email.scheduledIdentityId,
     undoStatus: email.scheduledUndoStatus,
     accountId: email.scheduledAccountId,
+    privateSendPending: email.privateSendPending,
+    privateSendUncertain: email.privateSendUncertain,
+    deliveryStatus: email.scheduledDeliveryStatus,
   }]));
 }
 
@@ -790,6 +796,9 @@ export function annotateScheduledEmail(
       delete copy.scheduledIdentityId;
       delete copy.scheduledUndoStatus;
       delete copy.scheduledAccountId;
+      delete copy.privateSendPending;
+      delete copy.privateSendUncertain;
+      delete copy.scheduledDeliveryStatus;
       return copy;
     }
     return email;
@@ -801,6 +810,9 @@ export function annotateScheduledEmail(
     scheduledIdentityId: scheduled.identityId,
     scheduledUndoStatus: scheduled.undoStatus,
     scheduledAccountId: scheduled.accountId,
+    privateSendPending: scheduled.privateSendPending,
+    privateSendUncertain: scheduled.privateSendUncertain,
+    scheduledDeliveryStatus: scheduled.deliveryStatus,
     isScheduled: true,
   };
 }
@@ -1642,6 +1654,14 @@ function captureEmailListView(): () => boolean {
 export function captureViewToken(): () => boolean {
   const token = useEmailStore.getState().viewToken;
   return () => useEmailStore.getState().viewToken === token;
+}
+
+function captureScheduledRequest(): () => boolean {
+  const { activeAccountId, client } = useAuthStore.getState();
+  const epoch = currentStoreEpoch();
+  return () => currentStoreEpoch() === epoch
+    && useAuthStore.getState().activeAccountId === activeAccountId
+    && useAuthStore.getState().client === client;
 }
 
 /**
@@ -8103,11 +8123,13 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
   clearPendingUndoSend: () => set({ pendingUndoSend: null }),
 
   fetchScheduledEmails: async (client) => {
+    const isCurrent = captureScheduledRequest();
     set({ isLoadingScheduled: true, error: null });
     try {
       const emailsPerPage = useSettingsStore.getState().emailsPerPage;
       const result = await client.getScheduledEmails(emailsPerPage, 0);
       result.emails = await emailHooks.onEmailsFetched.transform(result.emails);
+      if (!isCurrent()) return;
       const scheduledEmailIds = new Set(result.emails.map(email => email.id));
       const scheduledSubmissionByEmailId = scheduledSubmissionMap(client, result.emails);
       const pendingUndoSend = get().pendingUndoSend;
@@ -8124,6 +8146,7 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
         pendingUndoSend: shouldClearPendingUndoSend(pendingUndoSend, result.emails) ? null : pendingUndoSend,
       });
     } catch (error) {
+      if (!isCurrent()) return;
       console.error('Failed to fetch scheduled emails:', error);
       set({
         error: error instanceof Error ? error.message : 'Failed to fetch scheduled emails',
@@ -8139,6 +8162,7 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
   },
 
   loadMoreScheduledEmails: async (client) => {
+    const isCurrent = captureScheduledRequest();
     const { isLoadingScheduled, scheduledHasMore, scheduledEmails, scheduledNextPosition } = get();
     if (isLoadingScheduled || !scheduledHasMore) return;
     set({ isLoadingScheduled: true, error: null });
@@ -8146,6 +8170,7 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
       const emailsPerPage = useSettingsStore.getState().emailsPerPage;
       const result = await client.getScheduledEmails(emailsPerPage, scheduledNextPosition);
       result.emails = await emailHooks.onEmailsFetched.transform(result.emails);
+      if (!isCurrent()) return;
       const merged = [...scheduledEmails, ...result.emails.filter(email => !scheduledEmails.some(existing => isSameScheduledSend(existing, email)))];
       const pendingUndoSend = get().pendingUndoSend;
       set({
@@ -8160,11 +8185,13 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
         pendingUndoSend: shouldClearPendingUndoSend(pendingUndoSend, merged) ? null : pendingUndoSend,
       });
     } catch (error) {
+      if (!isCurrent()) return;
       set({ error: error instanceof Error ? error.message : 'Failed to load scheduled emails', isLoadingScheduled: false });
     }
   },
 
   refreshScheduledMetadata: async (client) => {
+    const isCurrent = captureScheduledRequest();
     // This runs at startup, after scheduled sends and undo, and whenever
     // EmailSubmission state changes - the moments submission records pile up
     // or turn prunable. The client throttles the prune per account; the list
@@ -8179,6 +8206,7 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
       let totalByAccount: Record<string, number> = {};
       while (hasMore) {
         const page = await client.getScheduledEmails(emailsPerPage, position);
+        if (!isCurrent()) return;
         allEmails.push(...page.emails.filter(email => !allEmails.some(existing => isSameScheduledSend(existing, email))));
         total = page.total;
         totalByAccount = page.totalByAccount ?? totalByAccount;
@@ -8202,6 +8230,7 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
         pendingUndoSend: shouldClearPendingUndoSend(pendingUndoSend, allEmails) ? null : pendingUndoSend,
       });
     } catch (error) {
+      if (!isCurrent()) return;
       console.error('Failed to refresh scheduled metadata:', error);
     }
   },

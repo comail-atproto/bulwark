@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import { JMAPClient } from '@/lib/jmap/client';
+import { createComailClient } from '@/lib/jmap/comail-client';
 import { SpaceFileAdapter, SpaceFileError } from '@/lib/jmap/space-file-adapter';
 import { useFileStore } from '@/stores/file-store';
 
 function setup() {
-  const client = new JMAPClient('https://mail.test', 'alice@example.test', 'synthetic');
+  const client = createComailClient('https://mail.test', 'alice@example.test', 'synthetic');
   Object.assign(client, { accountId: 'account-1', accounts: {}, session: { primaryAccounts: {} } });
   const adapter = (client as unknown as { spaceFileAdapter: SpaceFileAdapter }).spaceFileAdapter;
   const jmap = vi.spyOn(client as unknown as { request: () => Promise<unknown> }, 'request').mockRejectedValue(new Error('unexpected Stalwart request'));

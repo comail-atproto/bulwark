@@ -416,9 +416,11 @@ export class SpaceCalendarAdapter {
       try {
         response = await this.fetcher(route, options);
       } catch {
+        if (this.getCookieSlot() !== slot) throw new SpaceCalendarError('Calendar account changed', 'account_changed', 403);
         if (retryableCommand && attempt === 0) continue;
         throw new SpaceCalendarError('Space calendar command result is unavailable', 'provider_unavailable', 502);
       }
+      if (this.getCookieSlot() !== slot) throw new SpaceCalendarError('Calendar account changed', 'account_changed', 403);
       if (retryableCommand && attempt === 0 && (response.status === 502 || response.status === 503)) {
         await response.body?.cancel().catch(() => undefined);
         response = undefined;
@@ -432,8 +434,10 @@ export class SpaceCalendarAdapter {
       const value: unknown = await response.json();
       if (typeof value === 'object' && value !== null) body = value as Record<string, unknown>;
     } catch {
+      if (this.getCookieSlot() !== slot) throw new SpaceCalendarError('Calendar account changed', 'account_changed', 403);
       if (response.ok) throw new SpaceCalendarError('Invalid Space calendar response', 'invalid_response', response.status);
     }
+    if (this.getCookieSlot() !== slot) throw new SpaceCalendarError('Calendar account changed', 'account_changed', 403);
     if (!response.ok) {
       const code = typeof body.error === 'string' ? body.error : 'provider_error';
       if (allowAuthorizationStart && response.status === 409 && code === 'authorization_required') {

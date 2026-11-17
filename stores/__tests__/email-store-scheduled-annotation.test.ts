@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { useEmailStore, annotateScheduledEmail, annotateScheduledEmails } from '../email-store';
 import type { Email } from '@/lib/jmap/types';
+import { useAuthStore } from '../auth-store';
+import type { IJMAPClient } from '@/lib/jmap/client-interface';
 
 function makeEmail(id: string, threadId = `thread-${id}`): Email {
   return {
@@ -24,6 +26,24 @@ function makeEmail(id: string, threadId = `thread-${id}`): Email {
 }
 
 describe('scheduled email annotation in email-store', () => {
+  it('does not replace account B scheduled mail with a late account A response', async () => {
+    let finishA!: (value: unknown) => void;
+    const clientA = { getAccountId: () => 'a', getScheduledEmails: vi.fn(() => new Promise(resolve => { finishA = resolve; })) } as unknown as IJMAPClient;
+    const clientB = { getAccountId: () => 'b', getScheduledEmails: vi.fn().mockResolvedValue({ emails: [{ ...makeEmail('b'), emailSubmissionId: 'b-sub' }], total: 1, hasMore: false, nextPosition: 1 }) } as unknown as IJMAPClient;
+    const originalAccount = useAuthStore.getState().activeAccountId;
+    const originalClient = useAuthStore.getState().client;
+    try {
+      useAuthStore.setState({ activeAccountId: 'a', client: clientA });
+      const oldFetch = useEmailStore.getState().fetchScheduledEmails(clientA);
+      useAuthStore.setState({ activeAccountId: 'b', client: clientB });
+      await useEmailStore.getState().fetchScheduledEmails(clientB);
+      finishA({ emails: [{ ...makeEmail('a'), emailSubmissionId: 'a-sub' }], total: 1, hasMore: false, nextPosition: 1 });
+      await oldFetch;
+      expect(useEmailStore.getState().scheduledEmails.map(email => email.id)).toEqual(['b']);
+    } finally {
+      useAuthStore.setState({ activeAccountId: originalAccount, client: originalClient });
+    }
+  });
   // Keyed like the store's map: login, account, then the message id.
   const metadataMap = new Map([
     ['login-1|acc-1|email-scheduled', {
@@ -32,6 +52,9 @@ describe('scheduled email annotation in email-store', () => {
       identityId: 'id-1',
       undoStatus: 'pending' as const,
       accountId: 'acc-1',
+      privateSendPending: true,
+      privateSendUncertain: true,
+      deliveryStatus: { 'to@example.test': { delivered: 'unknown' as const, displayed: 'unknown' as const, smtpReply: 'ambiguous' } },
     }],
   ]);
 
@@ -48,6 +71,9 @@ describe('scheduled email annotation in email-store', () => {
   it('annotates email with scheduled properties when present in scheduledSubmissionByEmailId', () => {
     const email = makeEmail('email-scheduled');
     const annotated = annotateScheduledEmail(email, metadataMap);
+    expect(annotated.privateSendPending).toBe(true);
+    expect(annotated.privateSendUncertain).toBe(true);
+    expect(annotated.scheduledDeliveryStatus?.['to@example.test']?.smtpReply).toBe('ambiguous');
 
     expect(annotated.isScheduled).toBe(true);
     expect(annotated.scheduledSendAt).toBe('2026-10-30T10:00:00Z');
@@ -70,12 +96,16 @@ describe('scheduled email annotation in email-store', () => {
       isScheduled: true,
       scheduledSendAt: '2026-10-30T10:00:00Z',
       emailSubmissionId: 'sub-old',
+      privateSendPending: true,
+      privateSendUncertain: true,
     };
     const cleaned = annotateScheduledEmail(previouslyScheduled, new Map());
 
     expect(cleaned.isScheduled).toBeUndefined();
     expect(cleaned.scheduledSendAt).toBeUndefined();
     expect(cleaned.emailSubmissionId).toBeUndefined();
+    expect(cleaned.privateSendPending).toBeUndefined();
+    expect(cleaned.privateSendUncertain).toBeUndefined();
   });
 
   it('annotates a list of emails in annotateScheduledEmails', () => {

@@ -1047,7 +1047,7 @@ async function doAddressBookCreate(name: string): Promise<AddressBook> {
 
 // ─── Crypto (privileged tier) ─────────────────────────────────────────────
 
-type PRFResult =
+type PRFResult = 
   | { success: true; credentialId: number[]; prfSecret: number[] }
   | { success: false; reason: 'NEEDS_USER_ACTION'; credentialId: number[] }
   | { success: false; reason: string };
@@ -1092,7 +1092,7 @@ async function doGetPRF(
  */
 async function doCreatePRF(
     pluginId: string,
-    name: string,
+    name: string, 
     displayName: string,
 ): Promise<PRFResult> {
   const PRF_SALT = new TextEncoder().encode("bulwark-plugins-v1" + pluginId);
@@ -1116,8 +1116,8 @@ async function doCreatePRF(
           residentKey: "preferred",
           userVerification: "required"
         },
-        extensions: {
-          prf: { eval: { first: PRF_SALT } }
+        extensions: { 
+          prf: { eval: { first: PRF_SALT } } 
         }
       }
     }) as PublicKeyCredential;
@@ -1258,7 +1258,7 @@ export async function doGetPublicKeyFromWKD(email: string): Promise<WkdResult> {
   if (!wkdAllowed()) return { status: 'ERROR', error: 'Key lookups at other domains are off on this server' };
   const cleanEmail = email.trim();
   const atIndex = cleanEmail.lastIndexOf('@');
-
+  
   if (atIndex <= 0 || atIndex === cleanEmail.length - 1) {
     return { status: 'ERROR', error: 'Invalid email address' };
   }
@@ -1297,7 +1297,7 @@ export async function doGetPublicKeyFromWKD(email: string): Promise<WkdResult> {
         // Size limitation protection (e.g., max 2 MB)
         const contentLength = response.headers.get('content-length');
         if (contentLength && parseInt(contentLength, 10) > 2 * 1024 * 1024) {
-          continue;
+          continue; 
         }
 
         const buffer = await response.arrayBuffer();
@@ -2024,8 +2024,9 @@ export async function dispatchApiCall(
   args: unknown[],
   opts?: { privileged?: boolean; sink?: StreamSink; toastSignal?: AbortSignal; frame?: 'background' | 'slot' },
 ): Promise<unknown> {
-  // Raw message and staged-attachment mutation APIs are only available to
-  // same-origin privileged plugins, even when the manifest has permission.
+  // Tier gate: privileged-only methods are refused for untrusted (null-origin)
+  // instances even if the permission is somehow present. Defence-in-depth on
+  // top of the load-time tier resolution.
   if (PRIVILEGED_ONLY_METHODS.has(method) && !opts?.privileged) {
     throw new Error(`Method "${method}" requires the privileged plugin tier`);
   }
@@ -2159,7 +2160,7 @@ export async function dispatchApiCall(
     case 'contact.search': return doContactSearch(args[0] as string);
     case 'contact.list': return doContactList(args[0] as string | undefined);
     case 'contact.delete': return doContactDelete(args[0] as string);
-
+    
     case 'addressbook.list': return doAddressBookList();
     case 'addressbook.create': return doAddressBookCreate(args[0] as string);
 

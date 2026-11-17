@@ -20,7 +20,8 @@ vi.mock('@/hooks/use-media-query', () => ({
   useMediaQuery: () => false,
   useDeviceDetection: () => ({ isMobile: false, isTablet: false, isDesktop: true }),
 }));
-vi.mock('@/hooks/use-config', () => ({ useConfig: () => ({ appName: 'Mail', stalwartFeaturesEnabled: true }) }));
+const config = vi.hoisted(() => ({ appName: 'Mail', stalwartFeaturesEnabled: true, passwordSecurityEnabled: true }));
+vi.mock('@/hooks/use-config', () => ({ useConfig: () => config }));
 vi.mock('@/components/layout/navigation-rail', () => ({ NavigationRail: () => null }));
 vi.mock('@/components/layout/sidebar-apps-modal', () => ({ SidebarAppsModal: () => null }));
 vi.mock('@/components/plugins/app-top-banner-slot', () => ({ AppTopBannerSlot: () => null }));
@@ -41,6 +42,7 @@ function Probe() {
 }
 
 beforeEach(() => {
+  config.passwordSecurityEnabled = true;
   vi.useFakeTimers({ shouldAdvanceTime: true });
   vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('Unexpected network request')));
   // A server with Sieve and vacation, so Filters and Out of office are pages.
@@ -98,6 +100,15 @@ describe('Settings commands in the palette', () => {
     expect(find('out of office').map((c) => c.id)).toContain('go-vacation');
     expect(find('app password').map((c) => c.id)).toContain('go-security');
     expect(find('add rule').map((c) => c.id)).toContain('go-filters');
+  });
+
+  it('does not offer password security when it is disabled', async () => {
+    config.passwordSecurityEnabled = false;
+    render(<><SettingsApp linkSegments={[]} /><Probe /></>);
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(settingsCommands().map((c) => c.id)).not.toContain('go-security');
+    expect(find('app password').map((c) => c.id)).not.toContain('go-security');
+    expect(settingsCommands().map((c) => c.id)).toContain('go-account');
   });
 
   it('opens the page it names', async () => {

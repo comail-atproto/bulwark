@@ -1,3 +1,4 @@
+import { MAIL_PROTOCOL_VERSION } from '@/lib/space-mail/wire';
 import { inboxBridgeEndpoint, inboxBridgeSecret } from '@/lib/auth/inbox-config';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 
@@ -19,6 +20,7 @@ export interface RelaySsoCredential {
   credentialId?: string;
   groupwareEnabled: boolean;
   buildersEnabled: boolean;
+  mailMode?: 'pds';
 }
 
 function b64url(input: string): string {
@@ -112,7 +114,8 @@ function parseCredential(value: unknown): RelaySsoCredential {
     hasAsciiControl(appPassword) ||
     (raw.credential_id !== undefined && (typeof raw.credential_id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(raw.credential_id))) ||
     typeof raw.groupware_enabled !== 'boolean' ||
-    typeof raw.builders_enabled !== 'boolean'
+    typeof raw.builders_enabled !== 'boolean' ||
+    (raw.mail_mode !== undefined && raw.mail_mode !== 'pds')
   ) {
     throw new Error('Invalid relay redemption response');
   }
@@ -123,11 +126,12 @@ function parseCredential(value: unknown): RelaySsoCredential {
     ...(typeof raw.credential_id === 'string' ? { credentialId: raw.credential_id } : {}),
     groupwareEnabled: raw.groupware_enabled,
     buildersEnabled: raw.builders_enabled,
+    ...(raw.mail_mode === 'pds' ? { mailMode: 'pds' as const } : {}),
   };
 }
 
 export class RelayRedemptionStatusError extends Error {
-  constructor(readonly status: number, readonly credentialCapacity = false) {
+  constructor(readonly status: number, readonly credentialCapacity = false, readonly clientUpdateRequired = false) {
     super('Relay SSO code redemption failed');
   }
 }
@@ -146,12 +150,14 @@ export async function redeemRelaySsoCode(
       Authorization: `Bearer ${authorization}`,
       'Content-Type': 'application/json',
       'Cache-Control': 'no-store',
+      'X-Comail-Mail-Protocol': MAIL_PROTOCOL_VERSION,
     },
     body: JSON.stringify({ code }),
     signal: AbortSignal.timeout(5000),
   });
   if (!response.ok) {
     let credentialCapacity = false;
+    let clientUpdateRequired = false;
     if (response.status === 429) {
       try {
         credentialCapacity = (await readBoundedUtf8Body(response.body, 128)).trim() === 'credential capacity reached';
@@ -159,7 +165,16 @@ export async function redeemRelaySsoCode(
         // Oversized or unreadable errors retain the generic failure response.
       }
     }
-    throw new RelayRedemptionStatusError(response.status, credentialCapacity);
+    if (response.status === 403) {
+      try {
+        const error: unknown = JSON.parse(await readBoundedUtf8Body(response.body, MAX_RESPONSE_BYTES));
+        clientUpdateRequired = !!error && typeof error === 'object' &&
+          'error' in error && error.error === 'client_update_required';
+      } catch {
+        // Oversized or unreadable errors retain the generic failure response.
+      }
+    }
+    throw new RelayRedemptionStatusError(response.status, credentialCapacity, clientUpdateRequired);
   }
   const contentType = response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase();
   const declaredLength = Number(response.headers.get('content-length'));

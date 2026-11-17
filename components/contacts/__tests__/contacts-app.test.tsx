@@ -12,6 +12,7 @@ vi.mock('next/navigation', () => ({
   usePathname: () => '/en/contacts',
   useSearchParams: () => new URLSearchParams(),
 }));
+vi.mock('@/hooks/use-config', () => ({ useConfig: () => ({ contactsEnabled: true, isLoading: false }) }));
 vi.mock('@/components/contacts/contact-activity', () => ({ ContactActivity: () => null }));
 vi.mock('@/components/layout/navigation-rail', () => ({ NavigationRail: () => <nav data-testid="rail" /> }));
 vi.mock('@/components/layout/sidebar-apps-modal', () => ({ SidebarAppsModal: () => null }));

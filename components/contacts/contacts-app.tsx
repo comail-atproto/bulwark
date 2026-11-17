@@ -103,7 +103,7 @@ function ContactsAppContent({ linkSegments: routeSegments }: ContactsAppProps = 
   useDocumentTitle(tSidebar("contacts"));
   const { contactsEnabled: contactsConfigEnabled, isLoading: configLoading } = useConfig();
   const contactsPolicyEnabled = usePolicyStore((s) => s.isFeatureEnabled('contactsEnabled'));
-  const contactsEnabled = contactsConfigEnabled && contactsPolicyEnabled;
+  const contactsEnabled = contactsConfigEnabled === true && contactsPolicyEnabled;
   const { client, isAuthenticated, logout, checkAuth, isLoading: authLoading } = useAuthStore();
   const { showAppsModal, inlineApp, loadedApps, handleManageApps, handleInlineApp, closeInlineApp, closeAppsModal } = useSidebarApps();
   const [initialCheckDone, setInitialCheckDone] = useState(() => useAuthStore.getState().isAuthenticated && !!useAuthStore.getState().client);

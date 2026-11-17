@@ -2,7 +2,7 @@ import { createElement, type ComponentProps } from 'react';
 import { act, render, screen } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { NavigationRail } from '../navigation-rail';
-import { JMAPClient } from '@/lib/jmap/client';
+import { createComailClient } from '@/lib/jmap/comail-client';
 import { jmapSession } from '@/lib/__tests__/fixtures/jmap-session';
 import { useAccountStore } from '@/stores/account-store';
 import { useAuthStore } from '@/stores/auth-store';
@@ -35,7 +35,7 @@ it('shows the PDS Files link without opening Files and hides it when its account
   const slot = useAccountStore.getState().getAccountById(id)!.cookieSlot;
   const fetcher = vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({}));
   fetcher.mockResolvedValueOnce(Response.json(jmapSession({ accountCapabilities: { 'urn:ietf:params:jmap:mail': {} } })));
-  const client = new JMAPClient(serverUrl, username, 'synthetic');
+  const client = createComailClient(serverUrl, username, 'synthetic');
   await client.connect();
   useAuthStore.setState({ client });
   const view = render(<NavigationRail collapsed={false} />);

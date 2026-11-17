@@ -70,6 +70,9 @@
         "sign_in": "Return to sign-in",
         "title": "You're on the waitlist.",
         "try_again": "We couldn't check or update your waitlist signup. Please try again."
+      },
+      "error": {
+        "client_update_required": "Update Comail to access your PDS mailbox."
       }
     },
     "settings": {

@@ -7,6 +7,10 @@ vi.mock('@/lib/auth/session-secret', () => ({
 }));
 
 describe('Comail authenticated session claims', () => {
+  it('keeps the Inbox PDS mail mode inside the encrypted session', () => {
+    const token = encryptSession('https://mail.example.com', 'alice@example.test', 'secret', { did: 'did:plc:abc123', mailMode: 'pds' });
+    expect(decryptSession(token)).toMatchObject({ did: 'did:plc:abc123', mailMode: 'pds' });
+  });
   it('round-trips token credentials with the account identity and feature flags', () => {
     const token = encryptSession('https://mail.example.com', 'alice', { token: 'access-token' }, {
       did: 'did:web:alice.example', groupwareEnabled: false, buildersEnabled: true, signedInAt: 12345,

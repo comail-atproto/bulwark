@@ -3,6 +3,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EventModal } from '../event-modal';
 import type { Calendar, CalendarEvent } from '@/lib/jmap/types';
 import { useSettingsStore } from '@/stores/settings-store';
+import { prepareSpaceEventUpdate } from '@/lib/space-calendar/store-events';
+import { createRecurrenceRule } from '@/lib/recurrence-rule';
+import { SPACE_PERSONAL_EVENT_FIELDS } from '@/lib/jmap/space-calendar-adapter';
 
 const calendars = [{
   id: 'space:calendar', name: 'Shared calendar', source: 'atproto-space',
@@ -39,6 +42,8 @@ describe('existing event editor with Space participants', () => {
 
 
 describe('private reminders in the existing event editor', () => {
+  const originalTimeZone = useSettingsStore.getState().timeZone;
+  afterEach(() => useSettingsStore.setState({ timeZone: originalTimeZone }));
   const privateEvent = {
     id: 'space-event:event', source: 'atproto-space', spaceOwnerDid: 'did:plc:owner', title: 'Shared event', description: '',
     start: '2026-10-08T12:00:00', timeZone: 'UTC', duration: 'PT1H', showWithoutTime: false,
@@ -63,6 +68,24 @@ describe('private reminders in the existing event editor', () => {
       action: 'display', acknowledged: null, relatedTo: null,
     } }, useDefaultAlerts: false });
     expect(onSave.mock.calls[0][1]).toBe(false);
+  });
+
+  it('does not turn an unchanged counted recurrence into a shared edit when an owner adds a reminder', async () => {
+    useSettingsStore.setState({ timeZone: 'UTC' });
+    const recurring: CalendarEvent = { ...privateEvent, start: '2026-10-08T12:00:00', utcStart: '2026-10-08T12:00:00.000Z',
+      recurrenceRules: [createRecurrenceRule('weekly', { count: 12 })], recurrenceId: '2026-10-08T12:00:00',
+      status: 'confirmed', freeBusyStatus: 'busy', useDefaultAlerts: false, descriptionContentType: 'text/plain' };
+    const ownerCalendar = { ...calendars[0], myRights: { ...calendars[0].myRights, mayUpdatePrivate: true } };
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<EventModal event={recurring} calendars={[ownerCalendar]} onSave={onSave} onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'events.edit' }));
+    fireEvent.click(screen.getByRole('button', { name: 'alerts.add' }));
+    fireEvent.click(screen.getByRole('button', { name: 'form.save' }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    const patch = { ...onSave.mock.calls[0][0] };
+    prepareSpaceEventUpdate(recurring, patch, [ownerCalendar]);
+    expect(Object.keys(patch).every((key) => SPACE_PERSONAL_EVENT_FIELDS.has(key))).toBe(true);
+    expect(patch).toHaveProperty('alerts');
   });
 
   it('stops a pending private save when live rights are revoked', () => {

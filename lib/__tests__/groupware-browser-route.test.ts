@@ -32,13 +32,13 @@ describe('Groupware browser gate', () => {
     const bundle = await build({
       stdin: {
         resolveDir: process.cwd(), loader: 'ts', contents: `
-          import { JMAPClient } from './lib/jmap/client';
+          import { createComailClient } from './lib/jmap/comail-client';
           import { useAccountStore } from './stores/account-store';
           window.proof = async () => {
             const origin = location.origin;
             const id = useAccountStore.getState().addAccount({ username: 'owner@example.test', serverUrl: origin, label: 'Owner', authMode: 'basic', rememberMe: true, displayName: 'Owner', email: 'owner@example.test', lastLoginAt: 0, isConnected: true, hasError: false, isDefault: true });
             useAccountStore.getState().updateAccount(id, { cookieSlot: 2 });
-            const client = new JMAPClient(origin, 'owner@example.test', 'synthetic');
+            const client = createComailClient(origin, 'owner@example.test', 'synthetic');
             try {
               await client.connect();
               const allowed = await client.getAddressBooks({ throwOnError: true });

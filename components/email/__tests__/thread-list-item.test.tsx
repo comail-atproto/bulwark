@@ -92,6 +92,12 @@ describe('ThreadListItem tag badge', () => {
     });
   });
 
+  it('labels an uncertain immediate send without showing a false schedule time', () => {
+    renderRow(makeEmail({ isScheduled: true, scheduledSendAt: new Date().toISOString(),
+      privateSendPending: true, privateSendUncertain: true }));
+    expect(screen.getByText('Delivery outcome uncertain')).toBeInTheDocument();
+  });
+
   it('shows a tag badge for a $label: keyword', () => {
     renderRow(makeEmail({ keywords: { $seen: true, '$label:red': true } }));
 

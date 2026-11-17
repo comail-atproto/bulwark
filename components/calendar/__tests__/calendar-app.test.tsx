@@ -28,7 +28,7 @@ vi.mock('@/hooks/use-refresh-gesture', () => ({ useRefreshGesture: () => ({ indi
 vi.mock('@/hooks/use-calendar-push-refresh', () => ({ useCalendarPushRefresh: () => {} }));
 vi.mock('@/hooks/use-account-principal-emails', () => ({ useAccountPrincipalEmails: () => [] }));
 vi.mock('../participant-availability', () => ({ ParticipantAvailability: () => null }));
-const config = vi.hoisted(() => ({ demoMode: false }));
+const config = vi.hoisted(() => ({ demoMode: false, calendarEnabled: true, isLoading: false }));
 vi.mock('@/hooks/use-config', () => ({ useConfig: () => config }));
 const lite = vi.hoisted(() => ({ on: false }));
 vi.mock('@/lib/lite', async (importOriginal) => ({

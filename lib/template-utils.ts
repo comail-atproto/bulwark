@@ -1,4 +1,4 @@
-import { escapeHtml, sanitizeEmailHtml } from './email-sanitization';
+import { escapeHtml, sanitizeComposerIslandHtml, sanitizeEmailHtml } from './email-sanitization';
 import type { EmailTemplate } from './template-types';
 import { BUILT_IN_PLACEHOLDERS } from './template-types';
 import { generateUUID } from './utils';
@@ -99,9 +99,10 @@ const SIGNATURE_END_SELECTOR = '[data-signature-block="end"]';
 // message content, so splice the template above the signature range instead
 // of overwriting the whole body.
 export function spliceTemplateAboveSignature(prevHtml: string, templateHtml: string): string {
-  const doc = new DOMParser().parseFromString(prevHtml, 'text/html');
+  const template = sanitizeComposerIslandHtml(templateHtml);
+  const doc = new DOMParser().parseFromString(sanitizeComposerIslandHtml(prevHtml), 'text/html');
   const startEl = doc.querySelector(SIGNATURE_START_SELECTOR);
-  if (!startEl) return templateHtml;
+  if (!startEl) return template;
   const endEl = doc.querySelector(SIGNATURE_END_SELECTOR);
   const host = doc.createElement('div');
   let cursor: Node | null = startEl;
@@ -110,7 +111,7 @@ export function spliceTemplateAboveSignature(prevHtml: string, templateHtml: str
     if (cursor === endEl) break;
     cursor = cursor.nextSibling;
   }
-  return templateHtml + host.innerHTML;
+  return template + host.innerHTML;
 }
 
 /**

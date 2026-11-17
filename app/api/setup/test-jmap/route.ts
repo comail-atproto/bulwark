@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { detectSetupState } from '@/lib/setup/state';
 import { wizardSessionRefusal } from '@/lib/setup/session';
 import { trimTrailingSlashes } from '@/lib/url-normalization';
+import { configManager } from '@/lib/admin/config-manager';
 
 export const dynamic = 'force-dynamic';
 
@@ -68,9 +69,18 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'url required' }, { status: 400 });
   }
 
+  await configManager.ensureLoaded();
+  const selected = configManager.get<string>('jmapServerUrl', '').trim();
+  if (!selected) {
+    return NextResponse.json({ status: 'invalid_url', message: 'Select a server before testing the connection' }, { status: 400 });
+  }
+  if (raw !== selected) {
+    return NextResponse.json({ status: 'invalid_url', message: 'The selected server changed. Select the address again before testing.' }, { status: 409 });
+  }
+
   let parsed: URL;
   try {
-    parsed = new URL(raw);
+    parsed = new URL(selected);
   } catch {
     return NextResponse.json({ status: 'invalid_url', message: 'URL is not well-formed' });
   }
@@ -81,7 +91,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ status: 'invalid_url', message: 'URL must not contain credentials, a query or a fragment' });
   }
 
-  const base = trimTrailingSlashes(raw);
+  const base = trimTrailingSlashes(selected);
 
   for (const endpoint of JMAP_ENDPOINTS) {
     const target = base + endpoint;

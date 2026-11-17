@@ -66,10 +66,5 @@ export const SERVER_STATE_ALLOWLIST: AllowedState[] = [
   { site: 'lib/theme-color-meta.ts#scheduled', class: 'per-process', why: 'browser-side module reached through a shared import' },
   { site: 'lib/third-party-mode.ts#state', class: 'per-process', why: 'browser-side state; the server only uses its parse helpers' },
   { site: 'lib/third-party-mode.ts#listeners', class: 'per-process', why: 'browser-side state; the server only uses its parse helpers' },
-  { site: 'lib/timezone.ts#browserTimeZone', class: 'per-process', why: 'browser-side value' },
-  { site: 'lib/timezone.ts#validityCache', class: 'cache', why: 'time zone name checks, immutable' },
-  { site: 'lib/timezone.ts#canonicalCache', class: 'cache', why: 'canonical time zone names, immutable' },
-  { site: 'lib/timezone.ts#wallClockFormatterCache', class: 'cache', why: 'Intl formatters' },
-  { site: 'lib/utils.ts#dateFormatters', class: 'cache', why: 'Intl formatters' },
   { site: 'lib/wopi/files.ts#blobUrlCache', class: 'cache', why: 'JMAP blob URL templates per server, 5 min' },
 ];

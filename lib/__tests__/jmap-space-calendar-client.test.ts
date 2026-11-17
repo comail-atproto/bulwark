@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
-import { JMAPClient } from '@/lib/jmap/client';
+import { createComailClient } from '@/lib/jmap/comail-client';
 import { SpaceCalendarAdapter, SpaceCalendarError } from '@/lib/jmap/space-calendar-adapter';
 import type { CalendarEvent } from '@/lib/jmap/types';
 import { getUserParticipantId, isOrganizer } from '@/lib/calendar-participants';
 
 function makeClient() {
-  const client = new JMAPClient('https://mail.example.test', 'member@example.test', 'secret');
+  const client = createComailClient('https://mail.example.test', 'member@example.test', 'secret');
   Object.assign(client, {
     accountId: 'acct-1',
     accounts: { 'acct-1': { name: 'Member', isPersonal: true, accountCapabilities: { 'urn:ietf:params:jmap:calendars': {} } } },

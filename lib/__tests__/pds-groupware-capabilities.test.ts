@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { SpaceCalendarAdapter } from '@/lib/jmap/space-calendar-adapter';
 import { AtmoCalendarAdapter } from '@/lib/jmap/atmo-calendar-adapter';
-import { JMAPClient } from '../jmap/client';
+import { createComailClient } from '../jmap/comail-client';
 import { jmapSession } from './fixtures/jmap-session';
 import { useAccountStore } from '@/stores/account-store';
 import { syncVacationBlock } from '@/lib/vacation-calendar';
@@ -20,7 +20,7 @@ it('keeps configured PDS gates authoritative when Stalwart advertises calendars 
   const fetcher = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(Response.json(jmapSession({ accountCapabilities: {
     'urn:ietf:params:jmap:mail': {}, 'urn:ietf:params:jmap:calendars': {}, 'urn:ietf:params:jmap:contacts': {},
   } })));
-  const client = new JMAPClient(serverUrl, username, 'synthetic');
+  const client = createComailClient(serverUrl, username, 'synthetic');
   await client.connect();
   expect(client.supportsCalendars()).toBe(true);
   expect(client.supportsContacts()).toBe(true);
@@ -43,7 +43,7 @@ it('discovers private calendars and contacts without restoring Stalwart permissi
   const slot = useAccountStore.getState().getAccountById(id)!.cookieSlot;
   const session = jmapSession({ accountCapabilities: { 'urn:ietf:params:jmap:mail': {} } });
   vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(Response.json({ ...session, accounts: { ...session.accounts, shared: { name: 'Shared', isPersonal: false, accountCapabilities: { 'urn:ietf:params:jmap:contacts': {}, 'urn:ietf:params:jmap:calendars': {} } } } }));
-  const client = new JMAPClient(serverUrl, username, 'synthetic');
+  const client = createComailClient(serverUrl, username, 'synthetic');
   await client.connect();
   expect(client.supportsCalendars()).toBe(false);
   expect(client.supportsContacts()).toBe(false);
@@ -80,7 +80,7 @@ it('advertises private Files before any inventory probe and binds it to the conf
   const id = useAccountStore.getState().addAccount({ serverUrl, username, label: 'Member', email: username, displayName: 'Member', authMode: 'basic', rememberMe: true, lastLoginAt: 1, isConnected: true, hasError: false, isDefault: true });
   const slot = useAccountStore.getState().getAccountById(id)!.cookieSlot;
   const fetcher = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(Response.json(jmapSession({ accountCapabilities: { 'urn:ietf:params:jmap:mail': {} } })));
-  const client = new JMAPClient(serverUrl, username, 'synthetic');
+  const client = createComailClient(serverUrl, username, 'synthetic');
   await client.connect();
   fetcher.mockClear();
   expect(client.supportsFiles()).toBe(false);

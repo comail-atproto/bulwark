@@ -424,7 +424,7 @@ function EmailCard({
             {email.isScheduled && email.scheduledSendAt ? (
               <span className="text-primary font-medium inline-flex items-center gap-1">
                 <CalendarClock className="w-3.5 h-3.5" />
-                {formatScheduledSendAt(email.scheduledSendAt, timeFormat)}
+                {email.privateSendUncertain ? 'Delivery outcome uncertain' : email.privateSendPending ? 'Waiting for delivery' : formatScheduledSendAt(email.scheduledSendAt, timeFormat)}
               </span>
             ) : (
               formatDate(emailDisplayDate(email))
@@ -452,7 +452,7 @@ function EmailCard({
             <div className="px-4 py-2 bg-primary/10 border-b border-border flex items-center gap-2 text-primary text-xs font-medium">
               <CalendarClock className="w-3.5 h-3.5 shrink-0" />
               <span>
-                {t('email_viewer.scheduled_banner', { date: email.scheduledSendAt ? formatScheduledSendAt(email.scheduledSendAt, timeFormat) : '' })}
+                {email.privateSendUncertain ? 'Delivery outcome uncertain. Check recipient results before sending again.' : email.privateSendPending ? 'Waiting for delivery. The delivery result is not final.' : t('email_viewer.scheduled_banner', { date: email.scheduledSendAt ? formatScheduledSendAt(email.scheduledSendAt, timeFormat) : '' })}
               </span>
             </div>
           )}

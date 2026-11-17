@@ -153,6 +153,7 @@ vi.mock('@/lib/plugin-hooks', () => ({
 vi.mock('@/lib/email-sanitization', () => ({
   sanitizeSignatureHtml: (v: string) => v,
   sanitizeEmailHtml: (v: string) => v,
+  sanitizeComposerIslandHtml: (v: string) => v,
   parseHtmlSafely: (html: string) => new DOMParser().parseFromString(html, 'text/html'),
 }));
 

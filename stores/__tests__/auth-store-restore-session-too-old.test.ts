@@ -8,6 +8,7 @@ vi.mock('@/lib/jmap/client', () => {
   class JMAPClient {
     constructor(public serverUrl: string, public username: string, public password: string) {}
     static withBearer(serverUrl: string, _token: string, username: string) { return new JMAPClient(serverUrl, username, ''); }
+    upgradeToBearer() {}
     async connect() {}
     getAuthHeader() { return 'Basic x'; }
     onConnectionChange() {}
@@ -15,11 +16,13 @@ vi.mock('@/lib/jmap/client', () => {
     getRateLimitRemainingMs() { return 0; }
     disconnect() {}
     getUsername() { return this.username; }
+    getServerUrl() { return this.serverUrl; }
     async getIdentities() { return []; }
     supportsContacts() { return false; }
     supportsPrincipals() { return false; }
     supportsVacationResponse() { return false; }
     supportsCalendars() { return false; }
+    supportsFiles() { return false; }
     supportsSieve() { return false; }
     getSharedAccounts() { return []; }
     getAccountInfo() { return undefined; }

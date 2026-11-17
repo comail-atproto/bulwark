@@ -487,7 +487,7 @@ const SingleEmailItem = React.forwardRef<HTMLDivElement, SingleEmailItemProps>(
     const subjectSnippet = email.searchSnippet?.subject ?? null;
     const previewSnippet = showPreview ? (email.searchSnippet?.preview ?? null) : null;
     const scheduledSendLabel = email.isScheduled && email.scheduledSendAt
-      ? formatScheduledSendAt(email.scheduledSendAt, timeFormat)
+      ? email.privateSendUncertain ? 'Delivery outcome uncertain' : email.privateSendPending ? 'Waiting for delivery' : formatScheduledSendAt(email.scheduledSendAt, timeFormat)
       : null;
 
     const tagIds = sortTagIds(getEmailTagIds(email.keywords));
@@ -1079,7 +1079,7 @@ export const ThreadListItem = React.forwardRef<HTMLDivElement, ThreadListItemPro
     const subjectSnippet = threadSnippet?.subject ?? null;
     const previewSnippet = showPreview ? (threadSnippet?.preview ?? null) : null;
     const scheduledSendLabel = latestEmail.isScheduled && latestEmail.scheduledSendAt
-      ? formatScheduledSendAt(latestEmail.scheduledSendAt, timeFormat)
+      ? latestEmail.privateSendUncertain ? 'Delivery outcome uncertain' : latestEmail.privateSendPending ? 'Waiting for delivery' : formatScheduledSendAt(latestEmail.scheduledSendAt, timeFormat)
       : null;
 
     const { selectedMailbox, currentMailboxRole, selectedEmailKeys, toggleEmailSelection, selectRangeEmails, isUnifiedView } = useEmailStore(useShallow((state) => ({

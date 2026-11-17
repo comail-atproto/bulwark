@@ -34,6 +34,7 @@ const configValidators = {
   privateCalendarEnabled: isOptionalBoolean,
   privateContactsEnabled: isOptionalBoolean,
   privateFilesEnabled: isOptionalBoolean,
+  privateMailEnabled: isOptionalBoolean,
   contactsEnabled: isBoolean,
   filesEnabled: isBoolean,
   appsEnabled: isBoolean,

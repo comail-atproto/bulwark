@@ -141,6 +141,7 @@ vi.mock('@/stores/toast-store', () => ({
 vi.mock('@/lib/email-sanitization', () => ({
   sanitizeSignatureHtml: (v: string) => v,
   sanitizeEmailHtml: (v: string) => v,
+  sanitizeComposerIslandHtml: (v: string) => v,
   sanitizeSignatureHtmlForDisplay: (v: string) => v,
   sanitizePluginBodyHtml: (v: string) => v,
   escapeHtml: (v: string) => v,

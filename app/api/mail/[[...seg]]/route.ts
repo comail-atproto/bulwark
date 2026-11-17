@@ -6,12 +6,15 @@ import { sessionCookieName } from '@/lib/auth/session-cookie';
 import { inboxBridgeEndpoint, inboxBrowserOrigin } from '@/lib/auth/inbox-config';
 import { readBoundedUtf8Body } from '@/lib/auth/relay-redemption';
 import { signMailBridgeToken } from '@/lib/space-mail/bridge';
-import { MAX_MAIL_BYTES, isMailState, isSelectedMail } from '@/lib/space-mail/wire';
+import { MAIL_PROTOCOL_VERSION, MAIL_CLIENT_UPDATE_MESSAGE, MAX_MAIL_BYTES, isMailState, isSelectedMail, isMailInventory, isMailFolder, isMailBootstrap, isMailSubmission, isMailSubmissionInventory } from '@/lib/space-mail/wire';
 
 export const dynamic = 'force-dynamic';
 type Params = { params: Promise<{ seg?: string[] }> };
-const ERROR_CODES = new Set(['unauthorized', 'not_found', 'invalid_request', 'conflict', 'mail_unavailable']);
-const json = (status: number, error: string) => NextResponse.json({ error }, { status, headers: { 'Cache-Control': 'no-store' } });
+const ERROR_CODES = new Set(['unauthorized', 'not_found', 'invalid_request', 'conflict', 'mail_unavailable', 'client_update_required']);
+const json = (status: number, error: string) => NextResponse.json(
+  error === 'client_update_required' ? { error: MAIL_CLIENT_UPDATE_MESSAGE, code: error } : { error },
+  { status, headers: { 'Cache-Control': 'no-store' } },
+);
 const isJson = (type: string | null) => type?.split(';', 1)[0].trim().toLowerCase() === 'application/json';
 
 async function proxy(req: NextRequest, params: Params['params']): Promise<NextResponse> {
@@ -21,7 +24,7 @@ async function proxy(req: NextRequest, params: Params['params']): Promise<NextRe
     || fetchSite !== null && fetchSite !== 'same-origin') return json(403, 'forbidden');
   const { seg } = await params;
   const operation = seg?.join('/');
-  if (!operation || !['messages', 'drafts', 'messages/read'].includes(operation)
+  if (!operation || !['bootstrap', 'messages', 'drafts', 'messages/read', 'inventory', 'state', 'folders', 'submissions', 'submissions/status', 'submissions/cancel', 'submissions/inventory'].includes(operation)
     || seg?.some(part => part.includes('/'))) return json(400, 'invalid_request');
   if ([...req.nextUrl.searchParams.keys()].some(key => key !== 'slot')
     || req.nextUrl.searchParams.getAll('slot').length !== 1) return json(400, 'invalid_request');
@@ -33,12 +36,13 @@ async function proxy(req: NextRequest, params: Params['params']): Promise<NextRe
   const cookie = req.cookies.get(sessionCookieName(slot))?.value;
   const session = cookie ? decryptSession(cookie) : null;
   if (!session?.username || !session.did) return json(401, 'unauthorized');
+  if (req.headers.get('X-Comail-Mail-Protocol') !== MAIL_PROTOCOL_VERSION) return json(403, 'client_update_required');
   const base = inboxBridgeEndpoint('INBOX_MAIL_BRIDGE_URL');
   if (!base || !base.endsWith('/webmail/mail/api/v1')) return json(503, 'mail_unavailable');
   const token = signMailBridgeToken(session.username, session.did);
   if (!token) return json(503, 'mail_unavailable');
   if (!isJson(req.headers.get('content-type'))) return json(415, 'invalid_request');
-  const limit = operation !== 'messages/read' ? Math.ceil(MAX_MAIL_BYTES / 3) * 4 + 1024 * 1024 : 1024 * 1024;
+  const limit = ['messages', 'drafts'].includes(operation) ? Math.ceil(MAX_MAIL_BYTES / 3) * 4 + 1024 * 1024 : 1024 * 1024;
   let body: string;
   try { body = await readBoundedUtf8Body(req.body, limit); } catch { return json(413, 'invalid_request'); }
   let input: Record<string, unknown>;
@@ -49,7 +53,7 @@ async function proxy(req: NextRequest, params: Params['params']): Promise<NextRe
   } catch { return json(400, 'invalid_request'); }
   try {
     const response = await fetch(`${base}/${operation}`, {
-      method: 'POST', body, headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Content-Type': 'application/json' },
+      method: 'POST', body, headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Content-Type': 'application/json', 'X-Comail-Mail-Protocol': MAIL_PROTOCOL_VERSION },
       cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(30_000),
     });
     if (!isJson(response.headers.get('content-type'))) return json(502, 'mail_unavailable');
@@ -61,11 +65,24 @@ async function proxy(req: NextRequest, params: Params['params']): Promise<NextRe
       const placement = operation === 'drafts' ? mutation : input;
       const sameStrings = (actual: string[], expected: unknown) => Array.isArray(expected)
         && actual.length === expected.length && actual.every((value, index) => value === expected[index]);
-      const valid = operation === 'messages/read'
-        ? isSelectedMail(value, session.did) && value.state.logicalMessageId === input.logicalMessageId && value.message.fingerprint === input.fingerprint
-        : isMailState(value) && !value.tombstone && !value.deletePending && !!placement
-          && sameStrings(value.mailboxIds, placement.mailboxIds) && sameStrings(value.keywords, placement.keywords)
-          && (operation !== 'drafts' || value.logicalMessageId === mutation?.logicalMessageId);
+      const submissionValue = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+      const validSubmission = isMailSubmission(value) && (operation !== 'submissions'
+        || value.logicalMessageId === input.logicalMessageId && value.fingerprint === input.fingerprint)
+        && (operation !== 'submissions/status' || input.submissionId === undefined || value.id === input.submissionId);
+      const valid = operation === 'bootstrap' ? isMailBootstrap(value, session.did, session.username)
+        : operation === 'submissions' || operation === 'submissions/status' ? validSubmission
+        : operation === 'submissions/inventory' ? isMailSubmissionInventory(value)
+        : operation === 'submissions/cancel' ? !!submissionValue && submissionValue.cancelled === true
+        : operation === 'inventory' ? isMailInventory(value, session.did)
+        : operation === 'folders' ? isMailFolder(value) && (input.folderId === undefined || input.folderId === '' || value.folderId === input.folderId)
+          && value.tombstone === input.tombstone && (input.tombstone === true || value.name === input.name)
+        : operation === 'messages/read'
+          ? isSelectedMail(value, session.did) && value.state.logicalMessageId === input.logicalMessageId && value.message.fingerprint === input.fingerprint
+          : isMailState(value) && !!placement
+            && (operation === 'state' ? value.tombstone === input.tombstone && value.deletePending === input.deletePending : !value.tombstone && !value.deletePending)
+            && sameStrings(value.mailboxIds, placement.mailboxIds) && sameStrings(value.keywords, placement.keywords)
+            && (operation === 'state' ? value.logicalMessageId === input.logicalMessageId && value.version === input.version
+              : operation !== 'drafts' || value.logicalMessageId === mutation?.logicalMessageId);
       if (!valid) return json(502, 'mail_unavailable');
       return NextResponse.json(value, { headers: { 'Cache-Control': 'no-store' } });
     }

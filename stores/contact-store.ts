@@ -15,6 +15,7 @@ import { inlineContactMedia, writeContactWithNewPhoto, type ContactSaveOptions }
 import { contactToView } from '@/lib/plugin-projection';
 import type { Principal } from '@/lib/jmap/types';
 import { currentStoreEpoch } from '@/lib/store-epoch';
+import { generateAccountId } from '@/lib/account-utils';
 
 /** A contact that is about to be created, projected for plugins (no id yet). */
 function draftContactView(contact: Partial<ContactCard>) {
@@ -40,6 +41,21 @@ function sameIdSet(a: Set<string>, b: Set<string>): boolean {
 function contactConsentUrl(error: unknown): string | null {
   return error instanceof SpaceContactError && error.code === 'authorization_required'
     && isPersonalAuthorizationUrl(error.authorizationUrl, 'contacts') ? error.authorizationUrl : null;
+}
+
+function contactAccessDenied(error: unknown): boolean {
+  return error instanceof SpaceContactError && ['forbidden', 'unauthorized', 'authorization_required'].includes(error.code);
+}
+
+function removeDeniedContacts(state: Pick<ContactStore, 'contacts' | 'selectedContactId' | 'selectedContactIds' | 'lastSelectedContactId'>,
+  denied: (contact: ContactCard) => boolean) {
+  const removed = new Set(state.contacts.filter(denied).map(contact => contact.id));
+  return {
+    contacts: state.contacts.filter(contact => !removed.has(contact.id)),
+    selectedContactId: state.selectedContactId && removed.has(state.selectedContactId) ? null : state.selectedContactId,
+    selectedContactIds: new Set([...state.selectedContactIds].filter(id => !removed.has(id))),
+    lastSelectedContactId: state.lastSelectedContactId && removed.has(state.lastSelectedContactId) ? null : state.lastSelectedContactId,
+  };
 }
 
 /** One compose-autocomplete suggestion: a person, or a contact group. */
@@ -136,7 +152,6 @@ function prefixContactsWithLocalAccount(
       : c.addressBookIds,
   }));
 }
-
 
 function stripLocalAccountPrefix(id: string, localAccountId?: string): string {
   if (!localAccountId) return id;
@@ -609,6 +624,10 @@ export const useContactStore = create<ContactStore>()(
           set({ contacts, isLoading: false, contactsLoaded: true });
         } catch (error) {
           if (currentStoreEpoch() !== epoch) return;
+          if (contactAccessDenied(error)) {
+            const accountId = generateAccountId(client.getUsername(), client.getServerUrl());
+            set(state => removeDeniedContacts(state, contact => !contact.localAccountId || contact.localAccountId === accountId));
+          }
           const authorizationUrl = contactConsentUrl(error);
           if (authorizationUrl) { set({ spaceContactsAuthorizationUrl: authorizationUrl, error: 'Connect private contacts to continue.', isLoading: false, contactsLoaded: true }); return; }
           console.error('Failed to fetch contacts:', error);
@@ -639,6 +658,7 @@ export const useContactStore = create<ContactStore>()(
       fetchAllAccountsContacts: async (accounts) => {
         const epoch = currentStoreEpoch();
         set({ isLoading: true, error: null });
+        const deniedAccounts = new Set<string>();
         try {
           const results = await Promise.all(
             accounts.map(async ({ client, localAccountId }) => {
@@ -646,6 +666,7 @@ export const useContactStore = create<ContactStore>()(
                 const list = await client.getAllContacts();
                 return prefixContactsWithLocalAccount(list, localAccountId);
               } catch (error) {
+                if (contactAccessDenied(error)) deniedAccounts.add(localAccountId);
                 const authorizationUrl = contactConsentUrl(error);
                 if (authorizationUrl) set({ spaceContactsAuthorizationUrl: authorizationUrl });
                 else debug.error(`Failed to fetch contacts for account ${localAccountId}:`, error);
@@ -654,7 +675,10 @@ export const useContactStore = create<ContactStore>()(
             }),
           );
           if (currentStoreEpoch() !== epoch) return;
-          set({ contacts: results.flat(), isLoading: false, contactsLoaded: true });
+          set(state => ({
+            ...removeDeniedContacts(state, contact => !!contact.localAccountId && deniedAccounts.has(contact.localAccountId)),
+            contacts: results.flat(), isLoading: false, contactsLoaded: true,
+          }));
         } catch (error) {
           if (currentStoreEpoch() !== epoch) return;
           console.error('Failed to fetch all-account contacts:', error);
