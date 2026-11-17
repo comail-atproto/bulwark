@@ -1,9 +1,27 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { JMAPClient } from '../jmap/client';
-import { jmapSession } from './fixtures/jmap-session';
 
 // #1173: moving many folders at once goes through one Mailbox/set per
 // maxObjectsInSet chunk, and a refused folder doesn't fail the others.
+
+function makeSession(maxObjectsInSet?: number) {
+  return {
+    capabilities: { 'urn:ietf:params:jmap:core': maxObjectsInSet ? { maxObjectsInSet } : {} },
+    accounts: { 'acct-1': { name: 'test', isPersonal: true, accountCapabilities: {} } },
+    primaryAccounts: { 'urn:ietf:params:jmap:mail': 'acct-1' },
+    apiUrl: 'https://mail.example.com/jmap/api',
+    downloadUrl: 'https://mail.example.com/jmap/download/{accountId}/{blobId}/{name}',
+    uploadUrl: 'https://mail.example.com/jmap/upload/{accountId}/',
+    eventSourceUrl: 'https://mail.example.com/jmap/eventsource',
+  };
+}
+
+function jsonResponse(body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
 
 describe('JMAPClient.updateMailboxes', () => {
   let fetchSpy: ReturnType<typeof vi.spyOn>;
@@ -17,10 +35,7 @@ describe('JMAPClient.updateMailboxes', () => {
   });
 
   async function connectedClient(maxObjectsInSet?: number): Promise<JMAPClient> {
-    fetchSpy.mockResolvedValueOnce(Response.json(jmapSession({
-      accountCapabilities: {},
-      serverCapabilities: { 'urn:ietf:params:jmap:core': maxObjectsInSet ? { maxObjectsInSet } : {} },
-    })));
+    fetchSpy.mockResolvedValueOnce(jsonResponse(makeSession(maxObjectsInSet)));
     const client = JMAPClient.withBearer('https://mail.example.com', 'token123', 'user@test.com');
     await client.connect();
     fetchSpy.mockReset();
@@ -36,7 +51,7 @@ describe('JMAPClient.updateMailboxes', () => {
 
   it('sends every update in one Mailbox/set and returns the refused ids', async () => {
     const client = await connectedClient();
-    fetchSpy.mockResolvedValueOnce(Response.json({
+    fetchSpy.mockResolvedValueOnce(jsonResponse({
       methodResponses: [
         ['Mailbox/set', { updated: { a: null, c: null }, notUpdated: { b: { type: 'invalidProperties' } } }, '0'],
       ],
@@ -56,7 +71,7 @@ describe('JMAPClient.updateMailboxes', () => {
 
   it('splits the updates by maxObjectsInSet', async () => {
     const client = await connectedClient(2);
-    fetchSpy.mockImplementation(async () => Response.json({
+    fetchSpy.mockImplementation(async () => jsonResponse({
       methodResponses: [['Mailbox/set', { updated: {} }, '0']],
     }));
 
@@ -72,7 +87,7 @@ describe('JMAPClient.updateMailboxes', () => {
 
   it('throws when the server rejects the whole call', async () => {
     const client = await connectedClient();
-    fetchSpy.mockResolvedValueOnce(Response.json({
+    fetchSpy.mockResolvedValueOnce(jsonResponse({
       methodResponses: [['error', { type: 'forbidden' }, '0']],
     }));
 

@@ -1,10 +1,14 @@
 "use client";
 
 import { useCallback, useState, DragEvent } from "react";
+import { useTranslations } from "next-intl";
 import { Mailbox, Email } from "@/lib/jmap/types";
-import { useEmailStore } from "@/stores/email-store";
+import { useEmailStore, isAggregateListView, restoreBatchesFor, type EmailRestoreBatch, type CrossAccountMoveReceipt } from "@/stores/email-store";
+import { useShallow } from "zustand/react/shallow";
+import { emailKeyFor } from "@/lib/thread-utils";
 import { useAuthStore } from "@/stores/auth-store";
 import { useDragDropContext } from "@/contexts/drag-drop-context";
+import { dragDropHooks } from "@/lib/plugin-hooks";
 import { toast } from "@/stores/toast-store";
 import { getMailboxPath } from "@/lib/utils";
 
@@ -21,32 +25,22 @@ function resolveSourceAccountId(email: Email | undefined): string | null {
   return useAuthStore.getState().activeAccountId;
 }
 
-/**
- * Returns the local accountId ("user@host") that owns the destination
- * mailbox. `mailbox.accountId` is the JMAP server's opaque account id, but
- * `clients`, `activeAccountId`, and `email.accountId` all live in the local
- * namespace. We map back by matching the JMAP id against each connected
- * client's `getAccountId()`. Falls back to the viewing/active account so
- * single-account flows (no connected clients map entry yet, in-memory edits,
- * etc.) still resolve correctly.
- */
-function resolveDestAccountId(mailbox: Mailbox): string | null {
-  const jmapId = mailbox.accountId;
-  if (jmapId) {
-    const clients = useAuthStore.getState().getAllConnectedClients();
-    for (const [localId, client] of clients) {
-      if (client.getAccountId() === jmapId) return localId;
-    }
-  }
-  return useEmailStore.getState().viewingAccountId
-    ?? useAuthStore.getState().activeAccountId;
-}
-
 interface UseMailboxDropOptions {
   mailbox: Mailbox;
+  /**
+   * The local account ("user@host") whose folder list `mailbox` is listed
+   * in: the multi-account sidebar lists every login's folders. Absent, the
+   * active account's. `mailbox.accountId` can't tell: JMAP account ids are
+   * only unique per server, and Stalwart numbers the accounts of every
+   * install alike.
+   */
+  accountId?: string;
   onDropComplete?: () => void;
-  // Translation callbacks for toast messages
-  onSuccess?: (count: number, mailboxName: string) => void;
+  // Translation callbacks for toast messages. `restore` says where the
+  // messages were, for the toast's Undo; null when the move went to another
+  // account, which Undo can't take back.
+  /** `restore` and `receipts` are what Undo needs (undoMoveAction). */
+  onSuccess?: (count: number, mailboxName: string, restore: EmailRestoreBatch[] | null, receipts: CrossAccountMoveReceipt[]) => void;
   onError?: (error: string) => void;
 }
 
@@ -62,11 +56,19 @@ interface UseMailboxDropReturn {
   isInvalidDropTarget: boolean;
 }
 
-export function useMailboxDrop({ mailbox, onDropComplete, onSuccess, onError }: UseMailboxDropOptions): UseMailboxDropReturn {
+export function useMailboxDrop({ mailbox, accountId, onDropComplete, onSuccess, onError }: UseMailboxDropOptions): UseMailboxDropReturn {
+  const t = useTranslations("notifications");
   const [isOver, setIsOver] = useState(false);
-  const { client } = useAuthStore();
-  const { moveEmailsToMailbox, crossAccountMoveEmails, selectedEmailIds, clearSelection, refreshCurrentMailbox, mailboxes } = useEmailStore();
-  const { isDragging, sourceMailboxId, draggedEmails, endDrag } = useDragDropContext();
+  const { client } = useAuthStore(useShallow((state) => ({ client: state.client })));
+  const { moveEmailsToMailbox, crossAccountMoveEmails, selectedEmailKeys, clearSelection, refreshCurrentMailbox, mailboxes } = useEmailStore(useShallow((state) => ({
+    moveEmailsToMailbox: state.moveEmailsToMailbox,
+    crossAccountMoveEmails: state.crossAccountMoveEmails,
+    selectedEmailKeys: state.selectedEmailKeys,
+    clearSelection: state.clearSelection,
+    refreshCurrentMailbox: state.refreshCurrentMailbox,
+    mailboxes: state.mailboxes,
+  })));
+  const { isDragging, sourceMailboxId, draggedEmails, endDrag, markDropped } = useDragDropContext();
 
   // Determine if this is a valid drop target
   const isValidTarget = useCallback(() => {
@@ -128,63 +130,91 @@ export function useMailboxDrop({ mailbox, onDropComplete, onSuccess, onError }: 
       }
 
       const emailIds: string[] = JSON.parse(emailIdsJson);
+      markDropped();
 
-      // Group dragged emails by source account. In single-account flows this
-      // collapses to one bucket; in unified view or the Pro multi-account
-      // sidebar a single drag can mix sources.
-      const destAccountId = resolveDestAccountId(mailbox);
-      const idToEmail = new Map(draggedEmails.map((em) => [em.id, em]));
-      const bySource = new Map<string, string[]>();
-      for (const id of emailIds) {
-        const srcAccountId = resolveSourceAccountId(idToEmail.get(id));
-        if (!srcAccountId) continue;
-        if (!bySource.has(srcAccountId)) bySource.set(srcAccountId, []);
-        bySource.get(srcAccountId)!.push(id);
-      }
+      // The local account the folder belongs to: the one whose list it is in.
+      const destAccountId = accountId ?? useAuthStore.getState().activeAccountId;
 
-      // Decide whether to route via the cross-account (blob copy + import)
-      // pipeline. Two cases require it:
-      //   1. Destination is a delegated/shared mailbox whose owner JMAP
-      //      account differs from the source mailbox's JMAP account. There's
-      //      no atomic Email/set across accounts, even via the same client.
-      //   2. Destination is a primary mailbox on a different connected local
-      //      account than the source — the historical multi-account case.
-      const sourceMb = useEmailStore.getState().mailboxes.find(mb => mb.id === sourceMailboxId);
-      const sourceJmapAccountId = sourceMb?.accountId;
-      const destJmapAccountId = mailbox.accountId;
-      const sourceAccountIds = Array.from(bySource.keys());
-
-      const isJmapCrossAccount =
-        !!sourceJmapAccountId &&
-        !!destJmapAccountId &&
-        sourceJmapAccountId !== destJmapAccountId;
-      const isLocalCrossAccount =
-        !mailbox.isShared &&
-        !!destAccountId &&
-        sourceAccountIds.some((src) => src !== destAccountId);
-      const isCrossAccount = isJmapCrossAccount || isLocalCrossAccount;
-
-      if (isCrossAccount) {
-        if (!destAccountId) {
-          throw new Error('Could not resolve destination account');
-        }
-        // For a shared destination there is no separately-connected client
-        // for the owner; we reuse the viewing user's client but tell the
-        // import call to target the owner's JMAP account.
-        const jmapDestId = mailbox.originalId || mailbox.id;
-        const destJmapOverride = mailbox.isShared ? mailbox.accountId : undefined;
-        // Mirror image for the source: a shared group mailbox is accessed
-        // through the viewing user's client, but the email/blob live in the
-        // owner's JMAP account, so the copy/delete must target it.
-        const sourceJmapOverride = sourceMb?.isShared ? sourceMb.accountId : undefined;
-        await crossAccountMoveEmails(bySource, destAccountId, jmapDestId, destJmapOverride, sourceJmapOverride);
+      let isCrossAccount = false;
+      let moved: boolean;
+      let restore: EmailRestoreBatch[] | null = null;
+      // The messages taken to another account, so Undo can move them back.
+      const receipts: CrossAccountMoveReceipt[] = [];
+      if (isAggregateListView()) {
+        restore = restoreBatchesFor(draggedEmails, client);
+        // A list that mixes accounts (unified, tag and "All folders" views)
+        // stamps every row with its login and account. The store moves each
+        // of those groups apart - in place only in the folder's own account,
+        // across accounts for the others. It gets the dragged rows: their
+        // ids alone can name other accounts' rows too.
+        moved = await moveEmailsToMailbox(client, emailIds, mailbox.id, destAccountId, draggedEmails, receipts);
       } else {
-        // Single-account or same-account-shared move: bulk JMAP request.
-        await moveEmailsToMailbox(client, emailIds, mailbox.id);
-      }
+        // Group dragged emails by source account. In single-account flows this
+        // collapses to one bucket; in the Pro multi-account sidebar a single
+        // drag can mix sources.
+        const idToEmail = new Map(draggedEmails.map((em) => [em.id, em]));
+        const bySource = new Map<string, string[]>();
+        for (const id of emailIds) {
+          const srcAccountId = resolveSourceAccountId(idToEmail.get(id));
+          if (!srcAccountId) continue;
+          if (!bySource.has(srcAccountId)) bySource.set(srcAccountId, []);
+          bySource.get(srcAccountId)!.push(id);
+        }
 
-      // Clear selection if any selected emails were moved
-      if (emailIds.some(id => selectedEmailIds.has(id))) {
+        // Decide whether to route via the cross-account (blob copy + import)
+        // pipeline. Two cases require it:
+        //   1. Destination is a delegated/shared mailbox whose owner JMAP
+        //      account differs from the source mailbox's JMAP account. There's
+        //      no atomic Email/set across accounts, even via the same client.
+        //   2. Destination is a primary mailbox on a different connected local
+        //      account than the source — the historical multi-account case.
+        const sourceMb = useEmailStore.getState().mailboxes.find(mb => mb.id === sourceMailboxId);
+        const sourceJmapAccountId = sourceMb?.accountId;
+        const destJmapAccountId = mailbox.accountId;
+        const sourceAccountIds = Array.from(bySource.keys());
+
+        const isJmapCrossAccount =
+          !!sourceJmapAccountId &&
+          !!destJmapAccountId &&
+          sourceJmapAccountId !== destJmapAccountId;
+        const isLocalCrossAccount =
+          !mailbox.isShared &&
+          !!destAccountId &&
+          sourceAccountIds.some((src) => src !== destAccountId);
+        isCrossAccount = isJmapCrossAccount || isLocalCrossAccount;
+
+        if (isCrossAccount) {
+          if (!destAccountId) {
+            throw new Error('Could not resolve destination account');
+          }
+          // For a shared destination there is no separately-connected client
+          // for the owner; we reuse the viewing user's client but tell the
+          // import call to target the owner's JMAP account.
+          const jmapDestId = mailbox.originalId || mailbox.id;
+          const destJmapOverride = mailbox.isShared ? mailbox.accountId : undefined;
+          // Mirror image for the source: a shared group mailbox is accessed
+          // through the viewing user's client, but the email/blob live in the
+          // owner's JMAP account, so the copy/delete must target it.
+          const sourceJmapOverride = sourceMb?.isShared ? sourceMb.accountId : undefined;
+          restore = restoreBatchesFor(draggedEmails.filter(em => emailIds.includes(em.id)), client);
+          moved = await crossAccountMoveEmails(bySource, destAccountId, jmapDestId, destJmapOverride, sourceJmapOverride, { receipts });
+        } else {
+          // Single-account or same-account-shared move: bulk JMAP request.
+          restore = restoreBatchesFor(draggedEmails.filter(em => emailIds.includes(em.id)), client);
+          moved = await moveEmailsToMailbox(client, emailIds, mailbox.id);
+        }
+      }
+      // Nothing moved: a plugin stopped it (and said why), so no drop
+      // event and no "moved" message.
+      if (!moved) {
+        onDropComplete?.();
+        return;
+      }
+      void dragDropHooks.onEmailDrop.emit({ emailIds, targetMailboxId: mailbox.id });
+
+      // Clear selection if any selected emails were moved. The selection is
+      // keyed by owning account, so compare the dragged emails, not their ids.
+      if (draggedEmails.some(em => selectedEmailKeys.has(emailKeyFor(em)))) {
         clearSelection();
       }
 
@@ -199,12 +229,12 @@ export function useMailboxDrop({ mailbox, onDropComplete, onSuccess, onError }: 
       const mailboxPath = getMailboxPath(mailbox, mailboxes);
 
       if (onSuccess) {
-        onSuccess(emailIds.length, mailboxPath);
+        onSuccess(emailIds.length, mailboxPath, restore, receipts);
       } else {
         if (emailIds.length === 1) {
-          toast.success("Email moved", `Moved to ${mailboxPath}`);
+          toast.success(t("email_moved"), t("moved_to_mailbox", { mailbox: mailboxPath }));
         } else {
-          toast.success("Emails moved", `${emailIds.length} emails moved to ${mailboxPath}`);
+          toast.success(t("emails_moved", { count: emailIds.length }), t("moved_to_mailbox", { mailbox: mailboxPath }));
         }
       }
 
@@ -222,7 +252,7 @@ export function useMailboxDrop({ mailbox, onDropComplete, onSuccess, onError }: 
     } finally {
       endDrag();
     }
-  }, [client, mailbox, mailboxes, isValidTarget, moveEmailsToMailbox, crossAccountMoveEmails, draggedEmails, sourceMailboxId, selectedEmailIds, clearSelection, refreshCurrentMailbox, endDrag, onDropComplete, onSuccess, onError]);
+  }, [client, mailbox, accountId, mailboxes, isValidTarget, moveEmailsToMailbox, crossAccountMoveEmails, draggedEmails, sourceMailboxId, selectedEmailKeys, clearSelection, refreshCurrentMailbox, endDrag, markDropped, onDropComplete, onSuccess, onError, t]);
 
   const valid = isValidTarget();
 

@@ -1,7 +1,7 @@
 import { render, screen, fireEvent } from '@testing-library/react';
 import { act } from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { SpamSiegeGame } from '../spam-siege-game';
+import { SpamSiegeGame, mayFlash, FLASH_MIN_GAP_MS } from '../spam-siege-game';
 
 // Echo interpolation values so the shield count is visible in the label.
 vi.mock('next-intl', () => ({
@@ -143,5 +143,22 @@ describe('SpamSiegeGame', () => {
     fireEvent.pointerDown(backdrop);
     fireEvent.click(backdrop);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});
+
+// WCAG 2.3.1: nothing flashes more than three times a second, however fast
+// mail is caught or missed.
+describe('inbox flash rate', () => {
+  it('lets the inbox flash at most three times a second', () => {
+    expect(FLASH_MIN_GAP_MS).toBeGreaterThanOrEqual(1000 / 3);
+    expect(mayFlash(-Infinity, 0)).toBe(true);
+    expect(mayFlash(1000, 1200)).toBe(false);
+    expect(mayFlash(1000, 1000 + FLASH_MIN_GAP_MS)).toBe(true);
+    let flashes = 0;
+    let last = -Infinity;
+    for (let t = 0; t < 1000; t += 50) {
+      if (mayFlash(last, t)) { flashes++; last = t; }
+    }
+    expect(flashes).toBeLessThanOrEqual(3);
   });
 });

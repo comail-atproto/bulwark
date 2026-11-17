@@ -3,7 +3,11 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { CalendarWeekView } from '../calendar-week-view';
 import { CalendarDayView } from '../calendar-day-view';
 import { useSettingsStore } from '@/stores/settings-store';
+import { fillHourHeight } from '@/hooks/use-display-hours';
 import type { CalendarEvent, Calendar } from '@/lib/jmap/types';
+
+/** The empty hour slots of the time grid (buttons inside the day cells). */
+const slots = () => Array.from(document.querySelectorAll<HTMLElement>('[data-slot]'));
 
 const calendars = [{ id: 'cal-1', name: 'Work', color: '#123456' }] as unknown as Calendar[];
 
@@ -56,9 +60,28 @@ describe('calendar display hours and working days (#1164)', () => {
     cleanup();
   });
 
+  it('keeps public events visible without resize handles while local events remain resizable', () => {
+    const publicEvent = { ...makeEvent('atmo:public', '2026-09-09T12:00:00', 'PT1H'), source: 'atproto-public' } as CalendarEvent;
+    renderWeek({ events: [publicEvent, makeEvent('local', '2026-09-09T14:00:00', 'PT1H')] });
+    expect(eventBlock('atmo:public')).toBeInTheDocument();
+    expect(eventBlock('atmo:public')?.querySelectorAll('[data-resize-handle]')).toHaveLength(0);
+    expect(eventBlock('local')?.querySelectorAll('[data-resize-handle]')).toHaveLength(2);
+  });
+
+  it('draws an unspecified-end public event at midnight without end or resize claims', () => {
+    useSettingsStore.setState({ calendarLimitHours: false });
+    const publicEvent = { ...makeEvent('atmo:midnight', '2026-09-09T00:00:00', 'PT0S'), source: 'atproto-public', atmoEndUnspecified: true } as CalendarEvent;
+    renderWeek({ events: [publicEvent] });
+    expect(eventBlock('atmo:midnight')).toBeInTheDocument();
+    expect(Number.parseFloat(eventBlock('atmo:midnight')!.style.height)).toBeGreaterThan(0);
+    expect(eventBlock('atmo:midnight')?.querySelectorAll('[data-resize-handle]')).toHaveLength(0);
+    expect(screen.getByRole('button', { name: /Event atmo:midnight,.*atmo.end_unspecified/ })).not.toHaveAttribute('draggable', 'true');
+    expect(publicEvent.duration).toBe('PT0S');
+  });
+
   it('shows 08:00 to 20:00 by default', () => {
     renderWeek();
-    expect(screen.getAllByRole('gridcell')).toHaveLength(7 * 12);
+    expect(slots()).toHaveLength(7 * 12);
     expect(screen.getByText('08:00')).toBeInTheDocument();
     expect(screen.queryByText('07:00')).toBeNull();
     expect(screen.queryByText('20:00')).toBeNull();
@@ -67,7 +90,7 @@ describe('calendar display hours and working days (#1164)', () => {
   it('shows the whole day when the limit is off', () => {
     useSettingsStore.setState({ calendarLimitHours: false });
     renderWeek();
-    expect(screen.getAllByRole('gridcell')).toHaveLength(7 * 24);
+    expect(slots()).toHaveLength(7 * 24);
     expect(document.querySelector('[data-all-hours-toggle]')).toBeNull();
   });
 
@@ -100,14 +123,14 @@ describe('calendar display hours and working days (#1164)', () => {
 
     fireEvent.click(before!);
 
-    expect(screen.getAllByRole('gridcell')).toHaveLength(7 * 24);
+    expect(slots()).toHaveLength(7 * 24);
     expect(eventBlock('early')?.style.top).toBe('360px');
     expect(document.querySelector('[data-hidden-events]')).toBeNull();
     // ...and back to the configured hours
     const toggle = document.querySelector<HTMLElement>('[data-all-hours-toggle]')!;
     expect(toggle).toHaveAttribute('aria-pressed', 'true');
     fireEvent.click(toggle);
-    expect(screen.getAllByRole('gridcell')).toHaveLength(7 * 12);
+    expect(slots()).toHaveLength(7 * 12);
   });
 
   it('leaves non-working days out of the week view', () => {
@@ -126,9 +149,10 @@ describe('calendar display hours and working days (#1164)', () => {
     ]);
     expect(eventBlock('weekend')).toBeNull();
     const trip = screen.getByText('Event trip').closest<HTMLElement>('.absolute')!;
-    // Column 5 of 6, two columns wide (jsdom rounds the percentages)
-    expect(trip.style.left).toBe('calc(66.6667% + 1px)');
-    expect(trip.style.width).toBe('calc(33.3333% - 2px)');
+    // In the cell of column 5 of 6 (Friday), two columns wide
+    const cell = trip.closest('[role="gridcell"]')!;
+    expect(Array.from(cell.parentElement!.children).indexOf(cell)).toBe(4);
+    expect(trip.style.width).toBe('calc(200% + 0px)');
   });
 
   it('applies the visible hours to the day view too', () => {
@@ -148,9 +172,85 @@ describe('calendar display hours and working days (#1164)', () => {
         onCreateAtTime={vi.fn()}
       />,
     );
-    expect(screen.getAllByRole('gridcell')).toHaveLength(12);
+    expect(slots()).toHaveLength(12);
     expect(eventBlock('early')).toBeNull();
     expect(eventBlock('noon')?.style.top).toBe(`${4 * 64}px`);
     expect(document.querySelector('[data-hidden-events="before"]')).toHaveTextContent('1');
+  });
+});
+
+describe('time grid height (CAL-27)', () => {
+  // A tablet-tall pane: the grid's scroll root reports 1100px of room and
+  // its sticky header 100px, leaving 1000px for 12 hours.
+  beforeEach(() => {
+    useSettingsStore.setState(initialSettings, true);
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.getAttribute('role') === 'grid' ? 1100 : 0;
+    });
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains('sticky') && this.classList.contains('top-0') ? 100 : 0;
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    cleanup();
+  });
+
+  it('stretches the hour rows to fill the pane below a short range', () => {
+    renderWeek({ events: [makeEvent('noon', '2026-09-09T12:00:00', 'PT1H')] });
+    // floor(1000 / 12) = 83px an hour instead of leaving 280px empty
+    expect(slots()[0].style.height).toBe('83px');
+    expect(eventBlock('noon')?.style.top).toBe(`${4 * 83}px`);
+    expect(eventBlock('noon')?.style.height).toBe('83px');
+  });
+
+  it('fits the rows to the pane, shrinking them only a little', () => {
+    expect(fillHourHeight(60, 1000, 12)).toBe(83);
+    // 59px rows instead of 4px of scrolling
+    expect(fillHourHeight(60, 716, 12)).toBe(59);
+    // a whole day on a short pane scrolls at the normal height
+    expect(fillHourHeight(60, 716, 24)).toBe(60);
+    expect(fillHourHeight(60, 0, 12)).toBe(60);
+  });
+
+  it('keeps the normal row height when the whole day is shown', () => {
+    useSettingsStore.setState({ calendarLimitHours: false });
+    renderWeek();
+    expect(slots()[0].style.height).toBe('60px');
+  });
+
+  it('marks events that run past the visible hours instead of cutting them silently', () => {
+    renderWeek({
+      events: [
+        makeEvent('late', '2026-09-09T19:00:00', 'PT2H'),
+        makeEvent('early', '2026-09-09T07:00:00', 'PT2H'),
+        makeEvent('inside', '2026-09-09T12:00:00', 'PT1H'),
+      ],
+    });
+    const card = (id: string) => screen.getByText('Event ' + id).closest('button')!;
+    expect(card('late')).toHaveAttribute('data-continues-after');
+    expect(card('late')).not.toHaveAttribute('data-continues-before');
+    expect(card('early')).toHaveAttribute('data-continues-before');
+    expect(card('inside')).not.toHaveAttribute('data-continues-after');
+    expect(card('inside')).not.toHaveAttribute('data-continues-before');
+  });
+
+  it('fills the day view too', () => {
+    render(
+      <CalendarDayView
+        focus={{ date: new Date(2026, 8, 9), nonce: 0 }}
+        windowKey="day:2026-09-09"
+        rangeStart={new Date(2026, 8, 9)}
+        rangeEnd={new Date(2026, 8, 9)}
+        selectedDate={new Date(2026, 8, 9)}
+        events={[makeEvent('late', '2026-09-09T19:30:00', 'PT2H')]}
+        calendars={calendars}
+        onSelectEvent={vi.fn()}
+        onCreateAtTime={vi.fn()}
+      />,
+    );
+    expect(slots()[0].style.height).toBe('83px');
+    expect(screen.getByText('Event late').closest('button')).toHaveAttribute('data-continues-after');
   });
 });

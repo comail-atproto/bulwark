@@ -692,6 +692,11 @@ screen_security_config() {
             fi
         else
             prompt_value "Session secret (paste your own)" "" "CFG_SESSION_SECRET"
+            # Admin sign-in and "Remember me" refuse a secret under 32 characters
+            while [[ -n "$CFG_SESSION_SECRET" && ${#CFG_SESSION_SECRET} -lt 32 ]]; do
+                echo -e "    ${RED}The session secret needs at least 32 characters. Leave it empty to go without one.${RESET}"
+                prompt_value "Session secret (paste your own)" "" "CFG_SESSION_SECRET"
+            done
         fi
     else
         echo -e "    ${OK} Session secret is already configured"
@@ -1070,6 +1075,10 @@ write_env_file() {
         echo -e "    ${OK} Backed up existing .env.local --> $(basename "$backup")"
     fi
 
+    # The file holds the session secret and the OAuth client secret: readable
+    # by this user only, whatever the umask says.
+    (umask 077; : > "$ENV_FILE")
+    chmod 600 "$ENV_FILE"
     cat > "$ENV_FILE" << ENVEOF
 # =============================================================================
 # Bulwark Webmail -- Configuration
@@ -1178,7 +1187,7 @@ ENVEOF
 # COOKIE_SAME_SITE=lax
 # COOKIE_SECURE=true
 # TRUSTED_PROXY_DEPTH=1
-# ALLOWED_FRAME_ANCESTORS='none'
+# ALLOWED_FRAME_ANCESTORS=https://portal.example.com
 # ADMIN_DATA_DIR=./data/admin
 # ADMIN_SESSION_TTL=3600
 ENVEOF
@@ -1289,11 +1298,7 @@ run_deployment() {
             echo -e "  ${BOLD}To start the application:${RESET}"
             echo ""
             echo -e "    ${CYAN}cd ${SCRIPT_DIR}${RESET}"
-            if [[ "$CFG_PORT" != "3000" ]]; then
-                echo -e "    ${CYAN}PORT=${CFG_PORT} npm start${RESET}"
-            else
-                echo -e "    ${CYAN}npm start${RESET}"
-            fi
+            echo -e "    ${CYAN}npm start${RESET}"
             ;;
 
         "docker")

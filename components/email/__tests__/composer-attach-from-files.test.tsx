@@ -151,6 +151,14 @@ vi.mock('@/stores/toast-store', () => ({
 }));
 
 vi.mock('@/lib/plugin-hooks', () => ({
+  identityHooks: {
+    onSignatureRender: { size: 0, transform: async (value: unknown) => value },
+    onIdentitySelect: { size: 0, emit: async () => {} },
+  },
+  templateHooks: {
+    onTemplateRender: { size: 0, transform: async (value: unknown) => value },
+    onTemplateApply: { size: 0, emit: async () => {} },
+  },
   emailHooks: {
     onComposerOpen: { call: async () => [] },
     onRecipientChange: { call: async () => [] },
@@ -158,9 +166,9 @@ vi.mock('@/lib/plugin-hooks', () => ({
     onRecipientChipsChange: { transform: async (chips: unknown) => chips },
     onDraftChange: { emit: () => {} },
     onBeforeDraftAutoSave: { transform: async (draft: unknown) => draft },
-    onBeforeEmailSend: { intercept: async () => true },
+    onBeforeEmailSend: { intercept: async () => true, interceptOutcome: async () => 'allowed' },
     onBeforeAttachmentUpload: { intercept: hoisted.beforeAttachmentUpload },
-    onComposeSend: { intercept: async () => true },
+    onComposeSend: { takeOver: async () => 'default' },
     onTransformOutgoingEmail: { transform: async (email: unknown) => email },
   },
   contactHooks: {
@@ -219,6 +227,7 @@ function filesClient(overrides: Record<string, unknown> = {}) {
 
 function pickFromFiles(nodes: FileNode[]) {
   hoisted.picked = nodes;
+  fireEvent.click(screen.getByTestId('composer-attach-menu'));
   fireEvent.click(screen.getByTestId('composer-attach-from-files'));
   fireEvent.click(screen.getByTestId('fake-file-picker'));
 }
@@ -234,6 +243,7 @@ describe('attach from Files', () => {
     useAuthStore.setState({ client: filesClient({ supportsFiles: () => false }) as never });
     render(<EmailComposer onClose={vi.fn()} />);
     expect(screen.queryByTestId('composer-attach-from-files')).toBeNull();
+    expect(screen.queryByTestId('composer-attach-menu')).toBeNull();
   });
 
   it('attaches the picked files by their blobId and saves them with the draft', async () => {

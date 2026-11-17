@@ -6,6 +6,7 @@ import { sessionCookieName } from '@/lib/auth/session-cookie';
 import { bridgeFailureClass, calendarBridgeEndpoint, inboxSetting } from '@/lib/auth/inbox-config';
 import { signCalendarBridgeToken } from '@/lib/space-calendar/bridge';
 import { configManager } from '@/lib/admin/config-manager';
+import { isAtmoSourceCatalog } from '@/lib/atmo-calendar/source';
 import { logger } from '@/lib/logger';
 
 export const dynamic = 'force-dynamic';
@@ -148,20 +149,30 @@ function validPendingCalendar(value: unknown): value is {
 
 function routeSuffix(req: NextRequest, seg: string[] | undefined, method: string): string | null {
   if (!seg?.length) return null;
+  if (seg.length === 1 && seg[0] === 'sources' && method === 'GET' && hasOnlyUniqueQueryParams(req, ['slot'])) return '/sources';
+  if (seg.length === 2 && seg[0] === 'sources' && seg[1] === 'atmo' && method === 'PUT' && hasOnlyUniqueQueryParams(req, ['slot'])) return '/sources/atmo';
+  if (seg.length === 2 && seg[0] === 'sources' && seg[1] === 'start' && method === 'POST' && hasOnlyUniqueQueryParams(req, ['slot'])) return '/sources/start';
   if (seg.length === 1 && seg[0] === 'calendars' && method === 'GET' && hasOnlyUniqueQueryParams(req, ['slot'])) return '/calendars';
   if (seg.length === 1 && seg[0] === 'principals' && method === 'GET' && hasOnlyUniqueQueryParams(req, ['slot'])) return '/principals';
   if (seg.length === 3 && seg[0] === 'owner' && (seg[1] === 'data' || seg[1] === 'membership') && seg[2] === 'start'
     && method === 'POST' && hasOnlyUniqueQueryParams(req, ['slot'])) return `/owner/${seg[1]}/start`;
   if (seg.length === 3 && seg[0] === 'member' && seg[1] === 'consent' && seg[2] === 'start'
     && method === 'POST' && hasOnlyUniqueQueryParams(req, ['slot'])) return '/member/consent/start';
+  if (seg.length === 2 && seg[0] === 'personal' && seg[1] === 'start'
+    && method === 'POST' && hasOnlyUniqueQueryParams(req, ['slot'])) return '/personal/start';
+  if (seg.length === 1 && seg[0] === 'subscriptions' && method === 'POST' && hasOnlyUniqueQueryParams(req, ['slot'])) return '/subscriptions';
+  if (seg.length === 2 && seg[0] === 'public' && (seg[1] === 'rsvps' || seg[1] === 'events' || seg[1] === 'start')
+    && method === 'POST' && hasOnlyUniqueQueryParams(req, ['slot'])) return `/public/${seg[1]}`;
   if (seg.length === 1 && seg[0] === 'events' && method === 'GET') {
-    if (!hasOnlyUniqueQueryParams(req, ['slot', 'after', 'before'])) return null;
+    if (!hasOnlyUniqueQueryParams(req, ['slot', 'after', 'before', 'includeMetadata'])) return null;
+    const metadata = req.nextUrl.searchParams.get('includeMetadata');
+    if (metadata !== null && metadata !== 'true') return null;
     const after = req.nextUrl.searchParams.get('after');
     const before = req.nextUrl.searchParams.get('before');
     if (!after || !before || !isRfc3339(after) || !isRfc3339(before)) return null;
     const range = Date.parse(before) - Date.parse(after);
     if (range <= 0 || range > 366 * 24 * 60 * 60 * 1000) return null;
-    return `/events?${new URLSearchParams({ after, before }).toString()}`;
+    return `/events?${new URLSearchParams({ after, before, ...(metadata ? { includeMetadata: 'true' } : {}) }).toString()}`;
   }
   if (seg.length === 1 && seg[0] === 'events' && method === 'POST' && hasOnlyUniqueQueryParams(req, ['slot'])) return '/events';
   if (seg.length === 1 && seg[0] === 'share' && (method === 'POST' || method === 'DELETE') && hasOnlyUniqueQueryParams(req, ['slot'])) return '/share';
@@ -170,6 +181,8 @@ function routeSuffix(req: NextRequest, seg: string[] | undefined, method: string
     if (!hasOnlyUniqueQueryParams(req, ['slot'])) return null;
     return `/events/${encodeURIComponent(seg[1])}`;
   }
+  if (seg[0] === 'events' && seg.length === 3 && validEventId(seg[1]) && seg[2] === 'personal' && method === 'PUT'
+    && hasOnlyUniqueQueryParams(req, ['slot'])) return `/events/${encodeURIComponent(seg[1])}/personal`;
   if (seg[0] === 'events' && seg.length === 3 && validEventId(seg[1]) && seg[2] === 'rsvp' && method === 'POST') {
     if (!hasOnlyUniqueQueryParams(req, ['slot'])) return null;
     return `/events/${encodeURIComponent(seg[1])}/rsvp`;
@@ -214,6 +227,14 @@ async function proxyCalendarRequest(
     try {
       const parsed: unknown = JSON.parse(body);
       if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return json(400, 'invalid_request');
+      if (suffix === '/sources/atmo') {
+        const source = parsed as Record<string, unknown>;
+        if (Object.keys(source).length !== 3 || !Object.keys(source).every(key => ['requestId', 'baseState', 'enabled'].includes(key))
+          || typeof source.requestId !== 'string' || !source.requestId || source.requestId.length > 128
+          || typeof source.baseState !== 'string' || !/^source-state-[a-f0-9]{64}$/.test(source.baseState)
+          || typeof source.enabled !== 'boolean') return json(400, 'invalid_request');
+      }
+
     } catch {
       return json(400, 'invalid_request');
     }
@@ -260,6 +281,7 @@ async function proxyCalendarRequest(
         headers: { 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' },
       });
     }
+    if ((suffix === '/sources' || suffix === '/sources/atmo') && !isAtmoSourceCatalog(responseBody)) return json(502, 'provider_unavailable');
     return NextResponse.json(responseBody, { status: response.status, headers: { 'Cache-Control': 'no-store' } });
   }
   const upstreamError = typeof responseBody === 'object' && responseBody !== null && 'error' in responseBody
@@ -268,7 +290,7 @@ async function proxyCalendarRequest(
   const code = typeof upstreamError === 'string' && KNOWN_BRIDGE_ERRORS.has(upstreamError) ? upstreamError : null;
   if (code === 'authorization_required' && response.status === 409 && typeof responseBody === 'object' && responseBody !== null) {
     const profile = (responseBody as { authorizationProfile?: unknown }).authorizationProfile;
-    if (profile === 'owner-data' || profile === 'owner-membership' || profile === 'member-calendar') {
+    if (profile === 'owner-data' || profile === 'owner-membership' || profile === 'owner-public' || profile === 'member-calendar' || profile === 'owner-personal' || profile === 'member-personal' || profile === 'owner-source' || profile === 'member-source') {
       const detail: Record<string, unknown> = { authorizationProfile: profile };
       if (profile === 'member-calendar' && validPendingCalendar((responseBody as { calendar?: unknown }).calendar)) {
         detail.calendar = (responseBody as { calendar: unknown }).calendar;

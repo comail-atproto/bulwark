@@ -187,6 +187,47 @@ describe('verifyJmapAuth SSRF protection', () => {
     expect(guardedFetch).not.toHaveBeenCalled();
   });
 
+  it('does not forward trusted server credentials to a different host', async () => {
+    fetchSpy.mockRejectedValue(new Error('Unexpected fetch')).mockResolvedValueOnce(new Response(null, {
+      status: 302, headers: { location: 'http://other.example.invalid/jmap' },
+    }));
+    const { verifyJmapAuth } = await load();
+    await expect(verifyJmapAuth('http://mail.example.invalid', 'Bearer x', { trusted: true }))
+      .rejects.toMatchObject({ status: 400 });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not forward untrusted server credentials to another public host', async () => {
+    lookup.mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
+    guardedFetch.mockResolvedValueOnce(new Response(null, {
+      status: 302, headers: { location: 'https://other.example.invalid/jmap' },
+    }));
+    const { verifyJmapAuth } = await load();
+    await expect(verifyJmapAuth('https://example.invalid', 'Bearer x'))
+      .rejects.toMatchObject({ status: 400 });
+    expect(guardedFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not forward credentials to a different HTTPS port on upgrade', async () => {
+    fetchSpy.mockRejectedValue(new Error('Unexpected fetch')).mockResolvedValueOnce(new Response(null, {
+      status: 302, headers: { location: 'https://mail.example.invalid:8443/jmap' },
+    }));
+    const { verifyJmapAuth } = await load();
+    await expect(verifyJmapAuth('http://mail.example.invalid', 'Bearer x', { trusted: true }))
+      .rejects.toMatchObject({ status: 400 });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('allows a configured server to redirect to HTTPS on the same host', async () => {
+    fetchSpy.mockRejectedValue(new Error('Unexpected fetch')).mockResolvedValueOnce(new Response(null, {
+      status: 302, headers: { location: 'https://mail.example.invalid/jmap' },
+    })).mockResolvedValueOnce(new Response(JSON.stringify({ apiUrl: '/api', accounts: {} })));
+    const { verifyJmapAuth } = await load();
+    await expect(verifyJmapAuth('http://mail.example.invalid', 'Bearer x', { trusted: true }))
+      .resolves.toBe('http://mail.example.invalid');
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
   it('with trusted=true, still rejects unsupported protocols', async () => {
     const { verifyJmapAuth } = await load();
     await expect(

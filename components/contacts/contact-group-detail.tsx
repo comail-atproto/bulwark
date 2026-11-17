@@ -1,9 +1,13 @@
 "use client";
 
 import { useTranslations } from "next-intl";
-import { Users, Pencil, Trash2, UserMinus, Mail } from "@/components/icons";
+import { Users, Pencil, Trash2, UserMinus, Mail, MoreVertical, Printer } from "@/components/icons";
+import { ContextMenu, ContextMenuItem, ContextMenuSeparator } from "@/components/ui/context-menu";
+import { useContextMenu } from "@/hooks/use-context-menu";
 import { Avatar } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
+import { IconButton } from "@/components/ui/icon-button";
+import { ToolbarButton } from "@/components/ui/toolbar";
 import { cn } from "@/lib/utils";
 import type { ContactCard } from "@/lib/jmap/types";
 import { getContactDisplayName, getContactPrimaryEmail } from "@/stores/contact-store";
@@ -17,6 +21,8 @@ interface ContactGroupDetailProps {
   onSelectMember: (id: string) => void;
   /** Compose an email to every member with the recipients placed in `field`. */
   onComposeGroup?: (field: "to" | "cc" | "bcc") => void;
+  /** Print the group and its members. */
+  onPrint?: () => void;
   isMobile?: boolean;
   className?: string;
 }
@@ -29,11 +35,15 @@ export function ContactGroupDetail({
   onRemoveMember,
   onSelectMember,
   onComposeGroup,
+  onPrint,
   isMobile,
   className,
 }: ContactGroupDetailProps) {
   const t = useTranslations("contacts");
+  const tCommon = useTranslations("common");
   const groupName = getContactDisplayName(group);
+  // Delete sits in a ⋮, as on a contact's page (R6).
+  const menu = useContextMenu<null>();
   const hasEmailMembers = members.some((m) => getContactPrimaryEmail(m).trim());
 
   return (
@@ -51,19 +61,27 @@ export function ContactGroupDetail({
               </p>
             </div>
           </div>
-          <div className="flex gap-2">
-            <Button variant="outline" size="sm" onClick={onEdit} className="touch-manipulation">
-              <Pencil className="w-4 h-4 me-1" />
-              {t("form.edit_title")}
+          <div className="flex items-center gap-1.5">
+            <Button variant="outline" size="xs" onClick={onEdit} className="gap-1.5 touch-manipulation">
+              <Pencil />
+              {t("groups.edit")}
             </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onDelete}
-              className="text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300 hover:bg-red-50 dark:hover:bg-red-950 touch-manipulation"
+            <ToolbarButton
+              label={t("detail.more_actions")}
+              aria-haspopup="menu"
+              aria-expanded={menu.contextMenu.isOpen}
+              active={menu.contextMenu.isOpen}
+              onClick={(e) => menu.openContextMenuFrom(e.currentTarget, null, "end")}
+              className="touch-manipulation"
             >
-              <Trash2 className="w-4 h-4" />
-            </Button>
+              <MoreVertical />
+            </ToolbarButton>
+            <ContextMenu ref={menu.menuRef} isOpen={menu.contextMenu.isOpen} position={menu.contextMenu.position} onClose={menu.closeContextMenu}>
+              <ContextMenuItem icon={Pencil} label={t("groups.edit")} onClick={() => { menu.closeContextMenu(); onEdit(); }} />
+              {onPrint && <ContextMenuItem icon={Printer} label={tCommon("print")} onClick={() => { menu.closeContextMenu(); onPrint(); }} />}
+              <ContextMenuSeparator />
+              <ContextMenuItem icon={Trash2} label={t("groups.delete")} destructive onClick={() => { menu.closeContextMenu(); onDelete(); }} />
+            </ContextMenu>
           </div>
         </div>
         {onComposeGroup && hasEmailMembers && (
@@ -75,7 +93,7 @@ export function ContactGroupDetail({
                 <Button
                   key={field}
                   variant="outline"
-                  size="sm"
+                  size="xs"
                   onClick={() => onComposeGroup(field)}
                   className="touch-manipulation"
                 >
@@ -117,17 +135,16 @@ export function ContactGroupDetail({
                       )}
                     </div>
                   </button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
+                  <IconButton
+                    label={t("groups.remove_member", { name: mName })}
                     className={cn(
-                      "h-8 w-8 transition-opacity",
-                      isMobile ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+                      "transition-opacity",
+                      isMobile ? "opacity-100" : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100"
                     )}
                     onClick={() => onRemoveMember(member.id)}
                   >
-                    <UserMinus className="w-4 h-4 text-muted-foreground" />
-                  </Button>
+                    <UserMinus className="text-muted-foreground" />
+                  </IconButton>
                 </div>
               );
             })}

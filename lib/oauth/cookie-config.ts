@@ -15,3 +15,12 @@ export function getCookieOptions() {
     maxAge: 30 * 24 * 60 * 60,
   };
 }
+
+/**
+ * Options for a sign-in's cookies: kept for 30 days when remembered, without
+ * an expiry otherwise, so the browser drops them when its session ends.
+ */
+export function getSignInCookieOptions(remember: boolean) {
+  const { maxAge, ...sessionOptions } = getCookieOptions();
+  return remember ? { ...sessionOptions, maxAge } : sessionOptions;
+}

@@ -2,6 +2,13 @@ import { render, screen, fireEvent, cleanup } from '@testing-library/react';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { CalendarMonthView } from '../calendar-month-view';
 import type { CalendarEvent, Calendar, CalendarTask } from '@/lib/jmap/types';
+import { useSettingsStore } from '@/stores/settings-store';
+
+/** Which day of its week (0-6) the cell holding `el` is. */
+function dayColumn(el: HTMLElement): number {
+  const cell = el.closest('[role="gridcell"]')!;
+  return Array.from(cell.closest('[role="row"]')!.querySelectorAll('[role="gridcell"]')).indexOf(cell);
+}
 
 // #1107: with "Show tasks on calendar" on, the month view shows each task
 // on its due day, below that day's events, and lets it be completed or
@@ -93,25 +100,53 @@ describe('CalendarMonthView tasks', () => {
     expect(screen.getByText('Task fri')).toBeInTheDocument();
 
     // Thursday is the fourth column of the week starting Monday 7 Sep and
-    // already has an event in row 0; Friday has no events.
-    // (jsdom rounds the calc() percentage.)
+    // already has an event in row 0; Friday has no events. Each chip sits in
+    // its day's cell, below the 30px date header.
     const thu = chipSlot('thu');
-    expect(thu.style.left).toMatch(/^calc\(42\.857\d*% \+ 1px\)$/);
-    expect(thu.style.top).toBe('22px');
+    expect(dayColumn(thu)).toBe(3);
+    // Rows are 26px apart: 24px chips, big enough to hit (WCAG 2.5.8).
+    expect(thu.style.top).toBe('56px');
     const fri = chipSlot('fri');
-    expect(fri.style.left).toMatch(/^calc\(57\.142\d*% \+ 1px\)$/);
-    expect(fri.style.top).toBe('0px');
+    expect(dayColumn(fri)).toBe(4);
+    expect(fri.style.top).toBe('30px');
   });
 
-  it('grows the week row to fit a crowded day', () => {
+  it('keeps a crowded day to its row height and links to the rest', () => {
+    const onOpenDay = vi.fn();
     renderView({
       events: [makeAllDayEvent('e1', '2026-09-10')],
-      tasks: ['a', 'b', 'c'].map((id) => makeTask(id, '2026-09-10')),
+      tasks: ['a', 'b', 'c', 'd'].map((id) => makeTask(id, '2026-09-10')),
+      onOpenDay,
     });
     const row = document.querySelector<HTMLElement>('[data-week="2026-09-07"]');
-    // overlay offset 30 + 4, one event row and three task rows of 22px, 8 below.
-    expect(row?.style.minHeight).toBe(`${30 + 4 + 4 * 22 + 8}px`);
-    expect(chipSlot('c').style.top).toBe(`${3 * 22}px`);
+    // jsdom measures no viewport, so rows keep the 146px minimum: room for
+    // four 26px rows under the 30 + 4 offset, the last taken by the link -
+    // three entries, not one, on a short desktop window.
+    expect(row?.style.minHeight).toBe('146px');
+    expect(screen.getByText('Event e1')).toBeInTheDocument();
+    expect(document.querySelector('[data-calendar-task="b"]')).not.toBeNull();
+    expect(document.querySelector('[data-calendar-task="c"]')).toBeNull();
+    const more = screen.getByRole('button', { name: 'events.more' });
+    expect(more.parentElement?.style.top).toBe(`${30 + 78}px`);
+    fireEvent.click(more);
+    expect(onOpenDay).toHaveBeenCalledWith(new Date(2026, 8, 10));
+  });
+
+  it('grows the week row to fit a crowded day on phones', () => {
+    useSettingsStore.setState({ showTimeInMonthView: true });
+    try {
+      renderView({
+        events: [makeAllDayEvent('e1', '2026-09-10')],
+        tasks: ['a', 'b', 'c'].map((id) => makeTask(id, '2026-09-10')),
+        isMobile: true,
+      });
+      const row = document.querySelector<HTMLElement>('[data-week="2026-09-07"]');
+      // overlay offset 34 + 4, one event row and three task rows of 18px, 8 below.
+      expect(row?.style.minHeight).toBe(`${34 + 4 + 4 * 18 + 8}px`);
+      expect(chipSlot('c').style.top).toBe(`${34 + 3 * 18}px`);
+    } finally {
+      useSettingsStore.setState({ showTimeInMonthView: false });
+    }
   });
 
   it('toggles completion from the circle and opens the editor from the title', () => {

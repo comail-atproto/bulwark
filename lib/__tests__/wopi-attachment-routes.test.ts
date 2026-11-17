@@ -107,6 +107,16 @@ beforeEach(() => {
 });
 
 describe('WOPI attachment launch', () => {
+  it.each(['https://office<x>.example/edit?', 'file:///tmp/editor', 'https://user:pass@office.example/edit'])(
+    'reports an unavailable editor for an invalid discovery URL %s',
+    async (url) => {
+      (getWopiActions as Mock).mockResolvedValue({ edit: { docx: url }, view: {} });
+      const { status, data } = await launchAttachment({ blobId: 'Gblob1', name: 'Quote.docx', type: DOCX });
+      expect(status).toBe(503);
+      expect(data).toEqual({ error: 'Document editor is unavailable' });
+    },
+  );
+
   it('mints a read-only token for the attachment blob in the primary mail account', async () => {
     const { status, data } = await launchAttachment({ blobId: 'Gblob1', name: 'Quote.docx', type: DOCX });
     expect(status).toBe(200);
@@ -159,6 +169,9 @@ describe('WOPI calls for an attachment token', () => {
       UserCanWrite: false,
       ReadOnly: true,
       UserCanNotWriteRelative: true,
+      // Keeps ONLYOFFICE from warning that it was forced into view mode (#1187).
+      UserCanReview: true,
+      SupportsReviewing: false,
       Version: 'Gblob1',
       PostMessageOrigin: ORIGIN,
     });

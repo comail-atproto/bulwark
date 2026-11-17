@@ -1,0 +1,34 @@
+"use client";
+
+import { useCallback } from "react";
+import { useTranslations } from "next-intl";
+import { useAuthStore } from "@/stores/auth-store";
+import { useEmailStore, removalFolder, restoreBatchesFor } from "@/stores/email-store";
+import { runBatchEmailAction, undoLabels, undoMoveAction } from "@/lib/email-action-toast";
+import { localizeMailboxName } from "@/lib/mailbox-label";
+import type { Email } from "@/lib/jmap/types";
+
+/**
+ * "Remove from this folder" (#615): takes the messages out of the open folder
+ * only, keeps them in their other folders, and toasts the outcome with Undo.
+ */
+export function useRemoveFromFolder(): (emails: Email[]) => Promise<void> {
+  const t = useTranslations("notifications");
+  const tSidebar = useTranslations("sidebar");
+  const client = useAuthStore((state) => state.client);
+  const removeFromMailbox = useEmailStore((state) => state.removeFromMailbox);
+
+  return useCallback(async (emails: Email[]) => {
+    if (!client || emails.length === 0) return;
+    const folder = removalFolder(useEmailStore.getState());
+    const mailbox = folder
+      ? localizeMailboxName(folder.role, folder.name, (key) => tSidebar(`mailboxes.${key}`))
+      : "";
+    const restore = restoreBatchesFor(emails, client);
+    await runBatchEmailAction(() => removeFromMailbox(client, emails), {
+      success: t("removed_from_folder", { mailbox }),
+      error: t("remove_from_folder_failed"),
+      undo: undoMoveAction(client, restore, undoLabels(t)),
+    });
+  }, [client, removeFromMailbox, t, tSidebar]);
+}

@@ -19,6 +19,7 @@ export function useProMultiAccountContacts(): {
   const isEmbedded = useIsEmbedded();
   const proInterface = useSettingsStore((s) => s.proInterface);
   const accounts = useAccountStore((s) => s.accounts);
+  const connectedAccountsRevision = useAuthStore((s) => s.connectedAccountsRevision);
   const activeAccountId = useAuthStore((s) => s.activeAccountId);
   const fetchAllAccountsAddressBooks = useContactStore((s) => s.fetchAllAccountsAddressBooks);
   const fetchAllAccountsContacts = useContactStore((s) => s.fetchAllAccountsContacts);
@@ -36,7 +37,9 @@ export function useProMultiAccountContacts(): {
       pairs.push({ localAccountId: account.id, client });
     }
     return pairs;
-  }, [enabled, accounts]);
+    // Private capabilities can arrive after the connected account list.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled, accounts, connectedAccountsRevision]);
 
   useEffect(() => {
     if (!enabled || !activeAccountId || accountClients.length === 0) return;

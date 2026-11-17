@@ -3,8 +3,10 @@ import type { CalendarEvent, CalendarParticipant, CalendarRights } from '@/lib/j
 import {
   getEventEditability,
   canUserRsvp,
+  canUserEditPrivate,
   canCreateEventsIn,
   eventHasNoOwner,
+  publicAtprotoOriginalLink,
   type EventEditability,
   type EditabilityContext,
 } from '@/lib/calendar-editability';
@@ -343,5 +345,77 @@ describe('canUserRsvp (issue #937)', () => {
       isSubscriptionCalendar: () => false,
     };
     expect(canUserRsvp(ev, context)).toBe(false);
+  });
+});
+
+
+describe('private event settings rights', () => {
+  it('keeps private reminders available on a linked public copy', () => {
+    const event = makeEvent({ source: 'atproto-space', atprotoUri: 'at://did:plc:organizer/community.lexicon.calendar.event/3m3z2a2b3c4d5' });
+    const context = ctx(makeRights({ mayReadItems: true, mayUpdatePrivate: true }));
+    expect(canUserEditPrivate(event, context)).toBe(true);
+    expect(getEventEditability(event, context)).toBe('read-only');
+  });
+
+  it('allows a viewer’s own private settings without granting shared editing or RSVP', () => {
+    const event = makeEvent({ isOrigin: false });
+    const context = ctx(makeRights({ mayReadItems: true, mayUpdatePrivate: true }));
+    expect(canUserEditPrivate(event, context)).toBe(true);
+    expect(getEventEditability(event, context)).toBe('read-only');
+    expect(canUserRsvp(event, context)).toBe(false);
+  });
+
+  it('requires loaded private rights on every included calendar and denies subscriptions', () => {
+    expect(canUserEditPrivate(makeEvent(), ctx(null))).toBe(false);
+    expect(canUserEditPrivate(makeEvent(), ctx(READ_ONLY))).toBe(false);
+    expect(canUserEditPrivate(makeEvent(), ctx(ALL_RIGHTS, [SELF], ['cal1']))).toBe(false);
+    expect(canUserEditPrivate(makeEvent({ calendarIds: {} }), ctx(ALL_RIGHTS))).toBe(false);
+    expect(canUserEditPrivate(makeEvent({ calendarIds: { cal1: true, missing: true } }), ctx(ALL_RIGHTS))).toBe(false);
+    expect(canUserEditPrivate(makeEvent({ calendarIds: { cal1: true, unused: false } }), ctx(ALL_RIGHTS))).toBe(true);
+  });
+});
+
+
+describe('Atmosphere public source guards', () => {
+  it.each([
+    { source: 'atproto-public' },
+    { id: 'atmo:event' },
+    { id: 'account::atmo:event' },
+    { calendarIds: { 'atmo:calendar': true } },
+    { originalId: 'atmo:event' },
+  ])('keeps %j read-only despite writable rights or missing calendar metadata', identity => {
+    const event = makeEvent(identity as Partial<CalendarEvent>);
+    for (const calendarsById of [new Map(), new Map([['cal1', { myRights: ALL_RIGHTS }]])]) {
+      const ctx = { calendarsById, userCalendarAddresses: ['me@example.com'], isSubscriptionCalendar: () => false };
+      expect(getEventEditability(event, ctx)).toBe('read-only');
+      expect(canUserRsvp(event, ctx)).toBe(false);
+      expect(canUserEditPrivate(event, ctx)).toBe(false);
+    }
+  });
+
+  it('does not offer a reserved public calendar as an event destination', () => {
+    expect(canCreateEventsIn({ id: 'atmo:calendar', myRights: ALL_RIGHTS })).toBe(false);
+  });
+});
+
+
+describe('original public Atmo event link', () => {
+  const uri = 'at://did:plc:synthetic/community.lexicon.calendar.event/3l3d3d3d3d3d3';
+  const href = 'https://atmo.rsvp/p/did%3Aplc%3Asynthetic/e/3l3d3d3d3d3d3';
+  const event = makeEvent({ id: 'atmo:event', source: 'atproto-public', atprotoUri: uri,
+    links: { atmo: { '@type': 'Link', href, cid: null, contentType: 'text/html', size: null, rel: 'describedby', display: null, title: 'Atmo' } } } as Partial<CalendarEvent>);
+
+  it('uses the stored link only when it matches the exact public record', () => {
+    expect(publicAtprotoOriginalLink(event)).toBe(href);
+  });
+
+  it.each(['javascript:alert(1)', 'https://atmo.rsvp.evil.test/p/did%3Aplc%3Asynthetic/e/3l3d3d3d3d3d3',
+    href + '?redirect=https://evil.test', href + '#fragment', href.replace('https:', 'http:'), href.replace('3l3d3d3d3d3d3', '3l3e3e3e3e3e3')])('rejects a changed link %s', changed => {
+    expect(publicAtprotoOriginalLink({ ...event, links: { atmo: { ...event.links!.atmo, href: changed } } })).toBeNull();
+  });
+
+  it('requires the public source and a valid community event identity', () => {
+    expect(publicAtprotoOriginalLink({ ...event, id: 'jmap', source: 'jmap' })).toBeNull();
+    expect(publicAtprotoOriginalLink({ ...event, atprotoUri: uri.replace('calendar.event', 'calendar.rsvp') })).toBeNull();
   });
 });

@@ -3,26 +3,31 @@
 import { CalendarDays, FileText, Folder, Repeat } from "@/components/icons";
 import { useTranslations } from "next-intl";
 import { Avatar } from "@/components/ui/avatar";
+import { useSenderWarning } from "@/hooks/use-sender-warning";
+import { brandIndicatorDomain } from "@/lib/email-headers";
 import { parseSearchSnippet, type SnippetSegment } from "@/lib/search-snippet";
 import type { GlobalSearchHit } from "@/lib/global-search/types";
-import { getContactDisplayName, getContactPhotoUri, getContactPrimaryEmail } from "@/stores/contact-store";
+import { getContactDisplayName, getContactPhotoRef, getContactPrimaryEmail } from "@/stores/contact-store";
 import { cn } from "@/lib/utils";
+
+function MailSenderAvatar({ email }: { email: Extract<GlobalSearchHit, { kind: 'mail' }>['email'] }) {
+  const from = email.from?.[0];
+  const senderWarning = useSenderWarning(email);
+  return <Avatar name={from?.name || undefined} email={from?.email || undefined} size="sm" className="mt-0.5 shrink-0" senderWarning={senderWarning} brandDomain={brandIndicatorDomain(email)} />;
+}
 
 /**
  * Leading visual, mirroring the mail list's identity language: real avatars
  * for people (sender / contact), kind-tinted icon chips for events and files.
  */
 function LeadingVisual({ hit }: { hit: GlobalSearchHit }) {
-  if (hit.kind === 'mail') {
-    const from = hit.email.from?.[0];
-    return <Avatar name={from?.name || undefined} email={from?.email || undefined} size="sm" className="mt-0.5 shrink-0" />;
-  }
+  if (hit.kind === 'mail') return <MailSenderAvatar email={hit.email} />;
   if (hit.kind === 'contacts') {
     return (
       <Avatar
         name={getContactDisplayName(hit.contact) || undefined}
         email={getContactPrimaryEmail(hit.contact) || undefined}
-        contactPhotoUri={getContactPhotoUri(hit.contact)}
+        contactPhoto={getContactPhotoRef(hit.contact) ?? null}
         size="sm"
         className="mt-0.5 shrink-0"
       />
@@ -62,6 +67,13 @@ export interface PaletteResultRowProps {
   hit: GlobalSearchHit;
   onOpen: (hit: GlobalSearchHit) => void;
   className?: string;
+  /** DOM id, for a listbox's aria-activedescendant. */
+  id?: string;
+  /** The highlighted option of the palette's listbox. */
+  selected?: boolean;
+  /** -1 in the palette, where the focus stays in the search field. */
+  tabIndex?: number;
+  onMouseMove?: () => void;
 }
 
 /**
@@ -69,7 +81,7 @@ export interface PaletteResultRowProps {
  * context subtitle, and the server snippet with its `<mark>`ed terms when
  * mail search returned one. Used by both the palette and the search tab.
  */
-export function PaletteResultRow({ hit, onOpen, className }: PaletteResultRowProps) {
+export function PaletteResultRow({ hit, onOpen, className, id, selected = false, tabIndex, onMouseMove }: PaletteResultRowProps) {
   const t = useTranslations('global_search');
   const title = hit.title || (hit.kind === 'mail' ? t('no_subject') : hit.id);
   const subtitle = [hit.accountLabel, hit.subtitle].filter(Boolean).join(' · ');
@@ -77,8 +89,11 @@ export function PaletteResultRow({ hit, onOpen, className }: PaletteResultRowPro
   return (
     <button
       type="button"
+      id={id}
       role="option"
-      aria-selected={false}
+      aria-selected={selected}
+      tabIndex={tabIndex}
+      onMouseMove={onMouseMove}
       onClick={() => onOpen(hit)}
       data-hit-kind={hit.kind}
       className={cn(

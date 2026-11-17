@@ -16,6 +16,7 @@ import {
   extractUserAuthoredText,
   formatRecipientEntry,
   expandRecipients,
+  invalidRecipientAddresses,
   getQuoteBodies,
 } from '../email-composer-utils';
 
@@ -594,6 +595,16 @@ describe('contact group recipients (RFC 5322 group syntax)', () => {
     expect(parsed[1].group?.members).toHaveLength(2);
   });
 
+  it('keeps typed text with a colon as a plain recipient when no member is an address', () => {
+    expect(parseRecipient('Subject: hello;')).toEqual({ email: 'Subject: hello;' });
+  });
+
+  it('lists group members that are not addresses as invalid', () => {
+    const parsed = parseRecipientList('ok@x.de, Team: a@x.de, junk;, nope');
+    expect(invalidRecipientAddresses(parsed)).toEqual(['junk', 'nope']);
+    expect(invalidRecipientAddresses([group])).toEqual([]);
+  });
+
   it('expandRecipients flattens groups and dedupes against individuals', () => {
     const expanded = expandRecipients([
       { name: 'Anna Alt', email: 'ANNA@example.com' },
@@ -638,11 +649,25 @@ describe("getQuoteBodies", () => {
       htmlBody: [part("h", "text/html")],
       bodyValues: {
         t: { value: "plain version" },
-        h: { value: "<p>html version</p>" },
+        h: { value: "<p><b>html</b> version</p>" },
       },
     });
     expect(body).toBe("plain version");
-    expect(htmlBody).toBe("<p>html version</p>");
+    expect(htmlBody).toBe("<p><b>html</b> version</p>");
+  });
+
+  it("quotes the text part when the HTML part is a bare wrapper without line breaks", () => {
+    const text = "Line one\nLine two\nLine three";
+    const { body, htmlBody } = getQuoteBodies({
+      textBody: [part("t", "text/plain")],
+      htmlBody: [part("h", "text/html")],
+      bodyValues: {
+        t: { value: text },
+        h: { value: "<html><body>Line one\nLine two\nLine three</body></html>" },
+      },
+    });
+    expect(body).toBe(text);
+    expect(htmlBody).toBeUndefined();
   });
 
   it("falls back to the preview when body values are missing", () => {

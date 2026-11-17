@@ -6,6 +6,7 @@ import type { IJMAPClient } from "@/lib/jmap/client-interface";
 import type { Mailbox, MailboxRights } from "@/lib/jmap/types";
 import { ShareCollectionDialog } from "@/components/settings/share-collection-dialog";
 import { toast } from "@/stores/toast-store";
+import { useFocusTrap } from "@/hooks/use-focus-trap";
 import { useTranslations } from "next-intl";
 
 interface MailboxShareDialogProps {
@@ -46,12 +47,24 @@ export function MailboxShareDialog({ client, mailbox, onClose }: MailboxShareDia
     void load();
   }, [load]);
 
+  // While the people to share with load: a modal that says so, holds the
+  // focus, and closes on Escape like the dialog that follows.
+  const loadingRef = useFocusTrap({ isActive: shareWith === undefined, onEscape: onClose, restoreFocus: true, initialFocus: () => loadingRef.current });
+
   if (shareWith === undefined) {
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center">
         <div className="absolute inset-0 bg-black/50 backdrop-blur-[1px]" onClick={onClose} aria-hidden="true" />
-        <div className="relative rounded-lg border border-border bg-background px-6 py-4 shadow-xl">
-          <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" aria-label={t("loading_principals")} />
+        <div
+          ref={loadingRef}
+          role="dialog"
+          aria-modal="true"
+          aria-busy="true"
+          aria-label={t("loading_principals")}
+          className="relative rounded-lg border border-border bg-background px-6 py-4 shadow-xl outline-none"
+        >
+          <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" aria-hidden="true" />
+          <span role="status" className="sr-only">{t("loading_principals")}</span>
         </div>
       </div>
     );

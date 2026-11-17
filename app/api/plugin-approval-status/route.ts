@@ -1,12 +1,22 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { rejectCrossOriginRequest } from '@/lib/security/same-origin';
+import { configManager } from '@/lib/admin/config-manager';
 import { cookies } from 'next/headers';
 import { decryptSession } from '@/lib/auth/crypto';
 import { sessionCookieName } from '@/lib/auth/session-cookie';
 import { readStalwartAuthContextFromStore } from '@/lib/stalwart/auth-context';
 import { MAX_ACCOUNT_SLOTS } from '@/lib/account-utils';
 import { logger } from '@/lib/logger';
-import { getApprovalStatus, requestApproval, type ApprovalEntry } from '@/lib/admin/plugin-approvals';
+import { storeUnavailableResponse } from '@/lib/admin/store-unavailable-response';
+import {
+  ApprovalLimitError,
+  getApprovalStatus,
+  requestApproval,
+  saveApprovalBundle,
+  type ApprovalEntry,
+} from '@/lib/admin/plugin-approvals';
+import { ExtensionPackageError, packageHash, readPluginPackage } from '@/lib/extension-package';
+import { MAX_PLUGIN_SIZE } from '@/lib/plugin-types';
 
 /**
  * GET /api/plugin-approval-status?pluginId=X&bundleHash=Y
@@ -15,23 +25,29 @@ import { getApprovalStatus, requestApproval, type ApprovalEntry } from '@/lib/ad
  * they want to enable. The client uses this BEFORE running `enablePlugin`
  * when the `requirePluginApproval` policy is set.
  *
- * POST same path with body `{ pluginId, bundleHash, manifest }` creates a
- * pending approval entry (or returns the existing one).
+ * POST same path with the plugin ZIP as multipart `file` creates a pending
+ * approval entry (or returns the existing one) for the package hash the
+ * server computes, and keeps the ZIP for the admin to review.
  */
 
 async function resolveUsername(): Promise<string | null> {
   const cookieStore = await cookies();
   for (let slot = 0; slot < MAX_ACCOUNT_SLOTS; slot++) {
+    // The context first: a token sign-in may have claimed a bare name, and
+    // only the context knows the account it resolved to.
+    const ctx = readStalwartAuthContextFromStore(cookieStore, slot);
+    if (ctx?.username) return ctx.accountName ?? ctx.username;
     const token = cookieStore.get(sessionCookieName(slot))?.value;
     if (token) {
       const sess = decryptSession(token);
       if (sess?.username) return sess.username;
     }
-    const ctx = readStalwartAuthContextFromStore(cookieStore, slot);
-    if (ctx?.username) return ctx.username;
   }
   return null;
 }
+
+// The largest package plus room for the multipart framing around it.
+const MAX_UPLOAD_BYTES = MAX_PLUGIN_SIZE + 64 * 1024;
 
 function isValidId(s: unknown): s is string {
   return typeof s === 'string' && /^[a-z0-9][a-z0-9-]*[a-z0-9]$/.test(s) && s.length <= 64;
@@ -53,6 +69,8 @@ export async function GET(request: NextRequest) {
     const status = await getApprovalStatus(pluginId, bundleHash);
     return NextResponse.json(status, { headers: { 'Cache-Control': 'no-store' } });
   } catch (err) {
+    const unavailable = storeUnavailableResponse(err);
+    if (unavailable) return unavailable;
     logger.error('plugin-approval-status GET', { error: err instanceof Error ? err.message : String(err) });
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
@@ -67,27 +85,73 @@ export async function POST(request: NextRequest) {
     const username = await resolveUsername();
     if (!username) return NextResponse.json({ error: 'unauthenticated' }, { status: 401 });
 
-    let body: unknown;
-    try { body = await request.json(); } catch { body = null; }
-    const b = (body ?? {}) as { pluginId?: unknown; bundleHash?: unknown; manifest?: unknown };
-    if (!isValidId(b.pluginId) || !isValidHash(b.bundleHash)) {
-      return NextResponse.json({ error: 'invalid pluginId or bundleHash' }, { status: 400 });
+    // Only take packages while users may install their own plugins and
+    // those need review (GHSA-qc44-275p-gqw9): otherwise nobody asked for
+    // the queue, and every request still stores a ZIP on disk.
+    await configManager.ensureLoaded();
+    const { features } = configManager.getPolicy();
+    if (!features.pluginsEnabled || !features.pluginsUploadEnabled || !features.requirePluginApproval) {
+      return NextResponse.json({ error: 'Plugin approval requests are turned off' }, { status: 403 });
     }
 
-    const m = (b.manifest ?? {}) as Record<string, unknown>;
-    const manifest: ApprovalEntry['manifest'] = {
-      name: typeof m.name === 'string' ? m.name.slice(0, 200) : undefined,
-      version: typeof m.version === 'string' ? m.version.slice(0, 64) : undefined,
-      author: typeof m.author === 'string' ? m.author.slice(0, 200) : undefined,
-      description: typeof m.description === 'string' ? m.description.slice(0, 500) : undefined,
-      permissions: Array.isArray(m.permissions) ? (m.permissions as unknown[]).filter((x): x is string => typeof x === 'string').slice(0, 50) : undefined,
-      httpOrigins: Array.isArray(m.httpOrigins) ? (m.httpOrigins as unknown[]).filter((x): x is string => typeof x === 'string').slice(0, 20) : undefined,
-      apiPostPaths: Array.isArray(m.apiPostPaths) ? (m.apiPostPaths as unknown[]).filter((x): x is string => typeof x === 'string').slice(0, 20) : undefined,
+    // formData() buffers the whole body; refuse what can't be a package first.
+    if (Number(request.headers.get('content-length') ?? 0) > MAX_UPLOAD_BYTES) {
+      return NextResponse.json({ error: 'Plugin package too large' }, { status: 413 });
+    }
+
+    // The request carries the package itself. The admin reviews the code
+    // and manifest the server read from it, and the approval is pinned to
+    // the hash the server computed, not to anything the client claims.
+    let file: File | null = null;
+    try {
+      const form = await request.formData();
+      const value = form.get('file');
+      file = value instanceof File ? value : null;
+    } catch { /* not multipart */ }
+    if (!file) {
+      return NextResponse.json({ error: 'Send the plugin ZIP as "file"' }, { status: 400 });
+    }
+    const bytes = new Uint8Array(await file.arrayBuffer());
+
+    let pkg;
+    try {
+      pkg = await readPluginPackage(bytes, { appVersion: process.env.NEXT_PUBLIC_APP_VERSION });
+    } catch (err) {
+      if (err instanceof ExtensionPackageError) return NextResponse.json({ error: err.message }, { status: 400 });
+      throw err;
+    }
+    const { manifest, code } = pkg;
+    const hash = await packageHash(manifest, code);
+
+    const snapshot: ApprovalEntry['manifest'] = {
+      name: manifest.name,
+      version: manifest.version,
+      author: manifest.author,
+      description: manifest.description,
+      permissions: manifest.permissions,
+      httpOrigins: manifest.httpOrigins,
+      apiPostPaths: manifest.apiPostPaths,
+      ...(manifest.credentials ? { credentials: manifest.credentials } : {}),
     };
 
-    const entry = await requestApproval(b.pluginId as string, b.bundleHash as string, manifest, username);
-    return NextResponse.json({ status: entry.status, requestedAt: entry.requestedAt, decidedAt: entry.decidedAt });
+    let entry: ApprovalEntry;
+    try {
+      entry = await requestApproval(manifest.id, hash, snapshot, username);
+    } catch (err) {
+      if (err instanceof ApprovalLimitError) return NextResponse.json({ error: err.message }, { status: 429 });
+      throw err;
+    }
+    if (entry.status === 'pending') await saveApprovalBundle(manifest.id, hash, bytes);
+    return NextResponse.json({
+      pluginId: manifest.id,
+      bundleHash: hash,
+      status: entry.status,
+      requestedAt: entry.requestedAt,
+      decidedAt: entry.decidedAt,
+    });
   } catch (err) {
+    const unavailable = storeUnavailableResponse(err);
+    if (unavailable) return unavailable;
     logger.error('plugin-approval-status POST', { error: err instanceof Error ? err.message : String(err) });
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }

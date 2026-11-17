@@ -2,12 +2,22 @@ import { NextRequest, NextResponse } from 'next/server';
 import { logger } from '@/lib/logger';
 import { downloadFileBlob, getWopiFileNode, updateFileNodeBlob, uploadFileBlob } from '@/lib/wopi/files';
 import { wopiContext } from '@/lib/wopi/request';
+import { readBodyCapped } from '@/lib/security/capped-body';
+import { bootGateResponse } from '@/lib/shared-store/boot-gate';
+
+/**
+ * Largest document PutFile takes. proxy.ts doesn't run for this route, so
+ * nothing else caps the copy held in memory; past it the save is refused, not
+ * cut short. Stalwart's own upload limit (maxSizeUpload) is usually lower.
+ */
+const MAX_PUT_FILE_BYTES = 100 * 1024 * 1024;
 
 /**
  * WOPI GetFile / PutFile (#425). Content flows purely over JMAP: GetFile
  * streams the node's blob (or, for a mail attachment, the attachment blob
  * itself - #1047), PutFile uploads the editor's bytes as a new blob into the
- * user's own account and points the FileNode at it via `FileNode/set { blobId }`.
+ * user's own account and points the FileNode at it via
+ * `FileNode/set { blobId, modified: null }`.
  */
 
 /**
@@ -30,6 +40,9 @@ export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ fileId: string }> },
 ) {
+  // The proxy doesn't run for this route, so it applies the boot gate itself.
+  const notReady = bootGateResponse();
+  if (notReady) return notReady;
   // The editor fetches this server-to-server and sends no Sec-Fetch headers.
   // A browser navigating to it, or loading it as a script or style, is not
   // the editor.
@@ -80,6 +93,9 @@ export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ fileId: string }> },
 ) {
+  // The proxy doesn't run for this route, so it applies the boot gate itself.
+  const notReady = bootGateResponse();
+  if (notReady) return notReady;
   try {
     const { fileId: documentId } = await params;
     const auth = await wopiContext(request, documentId);
@@ -110,14 +126,18 @@ export async function POST(
       }
     }
 
-    const body = await request.arrayBuffer();
+    const body = await readBodyCapped(request, MAX_PUT_FILE_BYTES);
+    if (!body) {
+      return NextResponse.json({ error: 'Document too large' }, { status: 413 });
+    }
     if (body.byteLength === 0) {
       return NextResponse.json({ error: 'Empty document rejected' }, { status: 409 });
     }
 
-    const blob = await uploadFileBlob(
-      auth.ctx, auth.payload.uploadAccountId || auth.payload.accountId, body, node.type,
-    );
+    // Uploaded into the user's own account: only members may use a blob
+    // reserved to an account, so a sharee can't upload into the owner's.
+    const uploadAccountId = auth.payload.uploadAccountId || auth.payload.accountId;
+    const blob = await uploadFileBlob(auth.ctx, uploadAccountId, body, node.type);
     const { modified } = await updateFileNodeBlob(
       auth.ctx, auth.payload.accountId, fileId, blob.blobId,
     );

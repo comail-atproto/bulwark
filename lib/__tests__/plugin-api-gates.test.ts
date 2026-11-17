@@ -154,6 +154,123 @@ describe('native keyword extension API', () => {
     expect(useSettingsStore.getState().emailKeywords).toEqual(before);
   });
 
+  it('uses settings:write for updating and removing definitions', async () => {
+    expect(await gateError(plugin(), 'keywords.update', [[]]))
+      .toMatch(/lacks permission "settings:write"/);
+    expect(await gateError(plugin(), 'keywords.remove', [[]]))
+      .toMatch(/lacks permission "settings:write"/);
+  });
+
+  it('records the plugin that added a definition, whatever the input says', async () => {
+    useSettingsStore.setState({ emailKeywords: [] });
+    const writer = plugin({ permissions: ['settings:write'], grantedPermissions: ['settings:write'] });
+
+    const result = await dispatchApiCall(writer, 'keywords.add', [[
+      { id: 'fairs', label: 'Fairs', color: 'blue', addedBy: 'someone-else' },
+    ]]) as { added: Array<{ addedBy?: string }> };
+
+    expect(result.added[0].addedBy).toBe('p1');
+    expect(useSettingsStore.getState().emailKeywords).toEqual([
+      { id: 'fairs', label: 'Fairs', color: 'blue', addedBy: 'p1' },
+    ]);
+  });
+
+  it('updates only the definitions the plugin added, never their id', async () => {
+    useSettingsStore.setState({
+      emailKeywords: [
+        { id: 'fairs/vison-2026', label: 'Vison 2026', color: 'blue', visibility: 'show', addedBy: 'p1' },
+        { id: 'work', label: 'My Work', color: 'purple' },
+        { id: 'other', label: 'Other', color: 'green', addedBy: 'p2' },
+      ],
+    });
+    const writer = plugin({ permissions: ['settings:write'], grantedPermissions: ['settings:write'] });
+
+    const result = await dispatchApiCall(writer, 'keywords.update', [[
+      { id: 'FAIRS/VISON-2026', label: ' Vision 2026 ', visibility: 'unread' },
+      { id: 'work', label: 'Plugin Work' },
+      { id: 'other', color: 'red' },
+      { id: 'missing', label: 'Missing' },
+    ]]);
+
+    expect(result).toEqual({
+      updated: [
+        { id: 'fairs/vison-2026', label: 'Vision 2026', color: 'blue', visibility: 'unread', addedBy: 'p1' },
+      ],
+      skipped: ['work', 'other', 'missing'],
+    });
+    expect(useSettingsStore.getState().emailKeywords).toEqual([
+      { id: 'fairs/vison-2026', label: 'Vision 2026', color: 'blue', visibility: 'unread', addedBy: 'p1' },
+      { id: 'work', label: 'My Work', color: 'purple' },
+      { id: 'other', label: 'Other', color: 'green', addedBy: 'p2' },
+    ]);
+  });
+
+  it('rejects invalid updates without partially updating settings', async () => {
+    const original = [
+      { id: 'a', label: 'A', color: 'blue', addedBy: 'p1' },
+      { id: 'b', label: 'B', color: 'green', addedBy: 'p1' },
+    ];
+    useSettingsStore.setState({ emailKeywords: original });
+    const writer = plugin({ permissions: ['settings:write'], grantedPermissions: ['settings:write'] });
+
+    for (const [patches, error] of [
+      ['a', /must be an array/],
+      [[{ id: 'a', label: 'A2' }, { id: 'b', color: 'not-a-color' }], /not in the keyword palette/],
+      [[{ id: 'a', label: '  ' }], /label must be/],
+      [[{ id: 'a', visibility: 'sometimes' }], /visibility is invalid/],
+      [[{ id: 'a' }], /changes nothing/],
+      [[{ id: 'not valid', label: 'X' }], /not a valid JMAP label id/],
+    ] as const) {
+      await expect(dispatchApiCall(writer, 'keywords.update', [patches])).rejects.toThrow(error);
+      expect(useSettingsStore.getState().emailKeywords).toEqual(original);
+    }
+  });
+
+  it('removes only the definitions the plugin added', async () => {
+    useSettingsStore.setState({
+      emailKeywords: [
+        { id: 'fairs/laser-2025', label: 'Laser 2025', color: 'blue', addedBy: 'p1' },
+        { id: 'work', label: 'My Work', color: 'purple' },
+        { id: 'other', label: 'Other', color: 'green', addedBy: 'p2' },
+        { id: 'fairs/vision-2026', label: 'Vision 2026', color: 'red', addedBy: 'p1' },
+      ],
+    });
+    const writer = plugin({ permissions: ['settings:write'], grantedPermissions: ['settings:write'] });
+
+    const result = await dispatchApiCall(writer, 'keywords.remove', [[
+      'FAIRS/LASER-2025', 'work', 'other', 'missing',
+    ]]);
+
+    expect(result).toEqual({ removed: ['fairs/laser-2025'], skipped: ['work', 'other', 'missing'] });
+    expect(useSettingsStore.getState().emailKeywords).toEqual([
+      { id: 'work', label: 'My Work', color: 'purple' },
+      { id: 'other', label: 'Other', color: 'green', addedBy: 'p2' },
+      { id: 'fairs/vision-2026', label: 'Vision 2026', color: 'red', addedBy: 'p1' },
+    ]);
+  });
+
+  it('rejects invalid remove ids without changing settings', async () => {
+    const original = [{ id: 'a', label: 'A', color: 'blue', addedBy: 'p1' }];
+    useSettingsStore.setState({ emailKeywords: original });
+    const writer = plugin({ permissions: ['settings:write'], grantedPermissions: ['settings:write'] });
+
+    for (const ids of ['a', ['a', 1], Array.from({ length: 501 }, (_, i) => `t${i}`)]) {
+      await expect(dispatchApiCall(writer, 'keywords.remove', [ids])).rejects.toThrow(/ids must be an array/);
+      expect(useSettingsStore.getState().emailKeywords).toEqual(original);
+    }
+  });
+
+  it('leaves the settings untouched when nothing matches', async () => {
+    const original = [{ id: 'work', label: 'My Work', color: 'purple' }];
+    useSettingsStore.setState({ emailKeywords: original });
+    const writer = plugin({ permissions: ['settings:write'], grantedPermissions: ['settings:write'] });
+
+    await dispatchApiCall(writer, 'keywords.update', [[{ id: 'work', label: 'X' }]]);
+    await dispatchApiCall(writer, 'keywords.remove', [['work']]);
+
+    expect(useSettingsStore.getState().emailKeywords).toBe(original);
+  });
+
   it('reorders complete label sets without changing user metadata', async () => {
     useSettingsStore.setState({
       emailKeywords: [
@@ -303,5 +420,167 @@ describe('native keyword extension API', () => {
       expect(error).not.toMatch(GATE_FAILURE);
       expect(error).toMatch(/No active session/);
     }
+  });
+
+  // Stalwart 1.0 derives hasAttachment from these, so a plugin adding or
+  // removing one would misreport the message.
+  it('keeps plugins off the attachment keywords Stalwart 1.0 sets itself', async () => {
+    const setKeyword = vi.fn();
+    const removeKeyword = vi.fn();
+    const updateEmailKeywords = vi.fn();
+    useAuthStore.setState({ client: { setKeyword, removeKeyword, updateEmailKeywords } as never });
+    const writer = plugin({ permissions: ['email:write'], grantedPermissions: ['email:write'] });
+
+    for (const method of ['jmap.setKeyword', 'jmap.removeKeyword', 'email.setKeyword', 'email.removeKeyword']) {
+      for (const keyword of ['$hasattachment', '$hasnoattachment', '$HasAttachment']) {
+        expect(await gateError(writer, method, ['email-1', keyword])).toMatch(/is set by the server/);
+      }
+    }
+    expect(await gateError(writer, 'jmap.setKeywords', ['email-1', { '$seen': true, '$hasattachment': true }]))
+      .toMatch(/"\$hasattachment" is set by the server/);
+
+    expect(setKeyword).not.toHaveBeenCalled();
+    expect(removeKeyword).not.toHaveBeenCalled();
+    expect(updateEmailKeywords).not.toHaveBeenCalled();
+
+    // Other keywords still go through.
+    await dispatchApiCall(writer, 'jmap.setKeyword', ['email-1', '$label:work']);
+    expect(setKeyword).toHaveBeenCalledWith('email-1', '$label:work', undefined);
+  });
+
+  it('leaves the attachment keywords out of a plugin import', async () => {
+    // Stalwart 1.0 adds the right one itself and keeps whatever else the
+    // import names, so a stray `$hasattachment` would stick.
+    const importRawEmail = vi.fn().mockResolvedValue('email-9');
+    const getMailboxes = vi.fn().mockResolvedValue([{ id: 'mb-inbox', role: 'inbox' }]);
+    useAuthStore.setState({ client: { importRawEmail, getMailboxes } as never });
+    const importer = plugin({ permissions: ['email:raw-send'], grantedPermissions: ['email:raw-send'] });
+
+    await dispatchApiCall(
+      importer,
+      'jmap.importRaw',
+      [new Uint8Array([1, 2, 3]), ['inbox'], { keywords: { $seen: true, $hasattachment: true, $HasNoAttachment: true } }],
+      { privileged: true },
+    );
+
+    expect(importRawEmail).toHaveBeenCalledWith(expect.any(Blob), { 'mb-inbox': true }, { $seen: true }, undefined);
+  });
+
+  it('hides the attachment keywords Stalwart 1.0 puts on every message from keywords.discover', async () => {
+    const discoverKeywords = vi.fn().mockResolvedValue({
+      keywords: { $seen: 5, $hasattachment: 2, $hasnoattachment: 3, '$label:work': 1 },
+      scanned: 5,
+      total: 5,
+      complete: true,
+    });
+    useAuthStore.setState({ client: { discoverKeywords } as never });
+    const reader = plugin({ permissions: ['email:read'], grantedPermissions: ['email:read'] });
+
+    await expect(dispatchApiCall(reader, 'keywords.discover', [])).resolves.toEqual({
+      keywords: { $seen: 5, '$label:work': 1 },
+      scanned: 5,
+      total: 5,
+      complete: true,
+    });
+  });
+});
+
+describe('jmap.uploadBlob', () => {
+  it('is open to an untrusted plugin with email:blob-write, for composer attachment sources', async () => {
+    const p = plugin({ permissions: ['email:blob-write'], grantedPermissions: ['email:blob-write'] });
+    expect(await gateError(p, 'jmap.uploadBlob', [new Uint8Array(1), 'a.bin', 'application/octet-stream']))
+      .not.toMatch(GATE_FAILURE);
+  });
+
+  it('still needs email:blob-write', async () => {
+    expect(await gateError(plugin(), 'jmap.uploadBlob', [new Uint8Array(1), 'a.bin', 'x/y']))
+      .toMatch(/lacks permission "email:blob-write"/);
+  });
+
+  describe('checks what it uploads', () => {
+    const uploader = () => plugin({ permissions: ['email:blob-write'], grantedPermissions: ['email:blob-write'] });
+    const uploadBlob = vi.fn(async (file: File) => ({ blobId: 'b1', size: file.size, type: file.type, name: file.name }));
+    let maxSizeUpload = 0;
+    const session = () => useAuthStore.setState({ client: { uploadBlob, getMaxSizeUpload: () => maxSizeUpload } as never });
+
+    afterEach(() => {
+      uploadBlob.mockClear();
+      maxSizeUpload = 0;
+      useAuthStore.setState({ client: null });
+    });
+
+    it('refuses a missing or blank name, a bad media type and content that is not bytes', async () => {
+      session();
+      expect(await gateError(uploader(), 'jmap.uploadBlob', [new Uint8Array(1), '', 'text/plain'])).toMatch(/name must be 1-255 characters/);
+      expect(await gateError(uploader(), 'jmap.uploadBlob', [new Uint8Array(1), '\u0000\u0001', 'text/plain'])).toMatch(/name must be 1-255 characters/);
+      expect(await gateError(uploader(), 'jmap.uploadBlob', [new Uint8Array(1), 'x'.repeat(256), 'text/plain'])).toMatch(/name must be 1-255 characters/);
+      expect(await gateError(uploader(), 'jmap.uploadBlob', [new Uint8Array(1), 'a.txt', 'text/plain; charset=utf-8'])).toMatch(/type is not a media type/);
+      expect(await gateError(uploader(), 'jmap.uploadBlob', [new Uint8Array(1), 'a.txt', 42])).toMatch(/type must be a string/);
+      expect(await gateError(uploader(), 'jmap.uploadBlob', ['hello', 'a.txt', 'text/plain'])).toMatch(/content must be a Uint8Array/);
+      expect(uploadBlob).not.toHaveBeenCalled();
+    });
+
+    it('caps the size at the server limit, or 50 MB when the server names none', async () => {
+      session();
+      maxSizeUpload = 10;
+      expect(await gateError(uploader(), 'jmap.uploadBlob', [new Uint8Array(11), 'a.bin', 'application/octet-stream'])).toMatch(/more than the 10 bytes allowed/);
+      expect(await gateError(uploader(), 'jmap.uploadBlob', [new Uint8Array(10), 'a.bin', 'application/octet-stream'])).toBe('');
+
+      maxSizeUpload = 0;
+      expect(await gateError(uploader(), 'jmap.uploadBlob', [new Uint8Array(50 * 1024 * 1024 + 1), 'a.bin', 'application/octet-stream']))
+        .toMatch(/more than the 52428800 bytes allowed/);
+      expect(uploadBlob).toHaveBeenCalledTimes(1);
+    });
+
+    it('uploads a clean file under its name and type', async () => {
+      session();
+      await dispatchApiCall(uploader(), 'jmap.uploadBlob', [new Uint8Array([1, 2, 3]), 'scan\u0007.pdf', 'application/pdf']);
+      const file = uploadBlob.mock.calls[0][0];
+      expect(file.name).toBe('scan.pdf');
+      expect(file.type).toBe('application/pdf');
+      expect(file.size).toBe(3);
+    });
+  });
+});
+
+describe('email.setKeyword and email.removeKeyword', () => {
+  const setKeyword = vi.fn(async () => {});
+  const removeKeyword = vi.fn(async () => {});
+  afterEach(() => {
+    setKeyword.mockClear();
+    removeKeyword.mockClear();
+    useAuthStore.setState({ client: null });
+  });
+
+  it('check the email id and account id like jmap.setKeyword does', async () => {
+    useAuthStore.setState({ client: { setKeyword, removeKeyword } as never });
+    const writer = plugin({ permissions: ['email:write'], grantedPermissions: ['email:write'] });
+    for (const method of ['email.setKeyword', 'email.removeKeyword']) {
+      expect(await gateError(writer, method, [undefined, '$label:work'])).toMatch(/emailId is required/);
+      expect(await gateError(writer, method, ['', '$label:work'])).toMatch(/emailId is required/);
+      expect(await gateError(writer, method, [{ id: 'e1' }, '$label:work'])).toMatch(/emailId is required/);
+      expect(await gateError(writer, method, ['e1', '$label:work', 7])).toMatch(/accountId must be a non-empty string/);
+    }
+    expect(setKeyword).not.toHaveBeenCalled();
+    expect(removeKeyword).not.toHaveBeenCalled();
+
+    await dispatchApiCall(writer, 'email.setKeyword', ['e1', '$label:work', 'acc-2']);
+    expect(setKeyword).toHaveBeenCalledWith('e1', '$label:work', 'acc-2');
+    await dispatchApiCall(writer, 'email.removeKeyword', ['e1', '$label:work']);
+    expect(removeKeyword).toHaveBeenCalledWith('e1', '$label:work', undefined);
+  });
+});
+
+describe('WebAuthn PRF salt', () => {
+  it("uses the calling plugin's id, not the one in the arguments", async () => {
+    const get = vi.fn(async () => { throw new Error('stop'); });
+    Object.defineProperty(navigator, 'credentials', { value: { get }, configurable: true });
+    const p = plugin({ id: 'mine', permissions: ['crypto:full'], managed: true, tier: 'privileged' });
+
+    await dispatchApiCall(p, 'crypto.getWebAuthn', [[1, 2, 3], 'someone-else'], { privileged: true }).catch(() => {});
+
+    const salt = (get.mock.calls[0] as unknown as [{ publicKey: { extensions: { prf: { eval: { first: Uint8Array } } } } }])[0]
+      .publicKey.extensions.prf.eval.first;
+    expect(new TextDecoder().decode(salt)).toBe('bulwark-plugins-v1mine');
   });
 });

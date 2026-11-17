@@ -67,6 +67,9 @@ export function SearchChips({
   if (sizeFilterBytes(filters.maxSizeKb) !== null) {
     chips.push({ key: "maxSizeKb", label: t("size_max"), value: `${filters.maxSizeKb} KB` });
   }
+  if (filters.pluginFilter) {
+    chips.push({ key: "pluginFilter", label: filters.pluginFilter.label, value: "" });
+  }
 
   if (chips.length === 0) return null;
 
@@ -87,7 +90,7 @@ export function SearchChips({
           <button
             type="button"
             onClick={() => onRemoveFilter(chip.key)}
-            className="ms-0.5 p-0.5 rounded-full hover:bg-primary/20 transition-colors"
+            className="-my-1 -me-1 p-1.5 rounded-full hover:bg-primary/20 transition-colors"
           >
             <X className="w-3 h-3" />
           </button>

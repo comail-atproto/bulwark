@@ -1,0 +1,330 @@
+
+/* Body text uses Atkinson Hyperlegible; headings use Young Serif. */
+body[data-theme-skin="builtin-comail"] {
+  font-family: var(--comail-font-body, "Atkinson Hyperlegible"), "Charter",
+    "Georgia", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+}
+/* Section headings + the login "Sign in" title use the warm display serif. */
+body[data-theme-skin="builtin-comail"] h1,
+body[data-theme-skin="builtin-comail"] h2,
+body[data-theme-skin="builtin-comail"] h3,
+body[data-theme-skin="builtin-comail"] .masthead,
+body[data-theme-skin="builtin-comail"] .section h2 {
+  font-family: var(--comail-font-display, "Young Serif"), "Iowan Old Style",
+    "Palatino Linotype", Palatino, serif;
+  letter-spacing: -0.01em;
+}
+
+/* White on #012102 has 17.22:1 contrast. Hover remains AAA on black. */
+body[data-theme-skin="builtin-comail"] .bg-primary.text-primary-foreground {
+  background-color: #012102 !important;
+  color: #ffffff !important;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+body[data-theme-skin="builtin-comail"] .bg-primary.text-primary-foreground:hover {
+  background-color: #000000 !important;
+}
+body[data-theme-skin="builtin-comail"] .bg-primary.text-primary-foreground:focus-visible {
+  outline: 2px solid var(--color-ring) !important;
+  outline-offset: 2px !important;
+}
+/* Cyan on the charcoal canvas keeps dark primary actions distinct;
+   dark ink on cyan has 7.34:1 contrast. */
+.dark body[data-theme-skin="builtin-comail"] .bg-primary.text-primary-foreground {
+  background-color: #3fa1c0 !important;
+  border: 1px solid #6dbfd6 !important;
+  color: #012102 !important;
+}
+.dark body[data-theme-skin="builtin-comail"] .bg-primary.text-primary-foreground:hover {
+  background-color: #2f8aa6 !important;
+}
+
+body[data-theme-skin="builtin-comail"] input[type="text"],
+body[data-theme-skin="builtin-comail"] input[type="email"],
+body[data-theme-skin="builtin-comail"] input[type="password"],
+body[data-theme-skin="builtin-comail"] input[type="url"],
+body[data-theme-skin="builtin-comail"] input[type="search"],
+body[data-theme-skin="builtin-comail"] textarea,
+body[data-theme-skin="builtin-comail"] select {
+  background-color: #ffffff !important;
+  border-color: #c4c6a0 !important;
+  color: #012102 !important;
+}
+body[data-theme-skin="builtin-comail"] input[type="text"]:focus,
+body[data-theme-skin="builtin-comail"] input[type="email"]:focus,
+body[data-theme-skin="builtin-comail"] input[type="password"]:focus,
+body[data-theme-skin="builtin-comail"] input[type="url"]:focus,
+body[data-theme-skin="builtin-comail"] input[type="search"]:focus,
+body[data-theme-skin="builtin-comail"] textarea:focus,
+body[data-theme-skin="builtin-comail"] select:focus {
+  border-color: #3fa1c0 !important;
+  box-shadow: 0 0 0 2px rgba(63, 161, 192, 0.35) !important;
+  outline: none !important;
+}
+/* Dark inputs override the light skin's white fill with the surface token. */
+.dark body[data-theme-skin="builtin-comail"] input[type="text"],
+.dark body[data-theme-skin="builtin-comail"] input[type="email"],
+.dark body[data-theme-skin="builtin-comail"] input[type="password"],
+.dark body[data-theme-skin="builtin-comail"] input[type="url"],
+.dark body[data-theme-skin="builtin-comail"] input[type="search"],
+.dark body[data-theme-skin="builtin-comail"] textarea,
+.dark body[data-theme-skin="builtin-comail"] select {
+  background-color: var(--color-input) !important;
+  border-color: #2e3138 !important;
+  color: #e7e9ea !important;
+}
+.dark body[data-theme-skin="builtin-comail"] input::placeholder,
+.dark body[data-theme-skin="builtin-comail"] textarea::placeholder {
+  color: #a8acb1 !important;
+}
+
+body[data-theme-skin="builtin-comail"] a:focus-visible,
+body[data-theme-skin="builtin-comail"] button:focus-visible,
+body[data-theme-skin="builtin-comail"] [role="switch"]:focus-visible,
+body[data-theme-skin="builtin-comail"] [tabindex]:focus-visible {
+  outline: 2px solid var(--color-ring) !important;
+  outline-offset: 2px !important;
+}
+
+body[data-theme-skin="builtin-comail"] [role="switch"][aria-checked="true"] {
+  background-color: #3fa1c0 !important;
+  border-color: #2f8aa6 !important;
+}
+
+body[data-theme-skin="builtin-comail"] [role="menu"] [role="menuitem"]:hover,
+body[data-theme-skin="builtin-comail"] [role="menu"] [role="menuitem"]:focus,
+body[data-theme-skin="builtin-comail"] [role="menu"] [role="menuitem"]:focus-visible {
+  background-color: #cfe6ec !important;
+  color: #02413c !important;
+}
+.dark body[data-theme-skin="builtin-comail"] [role="menu"] [role="menuitem"]:hover,
+.dark body[data-theme-skin="builtin-comail"] [role="menu"] [role="menuitem"]:focus,
+.dark body[data-theme-skin="builtin-comail"] [role="menu"] [role="menuitem"]:focus-visible {
+  background-color: var(--color-accent) !important;
+  color: var(--color-accent-foreground) !important;
+}
+
+/* The narrow w-14 task rail (sidebar.tsx page shell) + the folder sidebar
+   both read as #02413c with cream labels. text-muted-foreground on the rail
+   is lifted to a cream-grey (#a8b3a0, 5.27:1) so counts/icons stay legible. */
+body[data-theme-skin="builtin-comail"] .w-14.bg-secondary,
+body[data-theme-skin="builtin-comail"] .bg-secondary.border-e,
+body[data-theme-skin="builtin-comail"] .bg-secondary.border-r {
+  background-color: #02413c !important;
+  border-color: #0a5249 !important;
+  color: #ecefcf !important;
+}
+body[data-theme-skin="builtin-comail"] .w-14.bg-secondary a,
+body[data-theme-skin="builtin-comail"] .w-14.bg-secondary button,
+body[data-theme-skin="builtin-comail"] .bg-secondary.border-e a,
+body[data-theme-skin="builtin-comail"] .bg-secondary.border-r a,
+body[data-theme-skin="builtin-comail"] .bg-secondary.border-e button,
+body[data-theme-skin="builtin-comail"] .bg-secondary.border-r button {
+  color: #ecefcf !important;
+}
+body[data-theme-skin="builtin-comail"] .w-14.bg-secondary .text-muted-foreground,
+body[data-theme-skin="builtin-comail"] .bg-secondary.border-e .text-muted-foreground,
+body[data-theme-skin="builtin-comail"] .bg-secondary.border-r .text-muted-foreground {
+  color: #a8b3a0 !important;
+}
+/* Surface-ink classes need cream on the teal sidebar (9.77:1 contrast).
+   Popovers portal outside this sidebar, so their foreground stays unchanged. */
+body[data-theme-skin="builtin-comail"] .w-14.bg-secondary .text-foreground,
+body[data-theme-skin="builtin-comail"] .w-14.bg-secondary .text-foreground\/80,
+body[data-theme-skin="builtin-comail"] .bg-secondary.border-e .text-foreground,
+body[data-theme-skin="builtin-comail"] .bg-secondary.border-r .text-foreground,
+body[data-theme-skin="builtin-comail"] .bg-secondary.border-e .text-foreground\/80,
+body[data-theme-skin="builtin-comail"] .bg-secondary.border-r .text-foreground\/80 {
+  color: #ecefcf !important;
+}
+/* Demo-banner text needs cream on teal; scope this to the folder sidebar
+   to preserve the rail's cyan selected-task glyph. */
+body[data-theme-skin="builtin-comail"] .bg-secondary.border-e .text-primary,
+body[data-theme-skin="builtin-comail"] .bg-secondary.border-r .text-primary {
+  color: #ecefcf !important;
+}
+body[data-theme-skin="builtin-comail"] .w-14.bg-secondary a:hover,
+body[data-theme-skin="builtin-comail"] .w-14.bg-secondary button:hover,
+body[data-theme-skin="builtin-comail"] .bg-secondary.border-e a:hover,
+body[data-theme-skin="builtin-comail"] .bg-secondary.border-r a:hover,
+body[data-theme-skin="builtin-comail"] .bg-secondary.border-e button:hover,
+body[data-theme-skin="builtin-comail"] .bg-secondary.border-r button:hover {
+  background-color: #1a5466 !important;
+  color: #ffffff !important;
+}
+/* Lifted cyan has 5.01:1 contrast on the selected-task slab. */
+body[data-theme-skin="builtin-comail"] .w-14.bg-secondary .bg-primary\/10 {
+  background-color: #1a5466 !important;
+}
+body[data-theme-skin="builtin-comail"] .w-14.bg-secondary .text-primary {
+  color: #8fd2e8 !important;
+}
+
+/* The slab and 3px accent bar together mark selection. White text has
+   8.39:1 contrast; the lifted-cyan bar clears the 3:1 UI minimum. */
+body[data-theme-skin="builtin-comail"] .bg-secondary.border-e .border-s-2.border-primary,
+body[data-theme-skin="builtin-comail"] .bg-secondary.border-r .border-l-2.border-primary {
+  border-left-width: 3px !important;
+  border-left-color: #8fd2e8 !important;
+  background-color: #1a5466 !important;
+  color: #ffffff !important;
+}
+/* Unselected folder rows keep cream text; hover lifts to the slab. */
+body[data-theme-skin="builtin-comail"] .bg-secondary.border-e .hover\:bg-muted\/50:hover,
+body[data-theme-skin="builtin-comail"] .bg-secondary.border-r .hover\:bg-muted\/50:hover,
+body[data-theme-skin="builtin-comail"] .bg-secondary.border-e .hover\:bg-muted:hover,
+body[data-theme-skin="builtin-comail"] .bg-secondary.border-r .hover\:bg-muted:hover {
+  background-color: #1a5466 !important;
+  color: #ffffff !important;
+}
+/* Tailwind emits a separate /70 opacity class for the settings gear;
+   include it with the section headers and chevrons. */
+body[data-theme-skin="builtin-comail"] .bg-secondary.border-e .text-muted-foreground,
+body[data-theme-skin="builtin-comail"] .bg-secondary.border-r .text-muted-foreground,
+body[data-theme-skin="builtin-comail"] .bg-secondary.border-e .text-muted-foreground\/70,
+body[data-theme-skin="builtin-comail"] .bg-secondary.border-r .text-muted-foreground\/70 {
+  color: #a8b3a0 !important;
+}
+/* Muted text has 5.27:1 contrast on resting teal but only 3.84:1 on the
+   selected slab. Cream lifts selected and hovered counts to 7.1:1. */
+body[data-theme-skin="builtin-comail"] .bg-secondary.border-e .border-s-2.border-primary .text-muted-foreground,
+body[data-theme-skin="builtin-comail"] .bg-secondary.border-r .border-l-2.border-primary .text-muted-foreground,
+body[data-theme-skin="builtin-comail"] .bg-secondary.border-e .hover\:bg-muted\/50:hover .text-muted-foreground,
+body[data-theme-skin="builtin-comail"] .bg-secondary.border-r .hover\:bg-muted\/50:hover .text-muted-foreground,
+body[data-theme-skin="builtin-comail"] .bg-secondary.border-e .hover\:bg-muted:hover .text-muted-foreground,
+body[data-theme-skin="builtin-comail"] .bg-secondary.border-r .hover\:bg-muted:hover .text-muted-foreground {
+  color: #ecefcf !important;
+}
+
+/* Dark sidebars use charcoal surfaces. Keep foreground/primary text
+   classes under the token layer; override surfaces and count text only. */
+.dark body[data-theme-skin="builtin-comail"] .w-14.bg-secondary,
+.dark body[data-theme-skin="builtin-comail"] .bg-secondary.border-e,
+.dark body[data-theme-skin="builtin-comail"] .bg-secondary.border-r {
+  background-color: #16181d !important;
+  border-color: #3a3d44 !important;
+  color: #e7e9ea !important;
+}
+.dark body[data-theme-skin="builtin-comail"] .w-14.bg-secondary a,
+.dark body[data-theme-skin="builtin-comail"] .w-14.bg-secondary button,
+.dark body[data-theme-skin="builtin-comail"] .bg-secondary.border-e a,
+.dark body[data-theme-skin="builtin-comail"] .bg-secondary.border-r a,
+.dark body[data-theme-skin="builtin-comail"] .bg-secondary.border-e button,
+.dark body[data-theme-skin="builtin-comail"] .bg-secondary.border-r button {
+  color: #e7e9ea !important;
+}
+.dark body[data-theme-skin="builtin-comail"] .w-14.bg-secondary .text-muted-foreground,
+.dark body[data-theme-skin="builtin-comail"] .bg-secondary.border-e .text-muted-foreground,
+.dark body[data-theme-skin="builtin-comail"] .bg-secondary.border-r .text-muted-foreground,
+.dark body[data-theme-skin="builtin-comail"] .w-14.bg-secondary .text-muted-foreground\/70,
+.dark body[data-theme-skin="builtin-comail"] .bg-secondary.border-e .text-muted-foreground\/70,
+.dark body[data-theme-skin="builtin-comail"] .bg-secondary.border-r .text-muted-foreground\/70 {
+  color: #a8acb1 !important;
+}
+.dark body[data-theme-skin="builtin-comail"] .w-14.bg-secondary a:hover,
+.dark body[data-theme-skin="builtin-comail"] .w-14.bg-secondary button:hover,
+.dark body[data-theme-skin="builtin-comail"] .bg-secondary.border-e a:hover,
+.dark body[data-theme-skin="builtin-comail"] .bg-secondary.border-r a:hover,
+.dark body[data-theme-skin="builtin-comail"] .bg-secondary.border-e button:hover,
+.dark body[data-theme-skin="builtin-comail"] .bg-secondary.border-r button:hover,
+.dark body[data-theme-skin="builtin-comail"] .bg-secondary.border-e .hover\:bg-muted\/50:hover,
+.dark body[data-theme-skin="builtin-comail"] .bg-secondary.border-r .hover\:bg-muted\/50:hover,
+.dark body[data-theme-skin="builtin-comail"] .bg-secondary.border-e .hover\:bg-muted:hover,
+.dark body[data-theme-skin="builtin-comail"] .bg-secondary.border-r .hover\:bg-muted:hover {
+  background-color: #2a2d33 !important;
+  color: #e7e9ea !important;
+}
+.dark body[data-theme-skin="builtin-comail"] .w-14.bg-secondary .bg-primary\/10 {
+  background-color: #2a2d33 !important;
+}
+.dark body[data-theme-skin="builtin-comail"] .bg-secondary.border-e .border-s-2.border-primary,
+.dark body[data-theme-skin="builtin-comail"] .bg-secondary.border-r .border-l-2.border-primary {
+  border-left-color: #6dbfd6 !important;
+  background-color: #2a2d33 !important;
+  color: #e7e9ea !important;
+}
+.dark body[data-theme-skin="builtin-comail"] .bg-secondary.border-e .border-s-2.border-primary .text-muted-foreground,
+.dark body[data-theme-skin="builtin-comail"] .bg-secondary.border-r .border-l-2.border-primary .text-muted-foreground,
+.dark body[data-theme-skin="builtin-comail"] .bg-secondary.border-e .hover\:bg-muted\/50:hover .text-muted-foreground,
+.dark body[data-theme-skin="builtin-comail"] .bg-secondary.border-r .hover\:bg-muted\/50:hover .text-muted-foreground,
+.dark body[data-theme-skin="builtin-comail"] .bg-secondary.border-e .hover\:bg-muted:hover .text-muted-foreground,
+.dark body[data-theme-skin="builtin-comail"] .bg-secondary.border-r .hover\:bg-muted:hover .text-muted-foreground {
+  color: #e7e9ea !important;
+}
+
+body[data-theme-skin="builtin-comail"] .bg-secondary.border-e .bg-accent.text-accent-foreground,
+body[data-theme-skin="builtin-comail"] .bg-secondary.border-r .bg-accent.text-accent-foreground {
+  color: var(--color-accent-foreground) !important;
+}
+
+/* Contacts categories use bg-secondary without a border class. */
+body[data-theme-skin="builtin-comail"] .bg-secondary:not(.border-r):not(.border-e) .text-foreground,
+body[data-theme-skin="builtin-comail"] .bg-secondary:not(.border-r):not(.border-e) .text-foreground\/80 {
+  color: #ecefcf !important;
+}
+body[data-theme-skin="builtin-comail"] .bg-secondary:not(.border-r):not(.border-e) .text-muted-foreground,
+body[data-theme-skin="builtin-comail"] .bg-secondary:not(.border-r):not(.border-e) .text-muted-foreground\/70 {
+  color: #a8b3a0 !important;
+}
+body[data-theme-skin="builtin-comail"] .bg-secondary:not(.border-r):not(.border-e) button,
+body[data-theme-skin="builtin-comail"] .bg-secondary:not(.border-r):not(.border-e) a {
+  color: #ecefcf !important;
+}
+body[data-theme-skin="builtin-comail"] .bg-secondary:not(.border-r):not(.border-e) button:hover,
+body[data-theme-skin="builtin-comail"] .bg-secondary:not(.border-r):not(.border-e) a:hover,
+body[data-theme-skin="builtin-comail"] .bg-secondary:not(.border-r):not(.border-e) .hover\:bg-muted:hover {
+  background-color: #1a5466 !important;
+  color: #ffffff !important;
+}
+.dark body[data-theme-skin="builtin-comail"] .bg-secondary:not(.border-r):not(.border-e) button:hover,
+.dark body[data-theme-skin="builtin-comail"] .bg-secondary:not(.border-r):not(.border-e) a:hover,
+.dark body[data-theme-skin="builtin-comail"] .bg-secondary:not(.border-r):not(.border-e) .hover\:bg-muted:hover {
+  background-color: #2a2d33 !important;
+  color: #e7e9ea !important;
+}
+
+/* Selected settings and contacts tabs use light cyan, so their text
+   needs the accent foreground instead of the sidebar's cream. */
+body[data-theme-skin="builtin-comail"] .bg-secondary .bg-accent {
+  color: #02413c !important;
+}
+.dark body[data-theme-skin="builtin-comail"] .bg-secondary .bg-accent {
+  color: #6dbfd6 !important;
+}
+
+/* Leave rounded-full (pills/avatars/toggles) alone. */
+body[data-theme-skin="builtin-comail"] .rounded-md {
+  border-radius: 0.5rem !important;
+}
+body[data-theme-skin="builtin-comail"] .rounded-lg,
+body[data-theme-skin="builtin-comail"] .rounded-xl {
+  border-radius: 0.75rem !important;
+}
+
+/* Mountain View keeps its geometry and uses Comail's surface and action tokens. */
+html[data-interface-layout="mountain-view"] body[data-theme-skin="builtin-comail"] {
+  --mv-canvas: var(--color-background);
+  --mv-search-bg: var(--color-input);
+  --mv-nav-selected: var(--color-selection);
+  --mv-compose-bg: var(--color-primary);
+  --mv-compose-fg: var(--color-primary-foreground);
+  --mv-row-read: var(--color-background);
+}
+/* The global border color otherwise overrides the sidebar's transparent rule. */
+html[data-interface-layout="mountain-view"] body[data-theme-skin="builtin-comail"] .border-e.border-transparent {
+  border-inline-end-color: transparent;
+}
+html[data-interface-layout="mountain-view"] body[data-theme-skin="builtin-comail"] [data-mv-card],
+html[data-interface-layout="mountain-view"] body[data-theme-skin="builtin-comail"] [data-mv-side-panel] {
+  --color-background: var(--color-card);
+}
+html[data-interface-layout="mountain-view"] body[data-theme-skin="builtin-comail"] [data-attachment-chips] {
+  margin-block: 0.5rem;
+  gap: 0.5rem;
+}
+html[data-interface-layout="mountain-view"] body[data-theme-skin="builtin-comail"] [data-attachment-chips] > :is(button, span) {
+  padding: 0.25rem 0.625rem;
+  border-radius: 0.75rem !important;
+  background-color: var(--color-card);
+}

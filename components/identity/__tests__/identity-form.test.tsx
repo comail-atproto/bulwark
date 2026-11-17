@@ -8,6 +8,7 @@ import type { Identity } from '@/lib/jmap/types';
 let mockIdentityManagementEnabled = true;
 vi.mock('@/hooks/use-config', () => ({
   useConfig: () => ({ identityManagementEnabled: mockIdentityManagementEnabled }),
+  getCachedConfig: () => null,
 }));
 
 vi.mock('@/lib/email-sanitization', () => ({

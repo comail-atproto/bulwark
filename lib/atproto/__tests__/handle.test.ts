@@ -1,7 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   normalizeHandle,
-  looksLikeHandle,
   searchActorsTypeahead,
   resolveHandle,
   APPVIEW_BASE,
@@ -30,24 +29,6 @@ describe('normalizeHandle', () => {
 
   it('returns empty string for empty input', () => {
     expect(normalizeHandle('   ')).toBe('');
-  });
-});
-
-describe('looksLikeHandle', () => {
-  it('accepts a dotted handle', () => {
-    expect(looksLikeHandle('alice.bsky.social')).toBe(true);
-  });
-
-  it('accepts a raw did', () => {
-    expect(looksLikeHandle('did:plc:abc123')).toBe(true);
-  });
-
-  it('rejects a value with no dot and not a did', () => {
-    expect(looksLikeHandle('alice')).toBe(false);
-  });
-
-  it('rejects empty', () => {
-    expect(looksLikeHandle('')).toBe(false);
   });
 });
 

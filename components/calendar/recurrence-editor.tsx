@@ -238,7 +238,7 @@ export function RecurrenceEditor({ rule, eventStart, onSave, onCancel }: Recurre
 
   const summary = buildRecurrenceSummary(buildRule(), t, locale);
 
-  const selectCls = "rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring";
+  const selectCls = "rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-hidden";
 
   return (
     <div className="mt-2 rounded-md border border-border bg-muted/20 p-3 space-y-3">

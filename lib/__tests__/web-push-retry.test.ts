@@ -61,6 +61,7 @@ describe('enableWebPush verification retry', () => {
     const verifyPushSubscription = vi.fn(async () => undefined);
     const client = {
       getAccountId: () => 'account-1',
+      hasAccountCapability: () => false,
       listPushSubscriptions: vi.fn(async () => []),
       createPushSubscription,
       destroyPushSubscription,

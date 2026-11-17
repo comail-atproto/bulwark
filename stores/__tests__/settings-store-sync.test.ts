@@ -6,6 +6,7 @@ vi.mock('@/lib/browser-navigation', () => ({ apiFetch }));
 
 import { useSettingsStore } from '../settings-store';
 import { useTemplateStore } from '../template-store';
+import { useCalendarStore } from '../calendar-store';
 
 describe('settings sync debounce', () => {
   beforeEach(() => {
@@ -17,6 +18,7 @@ describe('settings sync debounce', () => {
     useSettingsStore.getState().disableSync();
     useSettingsStore.setState({ sendDelaySeconds: 0, settingsSyncDisabled: false });
     useTemplateStore.setState({ templates: [], recentTemplateIds: [], deletedTemplateIds: {} });
+    useCalendarStore.setState({ icalSubscriptions: [], deletedSubscriptionIds: {} });
   });
 
   it('flushes a pending snapshot for the account that scheduled it', async () => {
@@ -48,6 +50,41 @@ describe('settings sync debounce', () => {
     expect(JSON.parse(request.body as string)).toMatchObject({
       settings: { pushNotifyInboxOnly: true },
     });
+  });
+
+  it('defaults the signature auto-insert toggles and the separator to on and exports them', () => {
+    const settings = useSettingsStore.getState();
+    expect(settings.signatureNewMailEnabled).toBe(true);
+    expect(settings.signatureReplyForwardEnabled).toBe(true);
+    expect(settings.signatureSeparatorEnabled).toBe(true);
+
+    const exported = JSON.parse(settings.exportSettings()) as Record<string, unknown>;
+    expect(exported).toMatchObject({
+      signatureNewMailEnabled: true,
+      signatureReplyForwardEnabled: true,
+      signatureSeparatorEnabled: true,
+    });
+  });
+
+  it('keeps inserting the signature for users whose saved settings predate the toggles', async () => {
+    useSettingsStore.getState().resetToDefaults();
+    // Saved by a build without the toggles: the keys are missing.
+    localStorage.setItem('settings-storage', JSON.stringify({
+      state: { signaturePosition: 'below_quote', signatureSeparatorEnabled: true },
+      version: 12,
+    }));
+    await useSettingsStore.persist.rehydrate();
+    expect(useSettingsStore.getState().signatureNewMailEnabled).toBe(true);
+    expect(useSettingsStore.getState().signatureReplyForwardEnabled).toBe(true);
+
+    // A server copy written by such a build has no toggles either.
+    useSettingsStore.getState().importSettings(
+      JSON.stringify({ signaturePosition: 'above_quote' }),
+      { serverAccountId: 'a@example.com' },
+    );
+    expect(useSettingsStore.getState().signatureNewMailEnabled).toBe(true);
+    expect(useSettingsStore.getState().signatureReplyForwardEnabled).toBe(true);
+    localStorage.removeItem('settings-storage');
   });
 
   it('does not rewrite a pending account snapshot after another account becomes active', async () => {
@@ -264,5 +301,150 @@ describe('template push after a server load', () => {
     addLocal();
 
     expect(await login()).toHaveLength(0);
+  });
+});
+
+describe('calendar subscription sync', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    useSettingsStore.getState().disableSync();
+    useSettingsStore.setState({ settingsSyncDisabled: false });
+    useCalendarStore.setState({ icalSubscriptions: [], deletedSubscriptionIds: {} });
+  });
+
+  it('merges server-loaded subscriptions instead of replacing local ones', () => {
+    useCalendarStore.setState({
+      icalSubscriptions: [{
+        id: 'local-1',
+        url: 'https://example.com/local.ics',
+        calendarId: 'cal-local',
+        name: 'Local',
+        color: '#3b82f6',
+        refreshInterval: 60,
+        lastRefreshed: null,
+      }],
+    });
+
+    const ok = useSettingsStore.getState().importSettings(
+      JSON.stringify({
+        icalSubscriptions: [{
+          id: 'remote-1',
+          url: 'https://example.com/remote.ics',
+          calendarId: 'cal-remote',
+          name: 'Remote',
+          color: '#ef4444',
+          refreshInterval: 60,
+          lastRefreshed: null,
+        }],
+        deletedSubscriptionIds: {},
+      }),
+      { serverAccountId: 'acct-1' }
+    );
+
+    expect(ok).toBe(true);
+    const ids = useCalendarStore.getState().icalSubscriptions.map((s) => s.id).sort();
+    expect(ids).toEqual(['local-1', 'remote-1']);
+  });
+
+  it('leaves local subscriptions untouched when importing a pre-subscription settings blob', () => {
+    useCalendarStore.setState({
+      icalSubscriptions: [{
+        id: 'keep-1',
+        url: 'https://example.com/keep.ics',
+        calendarId: 'cal-keep',
+        name: 'Keep',
+        color: '#3b82f6',
+        refreshInterval: 60,
+        lastRefreshed: null,
+      }],
+    });
+
+    const ok = useSettingsStore.getState().importSettings(
+      JSON.stringify({ sendDelaySeconds: 10 }),
+      { serverAccountId: 'acct-1' }
+    );
+
+    expect(ok).toBe(true);
+    expect(useCalendarStore.getState().icalSubscriptions).toHaveLength(1);
+  });
+
+  it('round-trips subscriptions through exportSettings', () => {
+    useCalendarStore.setState({
+      icalSubscriptions: [{
+        id: 'export-1',
+        url: 'https://example.com/export.ics',
+        calendarId: 'cal-export',
+        name: 'Exported Sub',
+        color: '#3b82f6',
+        refreshInterval: 60,
+        lastRefreshed: null,
+      }],
+    });
+
+    const exported = JSON.parse(useSettingsStore.getState().exportSettings());
+    expect(exported.icalSubscriptions).toHaveLength(1);
+    expect(exported.icalSubscriptions[0].name).toBe('Exported Sub');
+    expect(exported.deletedSubscriptionIds).toEqual({});
+  });
+  it('pushes only the active login\'s subscriptions into its server blob', async () => {
+    const sub = (id: string, owner?: string) => ({
+      id, url: `https://example.com/${id}.ics`, calendarId: `cal-${id}`, name: id,
+      color: '#3b82f6', refreshInterval: 60, lastRefreshed: null, owner,
+    });
+    useSettingsStore.getState().enableSync('Alice@Example.com', 'https://mail.example.com/');
+    // Secret feed URLs of another login must not land in this login's blob,
+    // and unowned (pre-owner) entries are claimed locally before they sync.
+    useCalendarStore.setState({
+      icalSubscriptions: [
+        sub('mine', 'https://mail.example.com|alice@example.com'),
+        sub('bobs', 'https://other.example.org|bob@example.org'),
+        sub('unowned'),
+      ],
+    });
+
+    await useSettingsStore.getState().flushSync();
+
+    const body = JSON.parse((apiFetch.mock.calls[0][1] as RequestInit).body as string);
+    expect(body.settings.icalSubscriptions.map((s: { id: string }) => s.id)).toEqual(['mine']);
+  });
+
+  it('ignores other logins\' subscriptions in a server blob written before owners were synced', async () => {
+    const sub = (id: string, owner?: string) => ({
+      id, url: `https://example.com/${id}.ics`, calendarId: `cal-${id}`, name: id,
+      color: '#3b82f6', refreshInterval: 60, lastRefreshed: null, owner,
+    });
+    apiFetch.mockResolvedValueOnce(new Response(JSON.stringify({
+      settings: {
+        icalSubscriptions: [
+          sub('mine', 'https://mail.example.com|alice@example.com'),
+          sub('bobs', 'https://other.example.org|bob@example.org'),
+          sub('unowned'),
+        ],
+        deletedSubscriptionIds: {},
+      },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+
+    await useSettingsStore.getState().loadFromServer('alice@example.com', 'https://mail.example.com');
+
+    // Unowned entries stay: calendar-store only adopts them once their
+    // calendar id and name are found in this login's account.
+    const ids = useCalendarStore.getState().icalSubscriptions.map((s) => s.id).sort();
+    expect(ids).toEqual(['mine', 'unowned']);
+  });
+
+  it('does not push settings when only calendar view state changes', async () => {
+    useSettingsStore.getState().enableSync('a@example.com', 'https://mail-a.example.com');
+    await useSettingsStore.getState().flushSync();
+    apiFetch.mockClear();
+
+    useCalendarStore.setState({ selectedDate: new Date('2026-05-01T00:00:00Z'), isLoadingEvents: true });
+    useCalendarStore.setState({ isLoadingEvents: false, events: [] });
+    await useSettingsStore.getState().flushSync();
+
+    expect(apiFetch).not.toHaveBeenCalled();
   });
 });

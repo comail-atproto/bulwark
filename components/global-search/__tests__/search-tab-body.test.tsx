@@ -43,7 +43,7 @@ vi.mock('@/lib/global-search/accounts', () => ({
 }));
 vi.mock('@/lib/global-search/open-hit', () => ({ openHit: vi.fn() }));
 vi.mock('@/stores/account-store', () => {
-  const state = { getActiveAccount: () => undefined, accounts: [{ id: 'login-a', label: 'Work', email: 'a@x', isConnected: true }] };
+  const state = { accounts: [{ id: 'login-a', label: 'Work', email: 'a@x', isConnected: true }] };
   const hook = (sel?: (s: typeof state) => unknown) => (typeof sel === 'function' ? sel(state) : state);
   hook.getState = () => state;
   return { useAccountStore: hook };

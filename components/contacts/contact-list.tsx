@@ -1,17 +1,27 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslations, useLocale } from "next-intl";
-import { Search, BookUser, Trash2, Users, Download, X, UserPlus, CheckSquare, Square, Filter, Mail, Phone, Image as ImageIcon, RotateCcw, Menu, ArrowDownAZ } from "@/components/icons";
+import { Search, BookUser, Trash2, Users, Download, X, UserPlus, CheckSquare, Square, Filter, Mail, Phone, Image as ImageIcon, RotateCcw, Menu, ArrowDownAZ, Loader2, FolderInput, Upload, Printer } from "@/components/icons";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { EmptyState } from "@/components/ui/empty-state";
+import { IconButton } from "@/components/ui/icon-button";
+import { ToolbarButton, ToolbarSearch, ToolbarSearchAction } from "@/components/ui/toolbar";
 import { ContactListItem } from "./contact-list-item";
 import { ContactContextMenu } from "./contact-context-menu";
-import { useContextMenu } from "@/hooks/use-context-menu";
+import { useContactExportBusy } from "./contact-export";
+import { ContactListPrint } from "./contact-print-views";
+import { PluginActions } from "@/components/plugins/plugin-actions";
+import { isContextMenuKey, useContextMenu } from "@/hooks/use-context-menu";
+import { PhoneHeaderActions } from "@/components/layout/phone-header-actions";
 import { cn } from "@/lib/utils";
 import type { AnniversaryDate, ContactCard } from "@/lib/jmap/types";
-import { getContactDisplayName, getContactPhotoUri, getContactSortName } from "@/stores/contact-store";
+import { getContactDisplayName, getContactSortName, hasContactPhoto } from "@/stores/contact-store";
 import { useSettingsStore } from "@/stores/settings-store";
+import { isAppShortcutBlocked } from "@/lib/keyboard";
+import { isSingleKeyShortcutOff } from "@/lib/single-key-shortcuts";
+import { ContactRowsSkeleton } from "@/components/boot-skeleton/contacts-skeleton";
 
 type TriState = boolean | null;
 
@@ -112,8 +122,24 @@ interface ContactListProps {
   onEditContact: (id: string) => void;
   onDeleteContact: (contact: ContactCard) => void;
   onAddContactToGroup: (id: string) => void;
+  /** Opens the app's composer to the contact. */
+  onComposeContact?: (contact: ContactCard) => void;
+  onDuplicateContact?: (contact: ContactCard) => void;
+  /** Move contacts to another address book; undefined where there is none. */
+  onMoveContacts?: (ids: string[]) => void;
   /** Show a burger button at the start that opens the (overlay) categories sidebar. */
   onMenuClick?: () => void;
+  /** The list shows one address book, category or group, not the whole account. */
+  emptyView?: boolean;
+  onImport?: () => void;
+  /** Contacts' own entries in the phone header's ⋮. */
+  phoneMenuItems?: (close: () => void) => React.ReactNode;
+  /** The first fetch is still running: show placeholders, not "No contacts yet". */
+  isLoading?: boolean;
+  /** Print the list as it is on screen (filtered, sorted, grouped). */
+  onPrint?: () => void;
+  /** Set while the list is being printed: the name of what it shows. */
+  printTitle?: string | null;
 }
 
 export function ContactList({
@@ -135,18 +161,31 @@ export function ContactList({
   onEditContact,
   onDeleteContact,
   onAddContactToGroup,
+  onComposeContact,
+  onDuplicateContact,
+  onMoveContacts,
   onMenuClick,
+  phoneMenuItems,
+  emptyView = false,
+  onImport,
+  isLoading = false,
+  onPrint,
+  printTitle,
 }: ContactListProps) {
   const t = useTranslations("contacts");
+  const tCommon = useTranslations("common");
   const locale = useLocale();
   const density = useSettingsStore((state) => state.density);
   const groupByLetter = useSettingsStore((state) => state.groupContactsByLetter);
   const sortByLastName = useSettingsStore((state) => state.sortContactsByLastName);
   const updateSetting = useSettingsStore((state) => state.updateSetting);
-  const { contextMenu, openContextMenu, closeContextMenu, menuRef } = useContextMenu<ContactCard>();
+  const { contextMenu, openContextMenu, openContextMenuFrom, closeContextMenu, menuRef } = useContextMenu<ContactCard>();
+  // Opened by a long-press: the menu also offers Select, as touch has no Ctrl+click.
+  const [menuByTouch, setMenuByTouch] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [filters, setFilters] = useState<ListFilters>(EMPTY_FILTERS);
   const activeFilters = countActiveFilters(filters);
+  const exporting = useContactExportBusy();
 
   const monthNames = useMemo(() => {
     const fmt = new Intl.DateTimeFormat(locale, { month: "long" });
@@ -170,7 +209,7 @@ export function ContactList({
 
       if (!matchTri(emails.length > 0, filters.hasEmail)) return false;
       if (!matchTri(phones.length > 0, filters.hasPhone)) return false;
-      if (!matchTri(!!getContactPhotoUri(c), filters.hasPhoto)) return false;
+      if (!matchTri(hasContactPhoto(c), filters.hasPhoto)) return false;
 
       if (orgLower) {
         const match = orgs.some((o) => {
@@ -265,26 +304,102 @@ export function ContactList({
   }, [sorted, locale, sortByLastName]);
 
   const hasSelection = selectedContactIds.size > 0;
+  const pluginContext = useMemo(() => ({ contactIds: [...selectedContactIds] }), [selectedContactIds]);
   const allSelected = sorted.length > 0 && sorted.every(c => selectedContactIds.has(c.id));
+
+  // ---- Keyboard (R8): the list keys Mail and Files share --------------------
+  // One row takes Tab (roving focus): the open contact, else the first.
+  const listRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const [focusedId, setFocusedId] = useState<string | null>(null);
+  const cursorId = focusedId && sortedIds.includes(focusedId)
+    ? focusedId
+    : selectedContactId && sortedIds.includes(selectedContactId) ? selectedContactId : sortedIds[0] ?? null;
+  const focusRow = useCallback((id: string) => {
+    setFocusedId(id);
+    const row = listRef.current?.querySelector<HTMLElement>(`[data-contact-id="${CSS.escape(id)}"]`);
+    row?.focus();
+    row?.scrollIntoView?.({ block: "nearest" });
+  }, []);
+
+  const handleListKeyDown = (e: React.KeyboardEvent) => {
+    const target = e.target as HTMLElement;
+    if (target.closest("input, textarea, select, [contenteditable=true]")) return;
+    const mod = e.ctrlKey || e.metaKey;
+    const index = cursorId ? sortedIds.indexOf(cursorId) : -1;
+    const contact = cursorId ? sorted.find((c) => c.id === cursorId) : undefined;
+    const moveTo = (next: number, extend: boolean) => {
+      if (sortedIds.length === 0) return;
+      const id = sortedIds[Math.max(0, Math.min(sortedIds.length - 1, next))];
+      focusRow(id);
+      if (extend) onSelectRangeContacts(id, sortedIds);
+      else if (!hasSelection) onSelectContact(id);
+    };
+    if (isContextMenuKey(e) && contact) {
+      e.preventDefault();
+      const row = listRef.current?.querySelector<HTMLElement>(`[data-contact-id="${CSS.escape(contact.id)}"]`);
+      if (row) openContextMenuFrom(row, contact);
+    } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      moveTo(index + (e.key === "ArrowDown" ? 1 : -1), e.shiftKey);
+    } else if (e.key === "Home" || e.key === "End") {
+      e.preventDefault();
+      moveTo(e.key === "Home" ? 0 : sortedIds.length - 1, e.shiftKey);
+    } else if (e.key === "Enter" && contact) {
+      e.preventDefault();
+      onSelectContact(contact.id);
+    } else if (e.key === " " && contact) {
+      e.preventDefault();
+      onToggleSelection(contact.id);
+    } else if (mod && e.code === "KeyA") {
+      e.preventDefault();
+      onSelectAll(sortedIds);
+    } else if ((e.key === "Delete" || e.key === "Backspace") && !e.altKey) {
+      // Backspace deletes too (⌘⌫ on a Mac), as in Mail and Files.
+      if (hasSelection) {
+        e.preventDefault();
+        onBulkDelete();
+      } else if (contact) {
+        e.preventDefault();
+        onDeleteContact(contact);
+      }
+    } else if (e.key === "Escape") {
+      if (hasSelection) {
+        e.preventDefault();
+        onClearSelection();
+      } else if (searchQuery) {
+        e.preventDefault();
+        onSearchChange("");
+      }
+    }
+  };
+
+  // "/" goes to the search from anywhere in Contacts, as in Mail.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "/" || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (isAppShortcutBlocked(e) || isSingleKeyShortcutOff(e)) return;
+      if (document.querySelector('[role="dialog"], [role="alertdialog"]')) return;
+      e.preventDefault();
+      searchRef.current?.focus();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   return (
     <div className={cn("flex flex-col h-full", className)}>
       {/* Toolbar: select / search / filter */}
       <div className="border-b border-border bg-background">
-        <div className="px-3 py-3">
-          <div className="flex items-center gap-1.5">
+        <div className="px-3 h-14 flex items-center">
+          <div className="flex items-center gap-1 w-full">
             {onMenuClick && (
-              <button
-                type="button"
-                onClick={onMenuClick}
-                className="flex-shrink-0 p-2 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-                aria-label={t("open_categories")}
-              >
-                <Menu className="w-4 h-4" />
-              </button>
+              <ToolbarButton label={t("open_categories")} onClick={onMenuClick}>
+                <Menu />
+              </ToolbarButton>
             )}
-            <button
-              type="button"
+            <ToolbarButton
+              label={hasSelection ? (allSelected ? t("bulk.clear") : t("bulk.select_all")) : t("filters.select")}
               onClick={() => {
                 if (hasSelection) {
                   if (allSelected) onClearSelection();
@@ -296,55 +411,44 @@ export function ContactList({
                   onToggleSelection(target);
                 }
               }}
-              className={cn(
-                "flex-shrink-0 p-2 rounded-md transition-colors",
-                hasSelection
-                  ? "bg-primary/10 text-primary"
-                  : "text-muted-foreground hover:text-foreground hover:bg-muted",
-              )}
-              title={hasSelection ? (allSelected ? t("bulk.clear") : t("bulk.select_all")) : t("filters.select")}
+              active={hasSelection}
             >
-              {hasSelection ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4" />}
-            </button>
-            <div className="relative flex-1">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-              <Input
-                type="text"
-                placeholder={t("search_placeholder")}
-                value={searchQuery}
-                onChange={(e) => onSearchChange(e.target.value)}
-                className={cn("ps-9 h-9", searchQuery && "pe-8")}
-              />
-              {searchQuery && (
-                <button
-                  type="button"
-                  onClick={() => onSearchChange("")}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-full hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
-                  aria-label={t("clear_search")}
+              {hasSelection ? <CheckSquare /> : <Square />}
+            </ToolbarButton>
+            <ToolbarSearch
+              ref={searchRef}
+              className="flex-1"
+              placeholder={t("search_placeholder")}
+              aria-label={t("search_placeholder")}
+              autoComplete="off"
+              shortcut="/"
+              value={searchQuery}
+              onChange={(e) => onSearchChange(e.target.value)}
+              onClear={() => onSearchChange("")}
+              clearLabel={t("clear_search")}
+              trailing={
+                <ToolbarSearchAction
+                  aria-label={t("filters.toggle")}
+                  title={t("filters.toggle")}
+                  onClick={() => setFiltersOpen((v) => !v)}
+                  aria-expanded={filtersOpen}
+                  active={filtersOpen || activeFilters > 0}
                 >
-                  <X className="w-4 h-4" />
-                </button>
-              )}
-            </div>
-            <button
-              type="button"
-              onClick={() => setFiltersOpen((v) => !v)}
-              className={cn(
-                "relative flex-shrink-0 p-2 rounded-md transition-colors",
-                filtersOpen || activeFilters > 0
-                  ? "bg-primary/10 text-primary"
-                  : "text-muted-foreground hover:text-foreground hover:bg-muted",
-              )}
-              title={t("filters.toggle")}
-              aria-label={t("filters.toggle")}
-            >
-              <Filter className="w-4 h-4" />
-              {!filtersOpen && activeFilters > 0 && (
-                <span className="absolute -top-1 -right-1 flex items-center justify-center w-4 h-4 text-[10px] font-bold rounded-full bg-primary text-primary-foreground">
-                  {activeFilters}
-                </span>
-              )}
-            </button>
+                  <Filter className="w-4 h-4" />
+                  {!filtersOpen && activeFilters > 0 && (
+                    <span className="absolute -top-1 -end-1 flex items-center justify-center w-4 h-4 text-[0.625rem] font-bold rounded-full bg-primary text-primary-foreground">
+                      {activeFilters}
+                    </span>
+                  )}
+                </ToolbarSearchAction>
+              }
+            />
+            {onPrint && (
+              <ToolbarButton label={tCommon("print")} onClick={onPrint} className="hidden md:inline-flex">
+                <Printer />
+              </ToolbarButton>
+            )}
+            <PhoneHeaderActions below="md" menuItems={phoneMenuItems} />
           </div>
         </div>
 
@@ -358,22 +462,15 @@ export function ContactList({
               <div className="flex items-center gap-1">
                 <Button
                   variant="ghost"
-                  size="sm"
+                  size="xs"
                   onClick={() => setFilters(EMPTY_FILTERS)}
-                  className="h-7 px-2 text-xs"
                 >
                   <RotateCcw className="w-3 h-3 me-1" />
                   {t("filters.clear")}
                 </Button>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  onClick={() => setFiltersOpen(false)}
-                  className="h-7 w-7"
-                  aria-label={t("filters.close")}
-                >
-                  <X className="w-4 h-4" />
-                </Button>
+                <IconButton label={t("filters.close")} onClick={() => setFiltersOpen(false)}>
+                  <X />
+                </IconButton>
               </div>
             </div>
 
@@ -381,6 +478,7 @@ export function ContactList({
               <div>
                 <label className="text-xs text-muted-foreground mb-1 block">{t("filters.organization")}</label>
                 <Input
+                  aria-label={t("filters.organization")}
                   value={filters.organization}
                   onChange={(e) => setFilters((f) => ({ ...f, organization: e.target.value }))}
                   placeholder={t("filters.organization_placeholder")}
@@ -390,6 +488,7 @@ export function ContactList({
               <div>
                 <label className="text-xs text-muted-foreground mb-1 block">{t("filters.job_title")}</label>
                 <Input
+                  aria-label={t("filters.job_title")}
                   value={filters.jobTitle}
                   onChange={(e) => setFilters((f) => ({ ...f, jobTitle: e.target.value }))}
                   placeholder={t("filters.job_title_placeholder")}
@@ -402,6 +501,7 @@ export function ContactList({
               <div>
                 <label className="text-xs text-muted-foreground mb-1 block">{t("filters.location")}</label>
                 <Input
+                  aria-label={t("filters.location")}
                   value={filters.location}
                   onChange={(e) => setFilters((f) => ({ ...f, location: e.target.value }))}
                   placeholder={t("filters.location_placeholder")}
@@ -411,6 +511,7 @@ export function ContactList({
               <div>
                 <label className="text-xs text-muted-foreground mb-1 block">{t("filters.email_domain")}</label>
                 <Input
+                  aria-label={t("filters.email_domain")}
                   value={filters.emailDomain}
                   onChange={(e) => setFilters((f) => ({ ...f, emailDomain: e.target.value }))}
                   placeholder={t("filters.email_domain_placeholder")}
@@ -480,8 +581,14 @@ export function ContactList({
 
       {/* Bulk action bar */}
       {hasSelection && (
-        <div className="px-3 py-1.5 border-b border-border bg-accent/30 flex items-center gap-2 flex-wrap">
+        // One line at any width: below 28rem the buttons show only their icons.
+        <div className="@container px-3 py-1.5 border-b border-border bg-accent/30 flex items-center gap-1 flex-nowrap min-w-0">
           <button
+            type="button"
+            role="checkbox"
+            aria-checked={allSelected ? true : "mixed"}
+            aria-label={allSelected ? t("bulk.clear") : t("bulk.select_all")}
+            title={allSelected ? t("bulk.clear") : t("bulk.select_all")}
             onClick={() => {
               if (allSelected) {
                 onClearSelection();
@@ -497,51 +604,65 @@ export function ContactList({
               <Square className="w-4 h-4 text-muted-foreground" />
             )}
           </button>
-          <span className="text-xs font-medium text-foreground">
+          <span className="text-xs font-medium text-foreground whitespace-nowrap">
             {t("bulk.selected", { count: selectedContactIds.size })}
           </span>
           <div className="flex-1" />
-          <Button variant="ghost" size="sm" onClick={onBulkAddToGroup} className="h-7 text-xs">
-            <Users className="w-3.5 h-3.5 me-1" />
-            {t("bulk.add_to_group")}
+          <Button variant="ghost" size="xs" onClick={onBulkAddToGroup} aria-label={t("bulk.add_to_group")} title={t("bulk.add_to_group")} className="shrink-0">
+            <Users className="w-3.5 h-3.5 @md:me-1" />
+            <span className="hidden @md:inline">{t("bulk.add_to_group")}</span>
           </Button>
-          <Button variant="ghost" size="sm" onClick={onBulkExport} className="h-7 text-xs">
-            <Download className="w-3.5 h-3.5 me-1" />
-            {t("bulk.export")}
+          {onMoveContacts && (
+            <Button variant="ghost" size="xs" onClick={() => onMoveContacts([...selectedContactIds])} aria-label={t("address_books.move_to")} title={t("address_books.move_to")} className="shrink-0">
+              <FolderInput className="w-3.5 h-3.5 @md:me-1" />
+              <span className="hidden @md:inline">{t("address_books.move_to")}</span>
+            </Button>
+          )}
+          <Button variant="ghost" size="xs" onClick={onBulkExport} disabled={exporting} aria-busy={exporting} aria-label={t("bulk.export")} title={t("bulk.export")} className="shrink-0">
+            {exporting
+              ? <Loader2 className="w-3.5 h-3.5 @md:me-1 animate-spin" />
+              : <Download className="w-3.5 h-3.5 @md:me-1" />}
+            <span className="hidden @md:inline">{exporting ? t("export.exporting") : t("bulk.export")}</span>
           </Button>
           <Button
             variant="ghost"
-            size="sm"
+            size="xs"
             onClick={onBulkDelete}
-            className="h-7 text-xs text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300"
+            aria-label={t("bulk.delete")}
+            title={t("bulk.delete")}
+            className="shrink-0 text-destructive hover:text-destructive hover:bg-destructive/10"
           >
-            <Trash2 className="w-3.5 h-3.5 me-1" />
-            {t("bulk.delete")}
+            <Trash2 className="w-3.5 h-3.5 @md:me-1" />
+            <span className="hidden @md:inline">{t("bulk.delete")}</span>
           </Button>
-          <Button variant="ghost" size="icon" onClick={onClearSelection} className="h-7 w-7">
-            <X className="w-3.5 h-3.5" />
-          </Button>
+          <PluginActions surface="contact-list-actions" context={pluginContext} />
+          <IconButton label={t("bulk.clear")} onClick={onClearSelection}>
+            <X />
+          </IconButton>
         </div>
       )}
 
       {/* Contact list */}
-      <div className="flex-1 overflow-y-auto">
-        {sorted.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full px-6 text-center">
-            {searchQuery || activeFilters > 0 ? (
-              <>
-                {activeFilters > 0 && !searchQuery ? (
-                  <Filter className="w-10 h-10 mb-3 text-muted-foreground/30" />
-                ) : (
-                  <Search className="w-10 h-10 mb-3 text-muted-foreground/30" />
-                )}
-                <p className="text-sm font-medium text-foreground">
-                  {searchQuery ? t("empty_search") : t("empty_filtered")}
-                </p>
-                <p className="text-xs text-muted-foreground mt-1">
-                  {searchQuery ? t("empty_search_hint") : t("empty_filtered_hint")}
-                </p>
-                <div className="flex gap-2 mt-3">
+      <div
+        ref={listRef}
+        role="listbox"
+        aria-label={t("title")}
+        aria-multiselectable
+        onKeyDown={handleListKeyDown}
+        className="flex-1 overflow-y-auto"
+      >
+        {sorted.length === 0 && isLoading && !searchQuery && activeFilters === 0 ? (
+          // The rows the page skeleton drew, at the same density.
+          <ContactRowsSkeleton density={density} letters={groupByLetter} />
+        ) : sorted.length === 0 ? (
+          searchQuery || activeFilters > 0 ? (
+            <EmptyState
+              compact
+              icon={activeFilters > 0 && !searchQuery ? Filter : Search}
+              title={searchQuery ? t("empty_search") : t("empty_filtered")}
+              description={searchQuery ? t("empty_search_hint") : t("empty_filtered_hint")}
+              actions={
+                <>
                   {searchQuery && (
                     <Button variant="outline" size="sm" onClick={() => onSearchChange("")}>
                       {t("clear_search")}
@@ -553,20 +674,33 @@ export function ContactList({
                       {t("filters.clear")}
                     </Button>
                   )}
-                </div>
-              </>
-            ) : (
-              <>
-                <BookUser className="w-10 h-10 mb-3 text-muted-foreground/30" />
-                <p className="text-sm font-medium text-foreground">{t("empty_state_title")}</p>
-                <p className="text-xs text-muted-foreground mt-1">{t("empty_state_subtitle")}</p>
-                <Button size="sm" className="mt-3" onClick={onCreateNew}>
-                  <UserPlus className="w-4 h-4 me-1.5" />
-                  {t("create_new")}
-                </Button>
-              </>
-            )}
-          </div>
+                </>
+              }
+            />
+          ) : (
+            // The whole account is empty, or only the address book, category
+            // or group on screen: each says so, and both offer New and Import.
+            <EmptyState
+              compact
+              icon={BookUser}
+              title={emptyView ? t("empty_view_title") : t("empty_state_title")}
+              description={emptyView ? t("empty_view_hint") : t("empty_state_subtitle")}
+              actions={
+                <>
+                  <Button size="sm" onClick={onCreateNew}>
+                    <UserPlus className="w-4 h-4 me-1.5" />
+                    {t("create_new")}
+                  </Button>
+                  {onImport && (
+                    <Button variant="outline" size="sm" onClick={onImport}>
+                      <Upload className="w-4 h-4 me-1.5" />
+                      {t("import.title")}
+                    </Button>
+                  )}
+                </>
+              }
+            />
+          )
         ) : (
           (() => {
             const renderItem = (contact: ContactCard) => (
@@ -576,14 +710,22 @@ export function ContactList({
                 isSelected={contact.id === selectedContactId}
                 isChecked={selectedContactIds.has(contact.id)}
                 hasSelection={hasSelection}
+                isFocused={contact.id === cursorId}
+                onFocus={() => setFocusedId(contact.id)}
                 density={density}
                 selectedContactIds={selectedContactIds}
                 onClick={(e) => {
+                  // The open contact counts as selected, as a clicked file does
+                  // in Files: Ctrl/⌘+click and Shift+click build on it.
+                  const startFromOpen = !hasSelection && !!selectedContactId
+                    && selectedContactId !== contact.id && sortedIds.includes(selectedContactId);
                   if (e.ctrlKey || e.metaKey) {
                     e.preventDefault();
+                    if (startFromOpen) onToggleSelection(selectedContactId);
                     onToggleSelection(contact.id);
                   } else if (e.shiftKey) {
                     e.preventDefault();
+                    if (startFromOpen) onToggleSelection(selectedContactId);
                     onSelectRangeContacts(contact.id, sortedIds);
                   } else {
                     if (hasSelection) onClearSelection();
@@ -594,14 +736,15 @@ export function ContactList({
                   e.stopPropagation();
                   onToggleSelection(contact.id);
                 }}
-                onContextMenu={(e, c) => openContextMenu(e, c)}
+                onContextMenu={(e, c) => { setMenuByTouch(false); openContextMenu(e, c); }}
+                onLongPress={(row) => { setMenuByTouch(true); openContextMenuFrom(row, contact); }}
               />
             );
             return groupByLetter ? (
               <div>
                 {groupedSections.map(({ letter, items }) => (
-                  <section key={letter}>
-                    <div className="sticky top-0 z-10 px-4 py-0.5 bg-background/90 backdrop-blur-sm text-[11px] font-medium text-muted-foreground/70 uppercase tracking-wide">
+                  <section key={letter} role="group" aria-label={letter}>
+                    <div aria-hidden className="sticky top-0 z-10 px-4 py-0.5 bg-background/90 backdrop-blur-sm text-[0.6875rem] font-medium text-muted-foreground">
                       {letter}
                     </div>
                     {items.map(renderItem)}
@@ -615,6 +758,15 @@ export function ContactList({
         )}
       </div>
 
+      {printTitle != null && (
+        <ContactListPrint
+          title={printTitle}
+          contacts={sorted}
+          sections={groupByLetter ? groupedSections : null}
+          searchQuery={searchQuery}
+        />
+      )}
+
       {contextMenu.data && (
         <ContactContextMenu
           contact={contextMenu.data}
@@ -625,9 +777,14 @@ export function ContactList({
           isMultiSelect={selectedContactIds.has(contextMenu.data.id)}
           selectedCount={selectedContactIds.size}
           onOpen={() => onSelectContact(contextMenu.data!.id)}
+          onSelect={menuByTouch ? () => onToggleSelection(contextMenu.data!.id) : undefined}
           onEdit={() => onEditContact(contextMenu.data!.id)}
           onDelete={() => onDeleteContact(contextMenu.data!)}
           onAddToGroup={() => onAddContactToGroup(contextMenu.data!.id)}
+          onCompose={onComposeContact ? () => onComposeContact(contextMenu.data!) : undefined}
+          onDuplicate={onDuplicateContact ? () => onDuplicateContact(contextMenu.data!) : undefined}
+          onMoveTo={onMoveContacts ? () => onMoveContacts([contextMenu.data!.id]) : undefined}
+          onBatchMoveTo={onMoveContacts ? () => onMoveContacts([...selectedContactIds]) : undefined}
           onBatchExport={onBulkExport}
           onBatchAddToGroup={onBulkAddToGroup}
           onBatchDelete={onBulkDelete}

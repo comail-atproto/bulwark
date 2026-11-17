@@ -1,22 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { BUILTIN_THEMES } from '../builtin-themes';
+import { COMAIL_THEME } from '@/lib/__tests__/fixtures/comail-theme';
 
-// Regression coverage for issue #1762: in LIGHT mode the comail folder
-// sidebar (deep-teal #02413c) leaked the surface ink #012102 onto its own
-// counts / muted text / account header / "Demo Mode" banner because the skin
-// only remapped `.text-muted-foreground` — not `.text-foreground` or
-// `.text-primary` — inside the sidebar. Those tokens must resolve to the cream
-// sidebar foreground so text clears WCAG AA (4.5:1) against the teal.
-//
-// We assert against the compiled skin CSS string (same approach as
-// builtin-themes.test.ts). The teal sidebar surface is targeted in the skin by
-// the `.bg-secondary.border-r` selector and the narrow rail by `.w-14.bg-secondary`.
+// Keep sidebar labels and counts readable on teal without changing popovers.
 
 const CREAM = '#ecefcf'; // established comail sidebar-foreground (9.77:1 on #02413c)
 const INK = '#012102'; // darkestBlue surface ink — must NOT be the fg on teal
 
 function comailSkin(): string {
-  const theme = BUILTIN_THEMES.find(t => t.id === 'builtin-comail');
+  const theme = COMAIL_THEME;
   expect(theme, 'builtin-comail theme must exist').toBeTruthy();
   expect(theme!.skin, 'builtin-comail must ship a skin').toBeTruthy();
   return theme!.skin as string;

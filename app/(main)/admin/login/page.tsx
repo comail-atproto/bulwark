@@ -1,22 +1,26 @@
 'use client';
 
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
-import { Shield } from '@/components/icons';
+import { AlertCircle, Shield } from '@/components/icons';
 import { useConfig } from '@/hooks/use-config';
-import { useThemeStore } from '@/stores/theme-store';
 import { apiFetch, withBasePath } from '@/lib/browser-navigation';
 import { safeAdminNext } from '@/lib/connector/admin-next';
-import { isAdminTab, useAdminTabStore } from '@/stores/admin-tab-store';
 
 export default function AdminLoginPage() {
   const router = useRouter();
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const { loginLogoLightUrl, loginLogoDarkUrl } = useConfig();
-  const resolvedTheme = useThemeStore((s) => s.resolvedTheme);
-  const logoUrl = withBasePath(resolvedTheme === 'dark' ? loginLogoDarkUrl : loginLogoLightUrl);
+  const { loginLogoLightUrl, loginLogoDarkUrl, appName } = useConfig();
+  // Both logos, picked by CSS: the server can't know the theme, and a logo
+  // chosen from the theme store swaps after the first paint.
+  const logoLight = withBasePath(loginLogoLightUrl || loginLogoDarkUrl);
+  const logoDark = withBasePath(loginLogoDarkUrl || loginLogoLightUrl);
+
+  useEffect(() => {
+    document.title = `Sign in - Admin - ${appName}`;
+  }, [appName]);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -37,19 +41,12 @@ export default function AdminLoginPage() {
         return;
       }
 
-      // A connector link to an admin panel parks its destination in ?next=
-      // so logging in lands on the panel that was clicked, not the dashboard.
+      // A connector link to an admin page parks its destination in ?next=
+      // so logging in lands on the page that was clicked, not the overview.
       // safeAdminNext() is the gate: it is the only path here that comes out
-      // of a URL rather than out of a fixed template.
-      const next = safeAdminNext(new URLSearchParams(window.location.search).get('next'));
-      if (next) {
-        const [path, query] = next.split('?', 2);
-        const tab = new URLSearchParams(query ?? '').get('tab');
-        if (tab && isAdminTab(tab)) useAdminTabStore.getState().setActiveTab(tab);
-        router.push(path);
-        return;
-      }
-      router.push('/admin');
+      // of a URL rather than out of a fixed template. A version pick (an
+      // install link to one version of an extension) rides in its query.
+      router.push(safeAdminNext(new URLSearchParams(window.location.search).get('next')) ?? '/admin');
     } catch {
       setError('Network error. Please try again.');
     } finally {
@@ -61,8 +58,11 @@ export default function AdminLoginPage() {
     <div className="min-h-screen flex items-center justify-center bg-background px-4">
       <div className="w-full max-w-sm">
         <div className="flex flex-col items-center mb-8">
-          {logoUrl ? (
-            <img src={logoUrl} alt="" className="h-12 object-contain mb-4" />
+          {logoLight ? (
+            <>
+              <img src={logoLight} alt="" className="h-12 object-contain mb-4 dark:hidden" />
+              <img src={logoDark} alt="" className="h-12 object-contain mb-4 hidden dark:block" />
+            </>
           ) : (
             <div className="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center mb-4">
               <Shield className="w-6 h-6 text-primary" />
@@ -82,17 +82,20 @@ export default function AdminLoginPage() {
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground transition-all duration-200 placeholder:text-muted-foreground hover:border-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-ring"
+              className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground transition-all duration-200 placeholder:text-muted-foreground hover:border-muted-foreground focus-visible:outline-hidden focus-visible:border-ring"
               placeholder="Enter admin password"
               required
               autoFocus
               autoComplete="current-password"
+              aria-invalid={error ? true : undefined}
+              aria-describedby={error ? 'admin-login-error' : undefined}
             />
           </div>
 
           {error && (
-            <div className="text-sm text-destructive bg-destructive/10 rounded-md px-3 py-2">
-              {error}
+            <div role="alert" className="flex items-start gap-2 text-sm text-destructive bg-destructive/10 rounded-md px-3 py-2">
+              <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" aria-hidden="true" />
+              <span id="admin-login-error">{error}</span>
             </div>
           )}
 

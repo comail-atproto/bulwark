@@ -175,3 +175,38 @@ describe('ProTabBar (per-pane strip)', () => {
     expect(container.querySelector('.bg-primary')).toBeNull();
   });
 });
+
+// MO-06: the tab order was drag-only.
+describe('ProTabBar keyboard', () => {
+  beforeEach(() => {
+    seedStore([HOME, CAL, EM]);
+  });
+
+  function renderBar(onActivate = vi.fn()) {
+    render(
+      <ProTabBar paneId="main" tabs={[HOME, CAL]} activeTabId={HOME.id} isFocused onActivate={onActivate} onClose={() => {}} />,
+    );
+    return onActivate;
+  }
+
+  it('makes the active tab a Tab stop', () => {
+    renderBar();
+    const [home, cal] = screen.getAllByRole('tab');
+    expect(home).toHaveAttribute('tabindex', '0');
+    expect(cal).toHaveAttribute('tabindex', '-1');
+  });
+
+  it('moves the tab with Alt+Shift+ArrowRight', () => {
+    renderBar();
+    fireEvent.keyDown(screen.getAllByRole('tab')[0], { key: 'ArrowRight', altKey: true, shiftKey: true });
+    const mainTabs = useProTabStore.getState().tabs.filter((t) => t.paneId === 'main').map((t) => t.id);
+    expect(mainTabs).toEqual(['cal', 'home-mail']);
+  });
+
+  it('goes to the next tab with ArrowRight without moving it', () => {
+    const onActivate = renderBar();
+    fireEvent.keyDown(screen.getAllByRole('tab')[0], { key: 'ArrowRight' });
+    expect(onActivate).toHaveBeenCalledWith('cal');
+    expect(useProTabStore.getState().tabs.map((t) => t.id)).toEqual(['home-mail', 'cal', 'em']);
+  });
+});

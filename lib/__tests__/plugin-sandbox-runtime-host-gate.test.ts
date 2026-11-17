@@ -1,3 +1,4 @@
+import { installRuntimeTestChannel, sendToRuntime } from './sandbox-runtime-test-channel';
 /**
  * The plugin sandbox runtime hands `init.code` to `new Function` under an
  * 'unsafe-eval' CSP. It used to pin "the host" to whichever window posted to
@@ -32,13 +33,15 @@ function initMessage() {
   };
 }
 
-/** Dispatch a message event the way the browser would for `source`. */
+/** Send host RPC through the established port. */
 function post(source: unknown, origin: string, data: unknown): void {
-  const ev = new MessageEvent('message', { data, origin });
-  // jsdom only accepts real Window objects in the constructor's `source`;
-  // override the prototype getter on the instance instead.
-  Object.defineProperty(ev, 'source', { value: source });
-  window.dispatchEvent(ev);
+  sendToRuntime(source, origin, data);
+}
+
+function postWindow(source: unknown, origin: string, data: unknown): void {
+  const event = new MessageEvent('message', { data, origin });
+  Object.defineProperty(event, 'source', { value: source });
+  window.dispatchEvent(event);
 }
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -52,6 +55,7 @@ beforeEach(() => {
   vi.resetModules();
   delete marker.__sandboxBundleRan;
   hostWindow = { postMessage: vi.fn() };
+  installRuntimeTestChannel(hostWindow);
   framed = false;
   Object.defineProperty(window, 'parent', {
     configurable: true,
@@ -61,6 +65,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllGlobals();
   if (realParent) Object.defineProperty(window, 'parent', realParent);
 });
 
@@ -80,9 +85,9 @@ describe('plugin sandbox runtime host gate (GHSA-96cx-gx36-3g79)', () => {
 
     // The window.open() attack: the opener posts init before any host could.
     const opener = { postMessage: vi.fn() };
-    post(opener, ATTACKER_ORIGIN, initMessage());
+    postWindow(opener, ATTACKER_ORIGIN, initMessage());
     // Even a same-origin sender gets nothing - there is no framing host.
-    post(hostWindow, HOST_ORIGIN, initMessage());
+    postWindow(hostWindow, HOST_ORIGIN, initMessage());
     await flush();
 
     expect(marker.__sandboxBundleRan).toBeUndefined();
@@ -97,12 +102,34 @@ describe('plugin sandbox runtime host gate (GHSA-96cx-gx36-3g79)', () => {
     expect(postedTypes()).toEqual([['sandbox-ready', HOST_ORIGIN]]);
   });
 
+  it('accepts initialization on the port transferred to its framing host', async () => {
+    framed = true;
+    await mountRuntime();
+    const transfer = hostWindow.postMessage.mock.calls[0][2] as MessagePort[];
+    expect(transfer).toHaveLength(2);
+    transfer[1].postMessage(initMessage());
+    await vi.waitFor(() => expect(marker.__sandboxBundleRan).toBe(HOST_ORIGIN));
+    transfer[0].close();
+    transfer[1].close();
+  });
+
+  it('ignores window messages from the framing host after handshake', async () => {
+    framed = true;
+    await mountRuntime();
+    postWindow(hostWindow, HOST_ORIGIN, initMessage());
+    await flush();
+    expect(marker.__sandboxBundleRan).toBeUndefined();
+    post(hostWindow, HOST_ORIGIN, initMessage());
+    await flush();
+    expect(marker.__sandboxBundleRan).toBe(HOST_ORIGIN);
+  });
+
   it('ignores a sender that is not the framing window, and is not poisoned by it', async () => {
     framed = true;
     await mountRuntime();
 
     const other = { postMessage: vi.fn() };
-    post(other, HOST_ORIGIN, initMessage());
+    postWindow(other, HOST_ORIGIN, initMessage());
     await flush();
     expect(marker.__sandboxBundleRan).toBeUndefined();
     expect(other.postMessage).not.toHaveBeenCalled();
@@ -118,7 +145,7 @@ describe('plugin sandbox runtime host gate (GHSA-96cx-gx36-3g79)', () => {
     framed = true;
     await mountRuntime();
 
-    post(hostWindow, ATTACKER_ORIGIN, initMessage());
+    postWindow(hostWindow, ATTACKER_ORIGIN, initMessage());
     await flush();
     expect(marker.__sandboxBundleRan).toBeUndefined();
     expect(postedTypes()).toEqual([['sandbox-ready', HOST_ORIGIN]]);
@@ -126,6 +153,44 @@ describe('plugin sandbox runtime host gate (GHSA-96cx-gx36-3g79)', () => {
     post(hostWindow, HOST_ORIGIN, initMessage());
     await flush();
     expect(marker.__sandboxBundleRan).toBe(HOST_ORIGIN);
+  });
+
+  it('returns the progress handle through RPC and awaits its explicit dismissal', async () => {
+    framed = true;
+    await mountRuntime();
+    const message = initMessage();
+    message.payload.code = 'module.exports = { activate: async (api) => { const id = await api.toast.progress("Working"); await api.toast.dismiss(id); } };';
+    post(hostWindow, HOST_ORIGIN, message);
+    await flush();
+    const request = hostWindow.postMessage.mock.calls.map(([msg]) => msg).find((msg) => msg.method === 'toast.progress');
+    expect(request).toMatchObject({ type: 'api-request', args: ['Working'] });
+    post(hostWindow, HOST_ORIGIN, { type: 'api-response', id: request.id, ok: true, result: 'owned-toast' });
+    await flush();
+    const dismiss = hostWindow.postMessage.mock.calls.map(([msg]) => msg).find((msg) => msg.method === 'toast.dismiss');
+    expect(dismiss).toMatchObject({ type: 'api-request', args: ['owned-toast'] });
+    post(hostWindow, HOST_ORIGIN, { type: 'api-response', id: dismiss.id, ok: true });
+    await flush();
+    expect(postedTypes().some(([type]) => type === 'init-done')).toBe(true);
+  });
+
+  it('forwards composer reads and the conditional edit revision through RPC', async () => {
+    framed = true;
+    await mountRuntime();
+    const message = initMessage();
+    message.payload.code = 'module.exports = { activate: async (api) => { const draft = await api.composer.getSnapshot("composer"); await api.composer.readAttachment("composer", "attachment"); await api.composer.replaceBody("composer", { text: "Edited" }, { expectedRevision: draft.revision }); } };';
+    post(hostWindow, HOST_ORIGIN, message);
+    await flush();
+    const requests = () => hostWindow.postMessage.mock.calls.map(([msg]) => msg).filter((msg) => msg.type === 'api-request');
+    expect(requests()[0]).toMatchObject({ method: 'composer.getSnapshot', args: ['composer'] });
+    post(hostWindow, HOST_ORIGIN, { type: 'api-response', id: requests()[0].id, ok: true, result: { revision: 'revision-one' } });
+    await flush();
+    expect(requests()[1]).toMatchObject({ method: 'composer.readAttachment', args: ['composer', 'attachment'] });
+    post(hostWindow, HOST_ORIGIN, { type: 'api-response', id: requests()[1].id, ok: true, result: { data: new ArrayBuffer(1) } });
+    await flush();
+    expect(requests()[2]).toMatchObject({ method: 'composer.replaceBody', args: ['composer', { text: 'Edited' }, { expectedRevision: 'revision-one' }] });
+    post(hostWindow, HOST_ORIGIN, { type: 'api-response', id: requests()[2].id, ok: true, result: true });
+    await flush();
+    expect(postedTypes().some(([type]) => type === 'init-done')).toBe(true);
   });
 
   it('boots the bundle for the framing window on its own origin and reports back to it', async () => {

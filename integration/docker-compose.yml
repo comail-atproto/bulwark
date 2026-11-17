@@ -11,6 +11,10 @@ services:
   stalwart:
     build:
       context: stalwart
+      args:
+        # The Stalwart image the test server is built on (see run-tests.sh).
+        STALWART_IMAGE: ${STALWART_IMAGE:-stalwartlabs/stalwart:v0.16}
+      network: none
     container_name: ${IT_STACK_PREFIX:-bulwark-it}-stalwart
     # JMAP + Webmail + admin on 8080, SMTP submission on 587, IMAP on 143.
     # All test clients share this namespace and use loopback. Publish each
@@ -32,7 +36,7 @@ services:
       test:
         - CMD-SHELL
         - >-
-          curl -fsS -H "Authorization: Basic $$(printf '%s:%s' "$${TEST_ACCOUNT_USER:-alice@example.org}" "$${TEST_ACCOUNT_PASSWORD}" | base64 | tr -d '\n')" http://127.0.0.1:8080/jmap/session >/dev/null || exit 1
+          curl -fsS -H "Authorization: Basic $$(printf '%s:%s' "$${TEST_ACCOUNT_USER:-alice@example.org}" "$${TEST_ACCOUNT_PASSWORD}" | base64)" http://127.0.0.1:8080/jmap/session >/dev/null || exit 1
       interval: 5s
       timeout: 5s
       retries: 30
@@ -59,9 +63,8 @@ services:
       JMAP_SERVER_URL: ${IT_JMAP_SERVER_URL:-http://localhost:8025}
       STALWART_FEATURES: "true"
       APP_NAME: "Bulwark Webmail (Integration)"
-      # Enables "Remember me" / settings-sync cookies. Not required for the
-      # sync tests but harmless and avoids noisy warnings.
-      SESSION_SECRET: integration-not-a-real-secret
+      # Server-side sign-in context requires at least 32 characters.
+      SESSION_SECRET: integration-session-secret-not-for-production
       LOG_LEVEL: info
     depends_on:
       stalwart:

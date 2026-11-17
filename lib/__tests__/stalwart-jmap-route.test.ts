@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { endlessResponse } from './helpers/endless-body';
 
 // #904: the Stalwart JMAP passthrough is registered unconditionally by Next,
 // so the server-side switch has to answer 404 inside the handler - before any
@@ -110,6 +111,16 @@ describe('Stalwart JMAP passthrough switch (#904)', () => {
     expect(postJmap).toHaveBeenCalledTimes(1);
     expect(postJmap.mock.calls[0][0]).toBe('https://mail.example.com/jmap/');
   });
+
+  it('answers 502 instead of buffering an answer that never ends', async () => {
+    const { response, pulled } = endlessResponse(500);
+    postJmap.mockResolvedValueOnce(response);
+
+    const { status } = await callRoute();
+
+    expect(status).toBe(502);
+    expect(pulled()).toBeLessThan(60);
+  });
 });
 
 
@@ -142,6 +153,16 @@ describe('Stalwart JMAP Groupware gate', () => {
     groupwareAllowed.mockResolvedValue(true);
     expect((await callRoute([['Calendar/get', { accountId: 'a' }, '1']])).status).toBe(200);
     expect(postJmap).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([['INBOX_FILES_BRIDGE_URL', 'FileNode/set'], ['INBOX_CONTACTS_BRIDGE_URL', 'ContactCard/set']])('keeps %s as the only writer', async (setting, method) => {
+    groupwareAllowed.mockResolvedValue(true);
+    vi.stubEnv(setting, 'https://inbox.test/private-authority');
+    try {
+      expect((await callRoute([[method, { accountId: 'a' }, '1']])).status).toBe(501);
+      expect(postJmap).not.toHaveBeenCalled();
+      expect((await callRoute([['Email/get', { accountId: 'a' }, 'mail']])).status).toBe(200);
+    } finally { vi.unstubAllEnvs(); }
   });
 
   it('also gates the declared groupware capability', async () => {

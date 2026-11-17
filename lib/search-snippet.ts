@@ -87,10 +87,14 @@ export function filterHasSnippetTerms(filter: Record<string, unknown> | undefine
 }
 
 /**
- * The filter to hand SearchSnippet/get: the query filter with the wildcard
- * suffix the search adds for prefix matching (`pri*`) removed from the
- * highlightable terms, so the server's tokenizer sees the words the user
- * typed. Structural conditions are passed through unchanged.
+ * The filter to hand SearchSnippet/get: the query filter with the
+ * highlightable terms loosened. As soon as one term is quoted, Stalwart
+ * (0.16 and 1.0) marks text only where the words of all terms appear in a
+ * row, so a phrase ANDed with other parts of the query would mark nothing.
+ * Phrases are therefore unquoted and their words marked wherever they
+ * occur. A trailing `*` (a typed prefix) is dropped as well, so the
+ * server's tokenizer sees the word itself. Structural conditions are passed
+ * through unchanged.
  */
 export function snippetFilterFor(filter: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
@@ -98,15 +102,55 @@ export function snippetFilterFor(filter: Record<string, unknown>): Record<string
     if (key === 'conditions' && Array.isArray(value)) {
       out[key] = value.map((c) => snippetFilterFor(c as Record<string, unknown>));
     } else if (TERM_PROPERTIES.has(key) && typeof value === 'string') {
-      out[key] = value
-        .split(/\s+/)
-        .map((word) => (word.length > 1 && word.endsWith('*') ? word.slice(0, -1) : word))
-        .join(' ');
+      const phrase = /^\s*(["'])([\s\S]*)\1\s*$/.exec(value);
+      out[key] = phrase
+        ? phrase[2]
+        : value
+          .split(/\s+/)
+          .map((word) => (word.length > 1 && word.endsWith('*') ? word.slice(0, -1) : word))
+          .join(' ');
     } else {
       out[key] = value;
     }
   }
   return out;
+}
+
+/**
+ * Snippets fetched after their results were listed (see
+ * SearchRequestOptions.deferSnippets), with the account they were asked in.
+ * Ids repeat across accounts, so a search fanned out over several keeps each
+ * account's snippets to its own rows; no `accountId` matches every row.
+ */
+export interface DeferredSnippetBatch {
+  accountId?: string;
+  list: SearchSnippetResult[];
+}
+
+/**
+ * attachSearchSnippets for a list that is already on screen: returns a new
+ * list with new objects for the emails that gained a snippet, and the same
+ * list when none did, so a store update re-renders only the rows that changed.
+ */
+export function withSearchSnippets(emails: Email[], batches: DeferredSnippetBatch[]): Email[] {
+  const lookups = batches
+    .filter((batch) => batch.list.length > 0)
+    .map((batch) => ({ accountId: batch.accountId, byId: new Map(batch.list.map((s) => [s.emailId, s])) }));
+  if (lookups.length === 0) return emails;
+  let changed = false;
+  const next = emails.map((email) => {
+    for (const { accountId, byId } of lookups) {
+      if (accountId !== undefined && email.accountId !== accountId) continue;
+      const snippet = byId.get(email.id);
+      if (!snippet) continue;
+      const [withSnippet] = attachSearchSnippets([{ ...email }], [snippet]);
+      if (!withSnippet.searchSnippet) return email;
+      changed = true;
+      return withSnippet;
+    }
+    return email;
+  });
+  return changed ? next : emails;
 }
 
 /**

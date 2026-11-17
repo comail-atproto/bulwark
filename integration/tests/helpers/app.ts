@@ -279,11 +279,17 @@ export interface FolderCounts {
  */
 export async function folderCounts(page: Page, sel: FolderSelector): Promise<FolderCounts> {
   const row = folderRow(page, sel).first();
-  const counts = row.locator('[data-testid="folder-counts"]');
-  if ((await counts.count()) === 0) return { unread: 0, total: 0 };
-  const unread = await counts.getAttribute('data-unread');
-  const total = await counts.getAttribute('data-total');
-  return { unread: Number(unread ?? 0), total: Number(total ?? 0) };
+  // Read both attributes in one snapshot. The badge unmounts when a folder
+  // drains to zero, and a separate count() + getAttribute() can straddle that:
+  // getAttribute then waits for an element that never comes back and hangs the
+  // poll until its timeout (#1194). evaluateAll does not wait.
+  return row.locator('[data-testid="folder-counts"]').evaluateAll((els) => {
+    const el = els[0];
+    return {
+      unread: Number(el?.getAttribute('data-unread') ?? 0),
+      total: Number(el?.getAttribute('data-total') ?? 0),
+    };
+  });
 }
 
 /** Poll until a folder's unread count reaches `expected`. */
@@ -456,7 +462,11 @@ export async function calendarRows(
  */
 export async function enableProInterface(page: Page): Promise<void> {
   await page.locator('a[href$="/settings"]').first().click();
-  await page.locator('[data-testid="settings-tab-layout"]').first().click();
+  await page.locator('[data-testid="settings-tab-appearance"]').first().click();
+  // The Pro interface is an advanced setting, hidden until the switch is on.
+  const advanced = page.locator('[data-testid="settings-advanced-switch"]').first();
+  await advanced.waitFor({ state: 'visible', timeout: 30000 });
+  if ((await advanced.getAttribute('aria-checked')) !== 'true') await advanced.click();
   const toggle = page.locator('[data-testid="setting-pro-interface"]').first();
   await toggle.waitFor({ state: 'visible', timeout: 30000 });
   if ((await toggle.getAttribute('aria-checked')) !== 'true') {

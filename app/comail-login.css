@@ -1,0 +1,130 @@
+/* Public Inbox presentation uses the Astro brand palette independently of the
+   mailbox skin. Descendant controls inherit these tokens, including typeahead. */
+.comail-login {
+  --color-background: #dfe0c0;
+  --color-foreground: #012102;
+  --color-muted: #cfd3b1;
+  --color-muted-foreground: #535f58;
+  --color-card: #f5f5e0;
+  --color-card-foreground: var(--color-foreground);
+  --color-input: var(--color-card);
+  --color-border: #6a7a60;
+  --color-ring: #247c94;
+  --color-primary: #02413c;
+  --color-primary-foreground: #dfe0c0;
+  --color-accent: var(--color-muted);
+  --color-accent-foreground: var(--color-foreground);
+  --color-popover: var(--color-card);
+  --color-popover-foreground: var(--color-foreground);
+  --color-sidebar: var(--color-background);
+  --color-sidebar-foreground: var(--color-foreground);
+  --color-sidebar-border: var(--color-border);
+  --color-sidebar-accent: var(--color-muted);
+  --color-sidebar-accent-foreground: var(--color-foreground);
+  --color-destructive: #a42626;
+  --login-accent: #02413c;
+  color-scheme: light;
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  flex-direction: column;
+  min-height: 100svh;
+  background: var(--color-background);
+  color: var(--color-foreground);
+  font-family: var(--comail-font-body, "Atkinson Hyperlegible"), sans-serif;
+  font-size: 17px;
+  line-height: 1.5;
+}
+
+.comail-login[data-comail-theme="dark"] {
+  --color-background: #02413c;
+  --color-foreground: #dfe0c0;
+  --color-muted: #18554e;
+  --color-muted-foreground: #c1c6a8;
+  --color-card: #033631;
+  --color-border: #5f8d80;
+  --color-ring: #87c4cd;
+  --color-primary: #dfe0c0;
+  --color-primary-foreground: #02413c;
+  --color-destructive: #ffaaaa;
+  --login-accent: #87c4cd;
+  color-scheme: dark;
+}
+
+/* The seasonal marketing palette is the same in light and dark mode. */
+.comail-login[data-comail-theme="spooky"] {
+  --color-background: #313638;
+  --color-foreground: #ffe596;
+  --color-muted: #574729;
+  --color-muted-foreground: #ffad3b;
+  --color-card: #574729;
+  --color-border: #c57938;
+  --color-ring: #ffad3b;
+  --color-primary: #ffad3b;
+  --color-primary-foreground: #313638;
+  --color-destructive: #ffaaaa;
+  --login-accent: #ffad3b;
+  color-scheme: dark;
+}
+.comail-login[data-comail-theme="spooky"] a { text-decoration-color: #ffad3b; }
+.comail-login[data-comail-theme="spooky"] .comail-login-eyebrow::after { background: #c57938; }
+
+.comail-login > :not(canvas) { position: relative; }
+.comail-login h1, .comail-login h2 {
+  font-family: var(--comail-font-display, "Young Serif"), Georgia, serif;
+  font-weight: 400;
+  letter-spacing: -0.035em;
+}
+.comail-login-intro p { max-width: 20rem; }
+.comail-login em { color: var(--login-accent); }
+.comail-login a { text-decoration: underline; text-decoration-color: #3fa1c0; text-underline-offset: 4px; }
+.comail-login a:hover { color: var(--login-accent); }
+.comail-login-header > a { text-decoration: none; }
+.comail-login-wordmark { font-size: 1.7rem; }
+.comail-login-eyebrow::after { content: ""; display: block; width: 32px; height: 2px; margin-top: 10px; background: #e1c240; }
+
+/* Mailbox skins mark input colors !important. Keep that override local to the
+   hosted login fields instead of changing inputs in the rest of Bulwark. */
+.comail-login :is(#atproto-handle, #waitlist-email) {
+  background: var(--color-input) !important;
+  color: var(--color-foreground) !important;
+  border-color: var(--color-border) !important;
+}
+.comail-login :is(#atproto-handle, #waitlist-email)::placeholder { color: var(--color-muted-foreground) !important; }
+.comail-login :is(#atproto-handle, #waitlist-email):focus {
+  border-color: var(--color-ring) !important;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-ring) 40%, transparent) !important;
+}
+.comail-login .comail-login-submit {
+  background: var(--color-primary);
+  color: var(--color-primary-foreground);
+}
+.comail-login .comail-login-submit:hover {
+  background: color-mix(in srgb, var(--color-primary) 90%, var(--color-background));
+}
+.comail-login .comail-login-submit:disabled { opacity: 0.6; }
+.comail-login-footer { display: flex; justify-content: space-between; gap: 24px; }
+.comail-login-footer .peer { color: var(--color-muted-foreground); }
+.comail-login-envelopes {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+@media (max-width: 1023px) {
+  .comail-login-main { max-width: 512px; }
+}
+@media (max-width: 639px) {
+  .comail-login-header { flex-wrap: wrap; gap: 12px; }
+  .comail-login-header > a { gap: 8px; }
+  .comail-login-header > a img:first-child { width: 32px; height: 32px; }
+  .comail-login-header > div { flex: 1; justify-content: flex-end; gap: 12px; }
+  .comail-login-builders { max-width: 92px; text-align: end; }
+  .comail-login-footer { display: block; }
+  .comail-login-footer > div + div { margin-top: 12px; }
+}
+@media (max-width: 560px) {
+  .comail-login-wordmark { font-size: clamp(1.15rem, 5vw, 1.5rem); }
+}

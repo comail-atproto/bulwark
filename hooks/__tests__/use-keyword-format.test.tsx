@@ -16,6 +16,21 @@ describe('useKeywordFormat', () => {
   });
 
   describe('tagColor', () => {
+    it('draws tags in the colour-blind-safe palette while that setting is on', () => {
+      useSettingsStore.setState({ colorBlindPalette: true });
+      try {
+        const { result } = renderHook(() => useKeywordFormat());
+        // Blue and green, which red-green colour blindness can confuse, land on
+        // the palette's blue and bluish green; the stored colours stay.
+        expect(result.current.tagColor('work').dot).toBe('bg-[#0072B2]');
+        expect(result.current.tagColor('work/clients').dot).toBe('bg-[#009E73]');
+        expect(result.current.tagColor('archive').dot).toBe('bg-[#D55E00]');
+        expect(useSettingsStore.getState().emailKeywords[0].color).toBe('blue');
+      } finally {
+        useSettingsStore.setState({ colorBlindPalette: false });
+      }
+    });
+
     it('resolves a tag to its palette entry, including the new shades', () => {
       const { result } = renderHook(() => useKeywordFormat());
 

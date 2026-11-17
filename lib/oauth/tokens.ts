@@ -1,5 +1,6 @@
 import { configManager } from '@/lib/admin/config-manager';
 import { DEFAULT_OAUTH_SCOPES } from './scopes';
+import { normalizeOauthResource } from './resource';
 
 /**
  * Resolve the OAuth scopes to request at authorize time.
@@ -13,6 +14,15 @@ export function getOauthScopes(): string {
   if (explicit) return explicit;
   const extra = configManager.get<string>('oauthExtraScopes', '');
   return extra ? `${DEFAULT_OAUTH_SCOPES} ${extra}`.trim() : DEFAULT_OAUTH_SCOPES;
+}
+
+/**
+ * The global RFC 8707 resource (admin override / OAUTH_RESOURCE), or '' when
+ * it is unset or not an absolute URI without a fragment (#1461).
+ * Server-only: callers in the browser read `oauthResource` from /api/config.
+ */
+export function getOauthResource(): string {
+  return normalizeOauthResource(configManager.get<string>('oauthResource', '')) ?? '';
 }
 export const REFRESH_TOKEN_COOKIE = 'jmap_rt';
 export const REFRESH_TOKEN_SERVER_COOKIE = 'jmap_rts';

@@ -8,23 +8,6 @@ const TAG_LENGTH = 16;
 
 const MIN_SECRET_LENGTH = 32;
 
-interface SessionIdentity {
-  /** Verified atproto identity for public profile display. */
-  did?: string;
-  groupwareEnabled?: boolean;
-  buildersEnabled?: boolean;
-}
-
-export type SessionCredentials = (
-  | { serverUrl: string; username: string; password: string; token?: undefined }
-  | { serverUrl: string; username: string; token: string; password?: undefined }
-) & SessionIdentity;
-
-export function sessionAuthHeader(credentials: SessionCredentials): string {
-  if (credentials.token !== undefined) return `Bearer ${credentials.token}`;
-  return `Basic ${Buffer.from(`${credentials.username}:${credentials.password}`).toString('base64')}`;
-}
-
 function getKey(): Buffer {
   const secret = getSessionSecret();
   if (!secret) throw new Error('SESSION_SECRET not configured');
@@ -37,12 +20,43 @@ function getKey(): Buffer {
   return createHash('sha256').update(secret).digest();
 }
 
+interface SessionIdentity {
+  /** Original sign-in time for the organisation session limit. */
+  signedInAt?: number;
+  /** Verified atproto identity for public profile display. */
+  did?: string;
+  groupwareEnabled?: boolean;
+  buildersEnabled?: boolean;
+  /** Inbox-issued credential owned by this session, for sign-out cleanup. */
+  credentialId?: string;
+  mailMode?: 'pds';
+}
+
+/**
+ * A remembered sign-in: the account's password (Basic auth), or the access
+ * token the user signed in with (Bearer auth, e.g. a Fastmail API token).
+ * `signedInAt`: when the user signed in (ms), for the organisation's maximum
+ * session length (lib/auth/session-age.ts); absent in cookies written
+ * before it was recorded.
+ */
+export type SessionCredentials = (
+  | { serverUrl: string; username: string; password: string; token?: undefined }
+  | { serverUrl: string; username: string; token: string; password?: undefined }
+) & SessionIdentity;
+
+/** The Authorization header remembered credentials sign in with. */
+export function sessionAuthHeader(credentials: SessionCredentials): string {
+  if (credentials.token !== undefined) return `Bearer ${credentials.token}`;
+  return `Basic ${Buffer.from(`${credentials.username}:${credentials.password}`).toString('base64')}`;
+}
+
 export function encryptSession(
   serverUrl: string,
   username: string,
   secret: string | { token: string },
-  identity: SessionIdentity = {},
+  identity: SessionIdentity | number = {},
 ): string {
+  if (typeof identity === 'number') identity = { signedInAt: identity };
   const key = getKey();
   const iv = randomBytes(IV_LENGTH);
   const cipher = createCipheriv(ALGORITHM, key, iv);
@@ -50,12 +64,15 @@ export function encryptSession(
   const credential = typeof secret === 'string' ? { password: secret } : { token: secret.token };
   const payload = JSON.stringify({
     v: 1,
+    signedInAt: identity.signedInAt ?? Date.now(),
     serverUrl,
     username,
     ...credential,
     ...(identity.did ? { did: identity.did } : {}),
     ...(typeof identity.groupwareEnabled === 'boolean' ? { groupwareEnabled: identity.groupwareEnabled } : {}),
     ...(typeof identity.buildersEnabled === 'boolean' ? { buildersEnabled: identity.buildersEnabled } : {}),
+    ...(identity.credentialId ? { credentialId: identity.credentialId } : {}),
+    ...(identity.mailMode === 'pds' ? { mailMode: 'pds' } : {}),
   });
   const encrypted = Buffer.concat([cipher.update(payload, 'utf8'), cipher.final()]);
   const tag = cipher.getAuthTag();
@@ -86,9 +103,12 @@ export function decryptSession(token: string): SessionCredentials | null {
         ? parsed.did
         : undefined;
     const identity: SessionIdentity = {
+      ...(typeof parsed.signedInAt === 'number' && Number.isFinite(parsed.signedInAt) && parsed.signedInAt > 0 ? { signedInAt: parsed.signedInAt as number } : {}),
       ...(did ? { did } : {}),
       ...(typeof parsed.groupwareEnabled === 'boolean' ? { groupwareEnabled: parsed.groupwareEnabled } : {}),
       ...(typeof parsed.buildersEnabled === 'boolean' ? { buildersEnabled: parsed.buildersEnabled } : {}),
+      ...(typeof parsed.credentialId === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(parsed.credentialId) ? { credentialId: parsed.credentialId } : {}),
+      ...(parsed.mailMode === 'pds' ? { mailMode: 'pds' as const } : {}),
     };
     if (typeof parsed.password === 'string' && parsed.password) {
       return { serverUrl: parsed.serverUrl, username: parsed.username, password: parsed.password, ...identity };
@@ -128,7 +148,15 @@ export type PayloadPurpose =
   /** WOPI access token, scoped to one file node and a six-hour expiry. */
   | 'wopi-token'
   /** The app password an impersonation handoff minted, kept for revocation. */
-  | 'impersonation-grant';
+  | 'impersonation-grant'
+  /** A user's plugin credentials (lib/plugin-secrets/vault.ts). */
+  | 'plugin-secrets'
+  /** When a token sign-in happened, for the maximum session length (lib/auth/session-age.ts). */
+  | 'session-age'
+  /** A pairing grant or code record in the shared store (lib/auth/pairing-store.ts). */
+  | 'pairing-store'
+  /** A parked mobile hand-off sign-in in the shared store (lib/auth/handoff-store.ts). */
+  | 'handoff-store';
 
 /**
  * Whether a blob minted before purposes were bound may be re-admitted for
@@ -148,6 +176,10 @@ const LEGACY_PAYLOAD_MARKERS: Record<PayloadPurpose, (payload: Record<string, un
   'pair-refresh': () => false,
   'wopi-token': (p) => p.t === 'wopi',
   'impersonation-grant': () => false,
+  'plugin-secrets': () => false,
+  'session-age': () => false,
+  'pairing-store': () => false,
+  'handoff-store': () => false,
 };
 
 export function encryptPayload(payload: Record<string, unknown>, purpose: PayloadPurpose): string {

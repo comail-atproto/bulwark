@@ -4,10 +4,8 @@ import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 // globals.css, next/font and client components purely for rendering.
 vi.mock('@/app/globals.css', () => ({}));
 vi.mock('next/font/google', () => ({
-  Atkinson_Hyperlegible: () => ({ variable: '--comail-font-body' }),
   Geist: () => ({ variable: '--font-geist-sans' }),
   Geist_Mono: () => ({ variable: '--font-geist-mono' }),
-  Young_Serif: () => ({ variable: '--comail-font-display' }),
   Hanken_Grotesk: () => ({ variable: '--font-hanken' }),
 }));
 vi.mock('@/components/service-worker-registration', () => ({ ServiceWorkerRegistration: () => null }));

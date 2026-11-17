@@ -4,7 +4,7 @@ import { login, folderRow, accountSwitcher, activeAccountEmail } from './helpers
 import { JmapClient } from './helpers/jmap';
 
 test.describe('Login & session', () => {
-  test('logs in against Stalwart and loads the mailbox @smoke', async ({ page }) => {
+  test('logs in against Stalwart and loads the mailbox', async ({ page }) => {
     await login(page, ACCOUNTS.alice);
 
     // The Inbox folder row is a reliable "mailbox loaded" signal.
@@ -26,7 +26,7 @@ test.describe('Login & session', () => {
     ).toBeVisible({ timeout: 15000 });
   });
 
-  test('JMAP helper can reach every provisioned account @smoke', async () => {
+  test('JMAP helper can reach every provisioned account', async () => {
     for (const acct of Object.values(ACCOUNTS)) {
       const client = await JmapClient.connect(acct.email, acct.password);
       expect(client.accountId).toBeTruthy();

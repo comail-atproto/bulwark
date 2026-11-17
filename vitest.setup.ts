@@ -1,6 +1,16 @@
-import '@testing-library/jest-dom';
-import { cleanup } from '@testing-library/react';
-import { afterAll, afterEach, vi } from 'vitest';
+import '@testing-library/jest-dom/vitest';
+import { cleanup, configure } from '@testing-library/react';
+import { afterEach, beforeEach, vi } from 'vitest';
+import { setNoThirdPartyTraffic } from '@/lib/third-party-mode';
+import { LIVE_REGION_IDS } from '@/lib/announce';
+
+// Every toast is also read out through the app-wide live regions
+// (lib/announce), so its title is in the page twice for a few seconds.
+// Text queries look at what is on screen; tests of the announcements read
+// the regions by id.
+configure({
+  defaultIgnore: `script, style, #${LIVE_REGION_IDS.polite}, #${LIVE_REGION_IDS.assertive}`,
+});
 
 // jsdom does not implement matchMedia; components that read media queries
 // (e.g. responsive layout hooks) call it during render. Provide a minimal
@@ -67,12 +77,13 @@ vi.mock('@/i18n/navigation', () => ({
   Link: ({ children }: { children: React.ReactNode }) => children,
 }));
 
-afterEach(() => {
-  cleanup();
+// The browser treats the no-third-party mode as on until the config says
+// otherwise (#903). Tests start from a config that says off; the tests of
+// the mode set it themselves.
+beforeEach(() => {
+  setNoThirdPartyTraffic(false);
 });
 
-// Settings hydration loads the template store asynchronously. Let pending
-// imports finish before Vitest tears down this file's jsdom environment.
-afterAll(async () => {
-  await vi.dynamicImportSettled();
+afterEach(() => {
+  cleanup();
 });

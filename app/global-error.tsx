@@ -1,7 +1,11 @@
 "use client";
 
+import { InboxRecovery } from "@/components/inbox-recovery";
+
 import { useEffect } from "react";
 import { AlertTriangle, RefreshCw } from "@/components/icons";
+import { fetchConfig } from "@/hooks/use-config";
+import { captureException } from "@/lib/error-reporting/client";
 import "./globals.css";
 
 /**
@@ -25,6 +29,10 @@ export default function GlobalError({
 }) {
   useEffect(() => {
     console.error("Global error:", error);
+    // Waits for the config when the app crashed before it arrived; sent only
+    // when error reporting is configured.
+    captureException(error, "global-error", false);
+    void fetchConfig().catch(() => undefined);
   }, [error]);
 
   return (
@@ -48,6 +56,7 @@ export default function GlobalError({
               <RefreshCw className="w-4 h-4 me-2" />
               Try again
             </button>
+            <InboxRecovery signOut />
           </div>
         </div>
       </body>

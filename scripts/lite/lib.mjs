@@ -39,6 +39,7 @@ export const LITE_REMOVED_PATHS = [
   "instrumentation.ts",
   "instrumentation.node.ts",
   "app/(main)/[...rest]",
+  "app/(main)/[locale]/[...rest]",
   "app/(main)/protocol",
   "e2e",
   "integration",
@@ -82,6 +83,10 @@ export const LITE_API_STRING_ALLOWLIST = [
   "/api/plugin-signing-pubkey",
   "/api/admin/plugins",
   "/api/admin/themes",
+  // lib/plugin-sandbox/proxy-client.ts + connect-dialog.ts - only called by
+  // loaded plugins and the plugins settings tab; pluginsEnabled is pinned off.
+  "/api/plugin-proxy",
+  "/api/plugin-secrets",
   // stores/settings-store.ts - settingsSyncEnabled is pinned off.
   "/api/settings",
   // Stalwart's own account discovery (lib/auth/lite-oauth.ts), not a route of this app.
@@ -95,6 +100,11 @@ export const LITE_API_STRING_ALLOWLIST = [
   "/api/auth/reauth/sso/complete",
   "/api/auth/pair/create",
   "/api/auth/pair/status",
+  // Mobile sign-in hand-off with a code (login page, SSO callback) - skipped
+  // in Lite, which has no server to park the sign-in on and hands over in
+  // the fragment.
+  "/api/auth/handoff/create",
+  "/api/auth/handoff/confirm",
   "/api/auth/totp-token-exchange",
   "/api/auth/session",
   "/api/auth/verify",
@@ -105,21 +115,30 @@ export const LITE_API_STRING_ALLOWLIST = [
   // Settings/policy - replaced by config.json / policy.json.
   "/api/config",
   "/api/admin/policy",
-  // WOPI (#425) - use-wopi-status returns disabled in Lite.
+  // lib/account-archive-client.ts - the feature is pinned off in Lite.
+  "/api/account-archive",
+  // WOPI (#425) - use-wopi-status returns disabled in Lite, so "New file"
+  // never fetches a document template either (#1393).
   "/api/wopi/status",
   "/api/wopi/launch",
+  "/api/wopi/template",
   // Calendar: ICS URL import/subscriptions + CalDAV discovery are hidden in Lite.
   "/api/fetch-ical",
   "/api/caldav/discover",
   "/api/webdav",
-  // Sender favicons - disabled in Lite (initials fallback).
+  // Sender favicons and BIMI logos - disabled in Lite (initials fallback).
   "/api/favicon",
+  "/api/bimi",
   // Web push relay paths (relative to the *relay* origin, not this host).
   "/api/push/vapid-public-key",
   "/api/push/register",
   "/api/push/active",
   "/api/push/verify",
   "/api/push/jmap",
+  // Offline mode (#523) - OfflineHost isn't mounted in Lite, and the update
+  // check (lib/app-update.ts) asks lite-build.json there instead.
+  "/api/offline/shell",
+  "/api/version",
   // Dev-only JMAP mock.
   "/api/jmap",
   "/api/dev-jmap",
@@ -162,6 +181,8 @@ export function buildLiteConfig(env = {}, { target = "static" } = {}) {
       : {}),
     rememberMeEnabled: parseBool(env.LITE_REMEMBER_ME, true),
     demoMode: parseBool(env.LITE_DEMO_MODE, false),
+    // Written out so deployers find the switch (#903; lib/outgoing-hosts.ts).
+    noThirdPartyTraffic: parseBool(env.LITE_NO_THIRD_PARTY_TRAFFIC, false),
     loginShowTotp: true,
     loginShowVersion: true,
   };
@@ -280,6 +301,33 @@ export function buildRootRedirect({ basePath = "", locales, defaultLocale = "en"
 }
 
 /**
+ * The not-found texts of each built locale for the 404 shim: the title and
+ * text of app/(main)/[locale]/not-found.tsx and its button.
+ *
+ * @param {string} root
+ * @param {string[]} locales
+ * @returns {Record<string, { title: string, description: string, home: string }>}
+ */
+export function readNotFoundMessages(root, locales) {
+  /** @type {Record<string, { title: string, description: string, home: string }>} */
+  const messages = {};
+  for (const locale of locales) {
+    try {
+      const table = JSON.parse(readFileSync(join(root, "locales", locale, "common.json"), "utf8"));
+      const title = table?.not_found?.title;
+      const description = table?.not_found?.description;
+      const home = table?.errors?.go_home;
+      if (typeof title === "string" && typeof description === "string" && typeof home === "string") {
+        messages[locale] = { title, description, home };
+      }
+    } catch {
+      // A locale without a table keeps the English page.
+    }
+  }
+  return messages;
+}
+
+/**
  * 404.html for hosts without rewrite rules (GitHub Pages, S3 website hosting).
  *
  * `next build` exports Next's default not-found page as 404.html: the
@@ -291,8 +339,25 @@ export function buildRootRedirect({ basePath = "", locales, defaultLocale = "en"
  * hands the link over (hooks/use-lite-link-segments.ts). Only `<locale>` and
  * `<surface>` from the allowlists ever reach `location.replace`, so a crafted
  * URL cannot turn this into an open redirect.
+ *
+ * A path without a locale (/login, /mail/...) goes to the same path under
+ * the reader's locale, picked as the root index.html picks it; the target
+ * stays on this origin and starts with an allowlisted locale.
+ *
+ * A page that stays a 404 speaks the language of its URL (/de/gibtsnicht in
+ * German), else the reader's: `messages` holds each built locale's texts,
+ * which are set as text, never as markup.
  */
-export function buildNotFoundShim({ basePath = "", locales, surfaces = LITE_SURFACES }) {
+export function buildNotFoundShim({ basePath = "", locales, surfaces = LITE_SURFACES, defaultLocale = "en", messages = {} }) {
+  const fallback = locales.includes(defaultLocale) ? defaultLocale : locales[0];
+  const english = messages.en ?? {
+    title: "Page not found",
+    description: "This page doesn't exist or has moved. Check the address, or go back to your inbox.",
+    home: "Go to inbox",
+  };
+  const built = {};
+  for (const locale of locales) if (messages[locale]) built[locale] = messages[locale];
+  const escapeHtml = (text) => String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -311,6 +376,31 @@ export function buildNotFoundShim({ basePath = "", locales, surfaces = LITE_SURF
     path = path.slice(base.length) || "/";
   }
   var parts = path.split("/").filter(Boolean);
+  if (parts.length > 0 && locales.indexOf(parts[0]) === -1) {
+    var fallback = ${JSON.stringify(fallback)};
+    var pick = function (tag) {
+      if (!tag) return null;
+      tag = String(tag);
+      if (locales.indexOf(tag) !== -1) return tag;
+      var lower = tag.toLowerCase();
+      if (lower.indexOf("zh") === 0) {
+        if (/zh-(tw|hk|mo|hant)/.test(lower) && locales.indexOf("zh-TW") !== -1) return "zh-TW";
+        if (locales.indexOf("zh") !== -1) return "zh";
+      }
+      var short = lower.split("-")[0];
+      for (var i = 0; i < locales.length; i++) if (locales[i].toLowerCase() === short) return locales[i];
+      return null;
+    };
+    var chosen = null;
+    try {
+      var stored = JSON.parse(localStorage.getItem(${JSON.stringify(LOCALE_STORAGE_KEY)}) || "null");
+      chosen = pick(stored && stored.state && stored.state.locale);
+    } catch (e) {}
+    var langs = navigator.languages || [navigator.language];
+    for (var j = 0; !chosen && j < langs.length; j++) chosen = pick(langs[j]);
+    location.replace(base + "/" + (chosen || fallback) + "/" + parts.join("/") + location.search + location.hash);
+    return;
+  }
   if (parts.length < 2 || locales.indexOf(parts[0]) === -1 || surfaces.indexOf(parts[1]) === -1) return;
   var target = base + "/" + parts[0] + "/" + parts[1] + "/";
   // The shell itself is missing (host misconfigured): show the 404 instead of looping.
@@ -320,20 +410,67 @@ export function buildNotFoundShim({ basePath = "", locales, surfaces = LITE_SURF
 })();
 </script>
 <style>
-  body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; font-family: system-ui, sans-serif; background: #fff; color: #111; }
-  @media (prefers-color-scheme: dark) { body { background: #0a0a0a; color: #ededed; } }
-  main { text-align: center; padding: 1rem; }
-  h1 { font-size: 2.25rem; margin: 0 0 .5rem; }
-  p { margin: 0 0 1.5rem; opacity: .7; }
-  a { color: inherit; }
+  body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; font-family: system-ui, sans-serif; background: #fff; color: #0a0a0a; }
+  @media (prefers-color-scheme: dark) { body { background: #0a0a0a; color: #fafafa; } a { background: #fafafa; color: #0a0a0a; } }
+  main { text-align: center; padding: 1rem; max-width: 28rem; }
+  .code { margin: 0 0 .5rem; font-size: .875rem; font-weight: 600; color: #737373; }
+  h1 { font-size: 1.5rem; font-weight: 700; margin: 0 0 .5rem; }
+  p { margin: 0 0 1.5rem; color: #737373; }
+  a { display: inline-block; padding: .5rem 1rem; border-radius: .375rem; background: #0a0a0a; color: #fafafa; font-size: .875rem; font-weight: 500; text-decoration: none; }
 </style>
 </head>
 <body>
 <main>
-  <h1>404</h1>
-  <p>This page could not be found.</p>
-  <a href="${basePath}/">Go home</a>
+  <p class="code">404</p>
+  <h1 id="not-found-title">${escapeHtml(english.title)}</h1>
+  <p id="not-found-text">${escapeHtml(english.description)}</p>
+  <a id="not-found-home" href="${basePath}/">${escapeHtml(english.home)}</a>
 </main>
+<script>
+(function () {
+  var base = ${JSON.stringify(basePath)};
+  var messages = ${inlineJson(built)};
+  var fallback = ${JSON.stringify(fallback)};
+  var rtl = ${JSON.stringify(RTL_LOCALES)};
+  var pick = function (tag) {
+    if (!tag) return null;
+    tag = String(tag);
+    if (messages[tag]) return tag;
+    var lower = tag.toLowerCase();
+    if (lower.indexOf("zh") === 0) {
+      if (/zh-(tw|hk|mo|hant)/.test(lower) && messages["zh-TW"]) return "zh-TW";
+      if (messages.zh) return "zh";
+    }
+    var short = lower.split("-")[0];
+    for (var key in messages) if (Object.prototype.hasOwnProperty.call(messages, key) && key.toLowerCase() === short) return key;
+    return null;
+  };
+  var path = location.pathname;
+  if (base && path.indexOf(base + "/") === 0) path = path.slice(base.length);
+  // The locale of the URL first, then the one picked in Settings, then the browser's.
+  var first = path.split("/").filter(Boolean)[0];
+  var locale = first && Object.prototype.hasOwnProperty.call(messages, first) ? first : null;
+  if (!locale) {
+    try {
+      var stored = JSON.parse(localStorage.getItem(${JSON.stringify(LOCALE_STORAGE_KEY)}) || "null");
+      locale = pick(stored && stored.state && stored.state.locale);
+    } catch (e) {}
+  }
+  var langs = navigator.languages || [navigator.language];
+  for (var j = 0; !locale && j < langs.length; j++) locale = pick(langs[j]);
+  if (!locale) locale = messages[fallback] ? fallback : null;
+  if (!locale) return;
+  var text = messages[locale];
+  document.documentElement.lang = locale;
+  document.documentElement.dir = rtl.indexOf(locale) !== -1 ? "rtl" : "ltr";
+  document.title = "404 - " + text.title;
+  document.getElementById("not-found-title").textContent = text.title;
+  document.getElementById("not-found-text").textContent = text.description;
+  var home = document.getElementById("not-found-home");
+  home.textContent = text.home;
+  home.setAttribute("href", base + "/" + locale + "/");
+})();
+</script>
 </body>
 </html>
 `;
@@ -355,7 +492,12 @@ export function buildRedirects({ basePath = "", locales, surfaces = LITE_SURFACE
 }
 
 /** The Content-Security-Policy every static host should send (`_headers`, the container image). */
-export function buildCsp({ connectSrc = "*" } = {}) {
+export function buildCsp({ connectSrc = "*", noThirdParty = false } = {}) {
+  if (noThirdParty) {
+    const strict = noThirdPartyDirectives(connectSrc);
+    const byName = new Map(strict.map((d) => [d.split(" ")[0], d]));
+    return buildCsp({ connectSrc }).split("; ").map((d) => byName.get(d.split(" ")[0]) ?? d).join("; ");
+  }
   return [
     "default-src 'self'",
     // The static export ships inline hydration scripts, so no nonce is possible
@@ -372,7 +514,9 @@ export function buildCsp({ connectSrc = "*" } = {}) {
     "object-src 'none'",
     "base-uri 'self'",
     "form-action 'self'",
-    "frame-ancestors 'none'",
+    // 'self' because the PDF preview frames a blob: document, and Safari
+    // applies this policy to that document as well (#1301).
+    "frame-ancestors 'self'",
     "media-src 'self' blob:",
   ].join("; ");
 }
@@ -397,8 +541,30 @@ export function inlineScriptHashes(html) {
  * and scripts from this origin, nothing else. Enforced together with the
  * host's header policy, it takes away the header's 'unsafe-inline'.
  */
-export function buildScriptHashCsp(hashes) {
-  return [`script-src 'self'${hashes.map((h) => ` ${h}`).join("")}`, "object-src 'none'", "base-uri 'self'"].join("; ");
+export function buildScriptHashCsp(hashes, { noThirdParty = false, connectSrc = "*" } = {}) {
+  return [
+    `script-src 'self'${hashes.map((h) => ` ${h}`).join("")}`,
+    "object-src 'none'",
+    "base-uri 'self'",
+    ...(noThirdParty ? noThirdPartyDirectives(connectSrc) : []),
+  ].join("; ");
+}
+
+/**
+ * A build made with LITE_NO_THIRD_PARTY_TRAFFIC=true (#903) fences the page
+ * like the server build's header does: its own origin and the JMAP server
+ * only, so a link the in-app switches miss still can't load anything from
+ * an outside host. `connectSrc` is the JMAP origin, or `*` when users may
+ * type any server (then only connect-src stays open).
+ */
+export function noThirdPartyDirectives(connectSrc = "*") {
+  const own = connectSrc === "*" ? "" : ` ${connectSrc}`;
+  return [
+    `connect-src 'self' ${connectSrc}`,
+    `img-src 'self' data: blob:${own}`,
+    "font-src 'self' data:",
+    "media-src 'self' blob:",
+  ];
 }
 
 /**
@@ -406,8 +572,8 @@ export function buildScriptHashCsp(hashes) {
  * script: right after <meta charset> (which has to stay within the first
  * 1024 bytes), else as early in the document as possible.
  */
-export function withScriptHashCsp(html) {
-  const meta = `<meta http-equiv="Content-Security-Policy" content="${buildScriptHashCsp(inlineScriptHashes(html))}"/>`;
+export function withScriptHashCsp(html, options = {}) {
+  const meta = `<meta http-equiv="Content-Security-Policy" content="${buildScriptHashCsp(inlineScriptHashes(html), options)}"/>`;
   // Without a <head> the parser still places a leading <meta> in the implied one.
   const anchor = /<meta\s+charset\s*=[^>]*>/i.exec(html) ?? /<head\b[^>]*>/i.exec(html)
     ?? /<html\b[^>]*>/i.exec(html) ?? /<!doctype[^>]*>/i.exec(html);
@@ -431,11 +597,11 @@ export function buildStalwartEntryCsp() {
 }
 
 /** Security headers for hosts that read a `_headers` file. */
-export function buildHeaders({ basePath = "", connectSrc = "*" }) {
-  const csp = buildCsp({ connectSrc });
+export function buildHeaders({ basePath = "", connectSrc = "*", noThirdParty = false }) {
+  const csp = buildCsp({ connectSrc, noThirdParty });
   return `${basePath || ""}/*
   X-Content-Type-Options: nosniff
-  X-Frame-Options: DENY
+  X-Frame-Options: SAMEORIGIN
   Referrer-Policy: strict-origin-when-cross-origin
   Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()
   Content-Security-Policy: ${csp}
@@ -457,9 +623,9 @@ export function exampleDocRoot(basePath = "") {
   return { root: "/var/www/bulwark-lite", files: `/var/www/bulwark-lite${basePath}` };
 }
 
-export function buildNginxExample({ basePath = "", surfaces = LITE_SURFACES, connectSrc = "*" }) {
+export function buildNginxExample({ basePath = "", surfaces = LITE_SURFACES, connectSrc = "*", noThirdParty = false }) {
   const location = basePath ? `${basePath}/` : "/";
-  const csp = buildCsp({ connectSrc });
+  const csp = buildCsp({ connectSrc, noThirdParty });
   const { root, files } = exampleDocRoot(basePath);
   const surfaceAlternation = surfaces.join("|");
   return `# Bulwark Lite - nginx example. Unzip the archive into ${files}
@@ -471,7 +637,7 @@ server {
     root ${root};
 
     add_header X-Content-Type-Options nosniff always;
-    add_header X-Frame-Options DENY always;
+    add_header X-Frame-Options SAMEORIGIN always;
     add_header Referrer-Policy strict-origin-when-cross-origin always;
     # connect-src names the JMAP server this bundle was built for. Every page
     # also carries a <meta> policy that allows only its own inline scripts.
@@ -482,7 +648,7 @@ server {
     location ${basePath}/_next/static/ {
         add_header Cache-Control "public, max-age=31536000, immutable" always;
         add_header X-Content-Type-Options nosniff always;
-        add_header X-Frame-Options DENY always;
+        add_header X-Frame-Options SAMEORIGIN always;
         add_header Referrer-Policy strict-origin-when-cross-origin always;
         add_header Content-Security-Policy "${csp}" always;
     }
@@ -528,7 +694,7 @@ export function buildNginxContainerTemplate({ surfaces = LITE_SURFACES } = {}) {
   // location with headers of its own repeats these.
   const securityHeaders = (indent) => [
     "add_header X-Content-Type-Options nosniff always;",
-    "add_header X-Frame-Options DENY always;",
+    "add_header X-Frame-Options SAMEORIGIN always;",
     "add_header Referrer-Policy strict-origin-when-cross-origin always;",
     'add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()" always;',
     `add_header Content-Security-Policy "${csp}" always;`,
@@ -588,9 +754,9 @@ ${securityHeaders("        ")}
 `;
 }
 
-export function buildCaddyExample({ basePath = "", surfaces = LITE_SURFACES, connectSrc = "*" }) {
+export function buildCaddyExample({ basePath = "", surfaces = LITE_SURFACES, connectSrc = "*", noThirdParty = false }) {
   const { root, files } = exampleDocRoot(basePath);
-  const csp = buildCsp({ connectSrc });
+  const csp = buildCsp({ connectSrc, noThirdParty });
   const surfaceAlternation = surfaces.join("|");
   return `# Bulwark Lite - Caddy example. Unzip the archive into ${files}
 # so that ${basePath}/index.html is served at ${basePath || ""}/.
@@ -600,7 +766,7 @@ webmail.example.com {
 
     header {
         X-Content-Type-Options nosniff
-        X-Frame-Options DENY
+        X-Frame-Options SAMEORIGIN
         Referrer-Policy strict-origin-when-cross-origin
         # connect-src names the JMAP server this bundle was built for.
         Content-Security-Policy "${csp}"
@@ -651,18 +817,34 @@ ${demoMode ? "Demo mode is ON: the login page offers a built-in demo account and
    - \`allowCustomJmapEndpoint\` (optional): \`true\` always shows a server field
      on the login page, \`false\` never does. Left out, the field shows only
      while \`jmapServerUrl\` is empty.
-   - \`rememberMeEnabled\`: \`false\` hides "remember me" (sessions then end with the tab).
+   - \`rememberMeEnabled\`: \`false\` never remembers a sign-in (sessions then end with the tab).
+     Sign-ins are otherwise remembered; \`loginShowRememberMe: true\` lets people choose.
+   - \`noThirdPartyTraffic\`: \`true\` keeps the browser off every built-in outside host
+     (no Google Maps links on event addresses; see the third-party traffic docs).
+   - \`oauthRevokeOnSignOut\`: \`false\` keeps the refresh token valid at the server on
+     sign-out, so Stalwart 1.0 does not ask for consent again on the next sign-in.
    Optional keys: \`demoMode\`, \`jmapServers\`, \`jmapServerAutoPickByDomain\`, the login logo/company/link keys and \`loginShow*\` toggles (same names as the Docker env vars, camelCased).
-3. Allow the browser to talk to the mail server (CORS). In Stalwart:
+3. Allow the browser to talk to the mail server (CORS). In Stalwart, turn on
+   the \`usePermissiveCors\` setting of the \`Http\` object: in the web admin
+   under **Settings > Network > HTTP > Security** ("Permissive CORS policy"),
+   or with
 
-   \`\`\`toml
-   [http]
-   permissive-cors = true
+   \`\`\`bash
+   stalwart-cli update Http --field usePermissiveCors=true
+   stalwart-cli create Action/ReloadSettings
    \`\`\`
 
-   or an equivalent reverse-proxy rule that allows your Lite origin with the
+   or over JMAP as an administrator: \`x:Http/set\` with
+   \`{"update": {"singleton": {"usePermissiveCors": true}}}\`. It applies once
+   the settings are reloaded (the \`ReloadSettings\` action) or Stalwart
+   restarts. On the current 1.0 pre-releases \`ReloadSettings\` fails while the
+   stock spam-filter rules are loaded, so restart Stalwart there instead.
+   Stalwart 0.16 and later ignore the \`[http] permissive-cors\` key of the old
+   TOML configuration.
+
+   A reverse-proxy rule works too if it allows your Lite origin with the
    \`Authorization\` and \`Content-Type\` headers on \`/.well-known/jmap\`, \`/jmap/*\`,
-   \`/api/auth\` and \`/auth/token\`.
+   \`/api/auth\`, \`/auth/token\` and, for Stalwart 1.0, \`/auth/register\`.
 
 ## Host configuration
 
@@ -685,11 +867,17 @@ multiple accounts, calendar, contacts, files, themes, settings export/import,
 password and TOTP login, demo mode, deep links.
 
 Not available in Lite (they need the Node.js server): the admin console and
-setup wizard, plugins and sidebar apps, settings sync across devices, OAuth /
-SSO login, the account security tab (app passwords, 2FA setup), ICS URL
-subscriptions and CalDAV discovery, sender favicons, office (WOPI) editing,
-web push notifications, the update banner, device pairing, and the
-"Default apps" page (registering Lite as the mailto:/webcal: handler).
+setup wizard, plugins and sidebar apps, settings sync across devices, the
+account security tab (app passwords, 2FA setup), ICS URL subscriptions and
+CalDAV discovery, sender favicons, office (WOPI) editing, web push
+notifications, the update banner, device pairing, and the "Default apps" page
+(registering Lite as the mailto:/webcal: handler).
+
+OAuth / SSO login is not in this build. It is in Lite when Stalwart serves it
+as an Application (\`npm run build:lite -- --target=stalwart\`, or the
+\`${STALWART_ZIP_NAME}\` of a release): accounts whose domain signs in at an
+OpenID provider are sent there, and setting the Application's
+\`oauthClientId\` adds **Sign in with SSO**. That bundle's README explains it.
 
 ## Security notes
 
@@ -1185,6 +1373,16 @@ ${STALWART_OAUTH_META_LITERAL} />
 `;
 }
 
+/**
+ * The bundle manifest Stalwart 1.0 requires at the root of an Application
+ * zip (`stalwart-app.json`, checked before it unpacks anything): without it,
+ * it refuses the bundle with "Application bundle does not contain a manifest"
+ * and serves nothing. 0.16 serves the file like any other.
+ */
+export function buildStalwartAppManifest({ version }) {
+  return { id: "bulwark-webmail", version };
+}
+
 /** manifest.json with relative URLs: they resolve against the manifest's own (mounted) URL. */
 export function buildStalwartManifest({ appName }) {
   return {
@@ -1363,7 +1561,8 @@ export function collectZipEntries(dir) {
 
 /** LITE-README.md for the Stalwart bundle. */
 export function buildStalwartReadme({ version, commit, locales, buildId, demoMode = false }) {
-  const url = `https://github.com/bulwarkmail/webmail/releases/download/v${version}/${STALWART_ZIP_NAME}`;
+  // Release tags carry no "v" prefix (since 1.3.0); a v-URL 404s.
+  const url = `https://github.com/bulwarkmail/webmail/releases/download/${version}/${STALWART_ZIP_NAME}`;
   const latestUrl = `https://github.com/bulwarkmail/webmail/releases/latest/download/${STALWART_ZIP_NAME}`;
   return `# Bulwark Lite ${version} (${commit}) for Stalwart
 
@@ -1374,7 +1573,7 @@ no server URL, no CORS, no second web server.
 
 Build: ${buildId}
 Locales: ${locales.join(", ")}
-Requires: Stalwart 0.16.0 or later (0.16.19 or later to use \`oauthClientId\`).
+Requires: Stalwart 0.16.6 or later (0.16.19 for \`oauthClientId\`), or 1.0.
 ${demoMode ? "\nDemo mode is ON in this build: the login page offers the built-in demo account.\n" : ""}
 ## Install
 
@@ -1387,7 +1586,7 @@ it) and \`actionUpdateApps\`. Any of these is equivalent:
 
 - Web admin: **Settings > Web Applications > Create**, description
   \`Bulwark Webmail\`, resource URL \`${url}\`, URL prefix \`/webmail\`; then run
-  the update-applications action (or restart Stalwart).
+  **Actions > Update applications** (or restart Stalwart).
 - CLI:
 
   \`\`\`bash
@@ -1432,16 +1631,26 @@ admin's own \`admin\` and \`account\`.
 
 The resource URL above names one release, so what Stalwart serves only
 changes when you change it: to update, point \`resourceUrl\` at the new
-release's tag and run \`UpdateApps\` (it always downloads again; a failed
-download keeps the previous bundle online). Every release also carries
+release's tag and run \`UpdateApps\`, which always downloads again.
+
+What a failed download does depends on the Stalwart version. On 0.16.23 the
+running bundle stays online, as on later 0.16 releases and on 1.0.
+Older 0.16 releases and the 1.0 pre-releases
+unmount the Application and drop the cached copy. The next restart,
+\`UpdateApps\` or reload of the Applications (the other nodes of a cluster
+reload them after \`UpdateApps\`) downloads \`resourceUrl\` again and mounts the
+bundle once that works. On every version, a restart after the cached copy
+has expired, with \`resourceUrl\` unreachable, leaves the Application
+unmounted. So check that \`resourceUrl\` downloads before running
+\`UpdateApps\` or restarting. Every release also carries
 \`${STALWART_ZIP_NAME}.sha256\`; check a download with
 \`sha256sum -c ${STALWART_ZIP_NAME}.sha256\` before you switch.
 
 The bundle runs as script on your Stalwart origin, next to the web admin.
 Stalwart checks no hash or signature when it downloads, so a floating URL
 such as \`${latestUrl}\` would run whatever the newest release holds, at the
-next restart or \`UpdateApps\` after \`autoUpdateFrequency\` (default 90
-days). Use it only if you accept that in exchange for automatic updates.
+next restart or \`UpdateApps\` after \`autoUpdateFrequency\` (on 1.0
+\`autoUpdateInterval\`, default 90 days). Use it only if you accept that in exchange for automatic updates.
 
 Open tabs move to the new build on their next navigation (one full page
 load); a freshly opened tab gets it immediately. Nothing stays stuck on old
@@ -1456,11 +1665,24 @@ Passwords (and TOTP codes) go to Stalwart's \`/api/auth\` and are exchanged at
 origin. "Remember me" keeps the refresh token in localStorage, otherwise it
 lives with the tab.
 
+Serve Stalwart over HTTPS. On a plain \`http://\` address other than
+\`localhost\`, browsers withhold the Web Crypto API this sign-in needs, so the
+webmail falls back to a password sign-in that lasts only as long as the tab:
+"Remember me" has no effect and single sign-on does not work.
+
 The OAuth client id is the Application's \`oauthClientId\` (Stalwart writes it
 into index.html) or \`bulwark-webmail\` when that field is empty. If your
 server requires registered OAuth clients, register that client id with the
 redirect URI \`https://<your stalwart host>/<prefix>/\` (for example
 \`https://mail.example.com/webmail/\`), once per prefix you mount.
+
+Stalwart 1.0 always requires registered clients. When it knows no client by
+the default name, the app registers one of its own and signs in with that:
+mail, contacts, calendars and files work, but the account's Stalwart
+settings (password, two-factor authentication, app passwords) do not, since
+1.0 only lets a first-party client manage those. For them, create an
+\`OAuthClient\` with client id \`bulwark-webmail\` (or the \`oauthClientId\`
+you set), \`firstParty\` on, and the redirect URI above.
 
 ### Single sign-on (OpenID Connect)
 
@@ -1494,8 +1716,8 @@ for every account.
 
 The bundle is read-only once Stalwart has unpacked it. To change the app
 name, turn "remember me" off or build any other variant, run the
-**Build Static Lite** workflow (or \`npm run build:lite -- --target=stalwart\`)
-with your settings, publish the resulting \`${STALWART_ZIP_NAME}\` at a URL
+**Build Static Lite** workflow (or, in a throwaway checkout,
+\`npm run build:lite -- --in-place --target=stalwart\`) with your settings, publish the resulting \`${STALWART_ZIP_NAME}\` at a URL
 you control, and use that URL as \`resourceUrl\`. \`config.json\` and
 \`policy.json\` inside the zip take the same keys as in the static-host build.
 
@@ -1510,9 +1732,10 @@ you control, and use that URL as \`resourceUrl\`. \`config.json\` and
 - \`manifest.json\` replaces \`manifest.webmanifest\` (Stalwart would serve the
   latter as \`application/octet-stream\`).
 
-Everything the static-host build leaves out (admin console, plugins,
-settings sync, OAuth/SSO via an external identity provider, web push, office
-editing, ICS subscriptions) is also missing here.
+Everything else the static-host build leaves out (admin console, plugins,
+settings sync, web push, office editing, ICS subscriptions) is also missing
+here. Single sign-on is the exception: it works in this bundle, as described
+above.
 `;
 }
 

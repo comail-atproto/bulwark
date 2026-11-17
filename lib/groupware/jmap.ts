@@ -6,10 +6,11 @@ export function jmapGroupwareFeatures(body: unknown): GroupwareFeature[] | null 
   if (!Array.isArray(request.using) || !Array.isArray(request.methodCalls)) return null;
   const features = new Set<GroupwareFeature>();
   for (const capability of request.using) {
-    if (typeof capability !== 'string') return null;
-    if (/:(calendars|calendars:.*)$/.test(capability)) features.add('calendar');
-    if (/:(contacts|contacts:.*)$/.test(capability)) features.add('contacts');
-    if (/:(filenode|filenode:.*)$/.test(capability)) features.add('files');
+    if (typeof capability !== 'string' || /\s/.test(capability)) return null;
+    const parts = capability.split(':').slice(1);
+    if (parts.includes('calendars')) features.add('calendar');
+    if (parts.includes('contacts')) features.add('contacts');
+    if (parts.includes('filenode')) features.add('files');
   }
   for (const call of request.methodCalls) {
     if (!Array.isArray(call) || typeof call[0] !== 'string') return null;

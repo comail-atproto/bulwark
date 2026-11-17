@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   findVerificationCode,
+  htmlMayNameACode,
   listVerificationCode,
   verificationCodeBodyText,
   VERIFICATION_CODE_MAX_AGE_MS,
@@ -98,6 +99,9 @@ describe('findVerificationCode', () => {
     ['a card notice', 'Ihre Kreditkarte',
       'Geben Sie niemals Ihren Sicherheitscode oder Ihre PIN weiter. Ihre Karte endet auf 4821. Meeting-ID: 845 1234 5678'],
     ['a QR code', 'Deine Mitgliedskarte', 'Scanne den QR-Code in der App. Deine Mitgliedsnummer 20394857.'],
+    ['a kernel log with an oops dump', 'Kernel warnings on host',
+      'kern  :warn  : [Tue Oct 13 15:37:13 2026] 2026-10-13T15:37:13,834096-04:00 Code: 48 8b 45 00 0f 0b\nkern  :warn  : [Tue Oct 13 15:37:13 2026] 2026-10-13T15:37:13,834096-04:00 Tainted: [P]=PROPRIETARY_MODULE, [W]=WARN, [O]=OOT_MODULE'],
+    ['a code expiry timestamp', 'Your access code', 'Your code expires 2026-10-13T15:37:13Z.'],
     ['a delivery report from Gmail', 'Successfully delivered message',
       "Your message has been successfully delivered to the following recipients:\n\n<x@gmail.com> (delivered to 'gmail-smtp-in.l.google.com' with code 250 (2.1.5) 'OK ffacd0b43b97d-4887a30a5a2si20984394f4f.30 - gsmtp')"],
     ['a delivery report from Outlook', 'Successfully delivered message',
@@ -142,6 +146,30 @@ describe('verificationCodeBodyText', () => {
     expect(findVerificationCode('Verification Code', text)).toBe('261765');
   });
 
+  // Opening a big HTML mail spent most of its script time turning the HTML
+  // into text to look for a code. Without any word that names a code there is
+  // nothing to find, so that step is skipped; it must never skip a mail that
+  // has one, however the word is written.
+  const html = (body: string) => verificationCodeBodyText({
+    htmlBody: [part('1', 'text/html')],
+    textBody: [],
+    bodyValues: { 1: value(`<html><body>${body}</body></html>`) },
+  });
+
+  it('skips reading HTML that names no code', () => {
+    const newsletter = '<h2>Vacation policy update #998</h2><table><tr><td>row-1</td><td>0.16487150</td></tr></table><p>Lorem ipsum 482910 commodo</p>';
+    expect(htmlMayNameACode(newsletter)).toBe(false);
+    expect(html(newsletter)).toBe('');
+  });
+
+  it('still reads HTML whose code word is marked up, escaped or padded', () => {
+    expect(findVerificationCode('', html('Your verification <b>code</b> is 482910'))).toBe('482910');
+    expect(findVerificationCode('', html('Tu c&oacute;digo de verificaci&oacute;n es 482910'))).toBe('482910');
+    expect(findVerificationCode('', html('Ваш &#1082;&#1086;&#1076;: 482910'))).toBe('482910');
+    expect(findVerificationCode('', html('Your verification co&shy;de is 482910'))).toBe('482910');
+    expect(findVerificationCode('', html('Ihre m&#x54;AN lautet 482910'))).toBe('482910');
+  });
+
   it('reads plain-text mail', () => {
     const text = verificationCodeBodyText({
       htmlBody: [part('1', 'text/plain')],
@@ -149,5 +177,49 @@ describe('verificationCodeBodyText', () => {
       bodyValues: { 1: value('Your HA Remote verification code is 811083.') },
     });
     expect(findVerificationCode('', text)).toBe('811083');
+  });
+});
+
+// A sender's bytes drive these regexes on the UI thread, for every opened
+// mail and every list row. Each of these inputs took seconds to minutes
+// before the patterns were anchored; all must stay linear.
+describe('crafted mail cannot stall the code search', () => {
+  const BUDGET_MS = 250;
+  const part = (partId: string, type: string) => ({ partId, blobId: `blob-${partId}`, size: 1, type });
+  const value = (v: string) => ({ value: v, isEncodingProblem: false, isTruncated: false });
+  function timed(fn: () => unknown): number {
+    const started = performance.now();
+    fn();
+    return performance.now() - started;
+  }
+  const htmlMail = (body: string) => ({
+    htmlBody: [part('1', 'text/html')],
+    textBody: [],
+    bodyValues: { 1: value(body) },
+  });
+
+  it('a megabyte of unclosed <style> tags', () => {
+    const mail = htmlMail('<style>'.repeat(150_000));
+    expect(timed(() => verificationCodeBodyText(mail))).toBeLessThan(BUDGET_MS);
+  });
+
+  it('a body of < without >', () => {
+    const mail = htmlMail('code '.concat('<'.repeat(200_000)));
+    expect(timed(() => verificationCodeBodyText(mail))).toBeLessThan(BUDGET_MS);
+    expect(timed(() => htmlMayNameACode('<'.repeat(200_000)))).toBeLessThan(BUDGET_MS);
+  });
+
+  it('one long word, glued digit groups, and a long subject', () => {
+    expect(timed(() => findVerificationCode('', 'code ' + 'a'.repeat(50_000)))).toBeLessThan(BUDGET_MS);
+    expect(timed(() => findVerificationCode('', 'code ' + 'a1234'.repeat(10_000)))).toBeLessThan(BUDGET_MS);
+    expect(timed(() => findVerificationCode('code ' + 'a'.repeat(200_000), ''))).toBeLessThan(BUDGET_MS);
+    expect(timed(() => findVerificationCode('', 'code ' + 'a'.repeat(20_000) + '...'))).toBeLessThan(BUDGET_MS);
+  });
+
+  it('still finds the code after the trims', () => {
+    expect(findVerificationCode('Your code is 177945 ' + 'x'.repeat(2_000), '')).toBe('177945');
+    expect(findVerificationCode('', 'Claude.ai177945Copy this code')).toBe('177945');
+    expect(findVerificationCode('', 'Your code: 482910 reply to noreply@example.com')).toBe('482910');
+    expect(findVerificationCode('', 'Your code: 48291...')).toBeNull();
   });
 });

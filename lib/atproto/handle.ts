@@ -1,3 +1,5 @@
+import { noThirdPartyTraffic } from '@/lib/third-party-mode';
+
 /**
  * Public, unauthenticated lookups: waow supplies account suggestions and the
  * Bluesky AppView resolves handles before OAuth. Failed lookups never block
@@ -84,19 +86,6 @@ export function normalizeHandle(raw: string): string {
 }
 
 /**
- * Cheap client-side sniff: a plausible handle has a dot (domain form) or is a
- * raw `did:` we can pass straight through. This is intentionally permissive -
- * the AppView is the real authority - and only exists to avoid firing network
- * requests for obviously-incomplete input.
- */
-export function looksLikeHandle(value: string): boolean {
-  const v = normalizeHandle(value);
-  if (!v) return false;
-  if (v.startsWith("did:")) return true;
-  return v.includes(".") && !v.endsWith(".");
-}
-
-/**
  * Debounced-typeahead source. Returns actor suggestions for the typed prefix,
  * or an empty list on any non-abort failure (fail-open). AbortErrors (including
  * the built-in timeout firing) are re-thrown so callers can tell cancellation
@@ -108,7 +97,7 @@ export async function searchActorsTypeahead(
   options?: AtprotoLookupOptions | AbortSignal,
 ): Promise<ActorSuggestion[]> {
   const q = normalizeHandle(query);
-  if (!q) return [];
+  if (!q || noThirdPartyTraffic()) return [];
 
   const url = new URL(TYPEAHEAD_ENDPOINT);
   url.searchParams.set("q", q);
@@ -154,6 +143,8 @@ export async function resolveHandle(
   if (!h) return { status: "invalid" };
   // A raw DID needs no resolution - forward it as-is.
   if (h.startsWith("did:")) return { status: "resolved", did: h };
+
+  if (noThirdPartyTraffic()) return { status: "unknown" };
 
   const url = new URL("/xrpc/com.atproto.identity.resolveHandle", APPVIEW_BASE);
   url.searchParams.set("handle", h);

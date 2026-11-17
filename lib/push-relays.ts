@@ -3,6 +3,8 @@
 // registration (which carries their address label) at an arbitrary host.
 
 import type { PushRelayOption, SettingsPolicy } from '@/lib/admin/types';
+import { relayAllowed } from '@/lib/outgoing-hosts';
+import { trimTrailingSlashes } from '@/lib/url-normalization';
 
 // Hosted relay so self-hosters don't need their own VAPID + Firebase setup.
 // The built-in entry can be repointed at build time via NEXT_PUBLIC_PUSH_RELAY_URL.
@@ -14,7 +16,7 @@ export type PushRelayPolicy = Partial<
 >;
 
 export function normalizeRelayUrl(url: string | null | undefined): string {
-  return (url ?? '').trim().replace(/\/+$/, '');
+  return trimTrailingSlashes((url ?? '').trim());
 }
 
 export function isValidRelayUrl(url: string | null | undefined): boolean {
@@ -34,7 +36,9 @@ export function relayDisplayLabel(option: PushRelayOption): string {
 
 /**
  * The relays a user may choose between: the built-in default first, then the
- * admin-configured list. Invalid and duplicate URLs are dropped.
+ * admin-configured list. Invalid and duplicate URLs are dropped, and so is
+ * the built-in relay while third-party traffic is off (#903): push then
+ * works only with a relay the admin runs.
  */
 export function resolvePushRelayOptions(policy: PushRelayPolicy | undefined | null): PushRelayOption[] {
   const options: PushRelayOption[] = [];
@@ -42,7 +46,7 @@ export function resolvePushRelayOptions(policy: PushRelayPolicy | undefined | nu
 
   const add = (label: string | undefined, rawUrl: string | undefined) => {
     const url = normalizeRelayUrl(rawUrl);
-    if (!isValidRelayUrl(url) || seen.has(url)) return;
+    if (!isValidRelayUrl(url) || seen.has(url) || !relayAllowed(url)) return;
     seen.add(url);
     options.push({ label: relayDisplayLabel({ label: label ?? '', url }), url });
   };
@@ -56,10 +60,17 @@ export function resolvePushRelayOptions(policy: PushRelayPolicy | undefined | nu
   return options;
 }
 
-/** The relay used when the user has not picked one (or their pick is gone). */
+/**
+ * The relay used when the user has not picked one (or their pick is gone).
+ * Empty when none may be used: third-party traffic is off and the admin
+ * configured no relay of their own.
+ */
 export function resolveDefaultRelayUrl(policy: PushRelayPolicy | undefined | null): string {
   const configured = normalizeRelayUrl(policy?.pushRelayUrl);
-  return isValidRelayUrl(configured) ? configured : normalizeRelayUrl(DEFAULT_RELAY_BASE_URL);
+  if (isValidRelayUrl(configured) && relayAllowed(configured)) return configured;
+  const builtIn = normalizeRelayUrl(DEFAULT_RELAY_BASE_URL);
+  if (relayAllowed(builtIn)) return builtIn;
+  return resolvePushRelayOptions(policy)[0]?.url ?? '';
 }
 
 /**

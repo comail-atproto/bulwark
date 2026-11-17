@@ -1,6 +1,7 @@
 "use client";
 
 import { useId, useRef, useState } from "react";
+import { useNoThirdPartyTraffic } from "@/hooks/use-third-party-mode";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { useHandleTypeahead } from "@/hooks/use-handle-typeahead";
@@ -22,7 +23,8 @@ interface HandleComboboxProps {
 
 function ActorAvatar({ actor }: { actor: ActorSuggestion }) {
   const [failedAvatar, setFailedAvatar] = useState<string | null>(null);
-  const avatar = actor.avatar?.startsWith("https://") ? actor.avatar : null;
+  const noThirdParty = useNoThirdPartyTraffic();
+  const avatar = !noThirdParty && actor.avatar?.startsWith("https://") ? actor.avatar : null;
 
   return (
     <span

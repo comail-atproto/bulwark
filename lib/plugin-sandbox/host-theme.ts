@@ -1,7 +1,7 @@
 // Theme bridge for plugin slot iframes.
 //
 // Slot iframes run with an opaque ("null") origin, so they can't load the
-// host's globals.css or web fonts cross-origin (see app/(sandbox)/layout.tsx).
+// host's globals.css or web fonts cross-origin (see sandbox-document.ts).
 // The result: plugin slot UIs fall back to the UA default serif font and have
 // no knowledge of the host's light/dark (or custom) theme.
 //
@@ -74,6 +74,7 @@ const THEME_TOKENS: readonly string[] = [
   '--density-header-py',
   '--density-card-p',
   '--density-sidebar-py',
+  '--touch-row-min-h',
 ];
 
 // Mirrors the body font stack in app/globals.css. Used when no document is
@@ -121,6 +122,8 @@ export function themeSnapshotToCSS(snapshot: ThemeSnapshot): string {
     ':root {',
     declarations,
     `  color-scheme: ${colorScheme};`,
+    // The user's font size setting, so rem units in a slot match the app.
+    ...(snapshot.vars['--font-size-base'] ? ['  font-size: var(--font-size-base);'] : []),
     '}',
     'html, body {',
     `  font-family: ${snapshot.fontFamily};`,

@@ -1,13 +1,16 @@
 "use client";
 
-import { useState, useMemo, useCallback, useRef } from "react";
+import { useState, useMemo, useCallback, useRef, useEffect, useId } from "react";
 import { useTranslations } from "next-intl";
 import { X, Plus, ChevronDown, ChevronRight, User, Building, MapPin, Globe, Cake, Heart, Tag, StickyNote, Mail, Phone, Calendar, UserCircle, Book, Camera, Trash2 } from "@/components/icons";
 import { Button } from "@/components/ui/button";
+import { IconButton } from "@/components/ui/icon-button";
 import { Input } from "@/components/ui/input";
 import { Avatar } from "@/components/ui/avatar";
-import { normalizeContactPhotoUri } from "@/stores/contact-store";
+import { findContactPhotoEntry, getContactPhotoRef, type ContactPhotoRef } from "@/stores/contact-store";
+import type { ContactSaveOptions } from "@/lib/contact-media";
 import { cn } from "@/lib/utils";
+import { useBottomControls } from "@/hooks/use-bottom-controls";
 import type { ContactCard, ContactOnlineService, ContactAnniversary, ContactPersonalInfo, AddressBook, AnniversaryDate, PartialDate, ContactAddress, ContactMedia } from "@/lib/jmap/types";
 
 interface EmailEntry {
@@ -18,7 +21,7 @@ interface EmailEntry {
 interface PhoneEntry {
   number: string;
   context: "work" | "private" | "";
-  feature: "voice" | "cell" | "fax" | "pager" | "video" | "text" | "";
+  feature: "voice" | "mobile" | "fax" | "pager" | "video" | "text" | "";
 }
 
 interface OnlineServiceEntry {
@@ -54,8 +57,71 @@ interface ContactFormProps {
   defaultAddressBookId?: string;
   /** Prefills the create form (ignored when `contact` is set). */
   prefill?: { email?: string; name?: string };
-  onSave: (data: Partial<ContactCard>) => Promise<void>;
+  /** `options.photoKey` names the `media` entry holding a newly picked photo. */
+  onSave: (data: Partial<ContactCard>, options?: ContactSaveOptions) => Promise<void>;
   onCancel: () => void;
+  /**
+   * Reads the card as the server has it now, or null when it can't. When the
+   * photo changed, `media` is rebuilt on it instead of on `contact`, which
+   * may be older.
+   */
+  loadCurrentMedia?: () => Promise<Pick<ContactCard, "media"> | null>;
+  /** Reports whether the form holds changes not yet saved. */
+  onDirtyChange?: (dirty: boolean) => void;
+}
+
+/** What the user did to the photo: nothing, picked a new one (a data: URI), or removed it. */
+type PhotoEdit =
+  | { kind: "unchanged" }
+  | { kind: "new"; uri: string; mediaType: string }
+  | { kind: "removed" };
+
+/** A `media` key for a new photo that no other entry uses. */
+function freeMediaKey(media: Record<string, ContactMedia>): string {
+  let key = "photo";
+  for (let n = 1; key in media; n++) key = `photo${n}`;
+  return key;
+}
+
+/**
+ * The `media` map to send for a photo edit, built on `base`: the card's media
+ * as the server has it now when it could be read, else the form's copy
+ * (`known`). `shownKey` is the photo the form showed.
+ *
+ * - A new photo takes the shown one's key and place, with its `pref`,
+ *   `label` and `contexts`, so on a card with several photos it is still the
+ *   one shown (the lowest pref wins).
+ * - Removing the photo removes every photo the form's copy had, not only the
+ *   shown one: the next would otherwise take its place after the save, while
+ *   the form showed none. Logos and sounds stay; so do photos added
+ *   elsewhere since.
+ */
+function mediaForPhotoEdit(
+  base: Record<string, ContactMedia>,
+  known: Record<string, ContactMedia>,
+  shownKey: string | undefined,
+  edit: Exclude<PhotoEdit, { kind: "unchanged" }>,
+): { media: Record<string, ContactMedia> | null; photoKey?: string } {
+  if (edit.kind === "removed") {
+    const others = Object.fromEntries(Object.entries(base).filter(
+      ([key, entry]) => !(entry?.kind === "photo" && known[key]?.kind === "photo"),
+    ));
+    return { media: Object.keys(others).length > 0 ? others : null };
+  }
+  const shown = shownKey ? (base[shownKey]?.kind === "photo" ? base[shownKey] : known[shownKey]) : undefined;
+  const photoKey = shownKey && (!base[shownKey] || base[shownKey]?.kind === "photo") ? shownKey : freeMediaKey(base);
+  const photo: ContactMedia = {
+    kind: "photo",
+    uri: edit.uri,
+    mediaType: edit.mediaType,
+    ...(shown?.pref !== undefined ? { pref: shown.pref } : {}),
+    ...(shown?.label !== undefined ? { label: shown.label } : {}),
+    ...(shown?.contexts !== undefined ? { contexts: shown.contexts } : {}),
+  };
+  const media: Record<string, ContactMedia> = {};
+  for (const [key, entry] of Object.entries(base)) media[key] = key === photoKey ? photo : entry;
+  media[photoKey] = photo;
+  return { media, photoKey };
 }
 
 function FormSection({ icon: Icon, title, children, collapsible, defaultOpen = true }: {
@@ -79,7 +145,7 @@ function FormSection({ icon: Icon, title, children, collapsible, defaultOpen = t
         tabIndex={collapsible ? 0 : -1}
       >
         <Icon className="w-4 h-4 text-muted-foreground shrink-0" />
-        <h3 className="flex-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">{title}</h3>
+        <h3 className="flex-1 text-xs font-semibold text-muted-foreground">{title}</h3>
         {collapsible && (
           open ? <ChevronDown className="w-3.5 h-3.5 text-muted-foreground" /> : <ChevronRight className="w-3.5 h-3.5 text-muted-foreground" />
         )}
@@ -125,19 +191,23 @@ async function processImageFile(file: File): Promise<{ uri: string; mediaType: s
   });
 }
 
-function Select({ value, onChange, children, className }: {
+function Select({ value, onChange, children, className, id, "aria-label": ariaLabel }: {
   value: string;
   onChange: (e: React.ChangeEvent<HTMLSelectElement>) => void;
   children: React.ReactNode;
   className?: string;
+  id?: string;
+  "aria-label"?: string;
 }) {
   return (
     <select
+      id={id}
+      aria-label={ariaLabel}
       value={value}
       onChange={onChange}
       className={cn(
         "text-sm bg-transparent border border-input rounded-md px-2.5 py-2 text-foreground",
-        "focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-1",
+        "focus:outline-hidden",
         "hover:border-muted-foreground/50 transition-colors",
         className
       )}
@@ -147,9 +217,12 @@ function Select({ value, onChange, children, className }: {
   );
 }
 
-export function ContactForm({ contact, addressBooks, allKeywords, defaultAddressBookId, prefill, onSave, onCancel }: ContactFormProps) {
+export function ContactForm({ contact, addressBooks, allKeywords, defaultAddressBookId, prefill, onSave, onCancel, loadCurrentMedia, onDirtyChange }: ContactFormProps) {
   const t = useTranslations("contacts.form");
   const isEditing = !!contact;
+  // Ids that tie each visible label to its field.
+  const fieldIdBase = useId();
+  const fieldId = (key: string) => `${fieldIdBase}-${key}`;
 
   // Split a free-form display name into given/surname for prefill.
   const prefillGivenName = (() => {
@@ -253,7 +326,8 @@ export function ContactForm({ contact, addressBooks, allKeywords, defaultAddress
       return Object.values(contact.phones).map(p => ({
         number: p.number,
         context: p.contexts?.work ? "work" : p.contexts?.private ? "private" : "",
-        feature: p.features?.cell ? "cell" : p.features?.fax ? "fax" : p.features?.pager ? "pager" : p.features?.video ? "video" : p.features?.text ? "text" : p.features?.voice ? "voice" : "",
+        // RFC 9553 calls it "mobile"; cards saved by older versions of this form say "cell".
+        feature: p.features?.mobile || p.features?.cell ? "mobile" : p.features?.fax ? "fax" : p.features?.pager ? "pager" : p.features?.video ? "video" : p.features?.text ? "text" : p.features?.voice ? "voice" : "",
       }));
     }
     return [];
@@ -333,6 +407,9 @@ export function ContactForm({ contact, addressBooks, allKeywords, defaultAddress
   const [keywordsStr, setKeywordsStr] = useState(
     contact?.keywords ? Object.keys(contact.keywords).filter(k => contact.keywords![k]).join(", ") : ""
   );
+  // Text typed in the Categories field but not added with Enter yet: Save
+  // adds it, so it isn't lost.
+  const [categoryDraft, setCategoryDraft] = useState("");
 
   const [note, setNote] = useState(
     contact?.notes ? Object.values(contact.notes)[0]?.note || "" : ""
@@ -369,17 +446,14 @@ export function ContactForm({ contact, addressBooks, allKeywords, defaultAddress
   }, [contact, defaultAddressBookId, addressBooks]);
   const [selectedBookId, setSelectedBookId] = useState(currentBookId);
 
-  const initialPhotoEntry = useMemo(() => {
-    if (!contact?.media) return null;
-    for (const [key, m] of Object.entries(contact.media)) {
-      if (m.kind === "photo" && m.uri) {
-        return { key, uri: normalizeContactPhotoUri(m.uri, m.mediaType), mediaType: m.mediaType };
-      }
-    }
-    return null;
-  }, [contact]);
-  const [photoUri, setPhotoUri] = useState<string | undefined>(initialPhotoEntry?.uri);
-  const [photoMediaType, setPhotoMediaType] = useState<string | undefined>(initialPhotoEntry?.mediaType);
+  // The stored photo may be a data: URI (Stalwart 0.16) or a blob (1.0); the
+  // form only ever writes the photo the user picks, never the one it shows.
+  const initialPhotoKey = useMemo(() => (contact ? findContactPhotoEntry(contact)?.[0] : undefined), [contact]);
+  const [photoEdit, setPhotoEdit] = useState<PhotoEdit>({ kind: "unchanged" });
+  const previewPhoto: ContactPhotoRef | null =
+    photoEdit.kind === "new" ? { uri: photoEdit.uri }
+      : photoEdit.kind === "unchanged" && contact ? getContactPhotoRef(contact) ?? null
+        : null;
   const [photoError, setPhotoError] = useState<string | null>(null);
   const [photoUploading, setPhotoUploading] = useState(false);
   const photoInputRef = useRef<HTMLInputElement>(null);
@@ -387,6 +461,18 @@ export function ContactForm({ contact, addressBooks, allKeywords, defaultAddress
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [emailErrors, setEmailErrors] = useState<Record<number, string>>({});
+
+  // Everything the user can edit, to tell whether anything changed since the
+  // form opened (R5: leaving asks first).
+  const fields = JSON.stringify([
+    prefix, givenName, additionalName, surname, suffix, nickname, emails, phones, organization,
+    department, isOrg, jobTitle, role, addresses, onlineServices, anniversaries, personalInfoEntries,
+    keywordsStr, categoryDraft, note, genderSex, genderIdentity, calendarUri, schedulingUri, freeBusyUri, selectedBookId,
+  ]);
+  const [initialFields] = useState(fields);
+  const dirty = fields !== initialFields || photoEdit.kind !== "unchanged";
+  useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
+  const footerRef = useBottomControls();
 
   const handlePhotoSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -404,8 +490,7 @@ export function ContactForm({ contact, addressBooks, allKeywords, defaultAddress
     setPhotoUploading(true);
     try {
       const { uri, mediaType } = await processImageFile(file);
-      setPhotoUri(uri);
-      setPhotoMediaType(mediaType);
+      setPhotoEdit({ kind: "new", uri, mediaType });
     } catch {
       setPhotoError(t("photo_invalid"));
     } finally {
@@ -414,8 +499,7 @@ export function ContactForm({ contact, addressBooks, allKeywords, defaultAddress
   };
 
   const handlePhotoRemove = () => {
-    setPhotoUri(undefined);
-    setPhotoMediaType(undefined);
+    setPhotoEdit({ kind: "removed" });
     setPhotoError(null);
   };
 
@@ -543,27 +627,14 @@ export function ContactForm({ contact, addressBooks, allKeywords, defaultAddress
     });
 
     const keywordsMap: Record<string, boolean> = {};
-    if (keywordsStr.trim()) {
-      keywordsStr.split(",").map(k => k.trim()).filter(Boolean).forEach(k => {
-        keywordsMap[k] = true;
-      });
-    }
-
-    const mediaMap: Record<string, ContactMedia> = {};
-    if (contact?.media) {
-      for (const [key, m] of Object.entries(contact.media)) {
-        if (m.kind !== "photo") mediaMap[key] = m;
-      }
-    }
-    if (photoUri) {
-      const photoKey = initialPhotoEntry?.key || "photo";
-      mediaMap[photoKey] = { kind: "photo", uri: photoUri, mediaType: photoMediaType };
-    }
-
-    // Set mediaVluae to null if we are removing media, so the server removes it
-    const hadMedia = !!contact?.media && Object.keys(contact.media).length > 0;
-    const mediaValue: Record<string, ContactMedia> | null | undefined =
-      Object.keys(mediaMap).length > 0 ? mediaMap : (hadMedia ? null : undefined);
+    keywordsStr.split(",").map(k => k.trim()).filter(Boolean).forEach(k => {
+      keywordsMap[k] = true;
+    });
+    // A typed category that matches an existing one takes its spelling.
+    categoryDraft.split(",").map(k => k.trim()).filter(Boolean).forEach(k => {
+      const existing = (allKeywords || []).find(kw => kw.toLowerCase() === k.toLowerCase());
+      keywordsMap[existing ?? k] = true;
+    });
 
     // Only send `kind` when this form owns the answer: switching a card between
     // person and organization. Leave other kinds (group, location, ...) untouched.
@@ -597,13 +668,28 @@ export function ContactForm({ contact, addressBooks, allKeywords, defaultAddress
       calendarUri: calendarUri.trim() || undefined,
       schedulingUri: schedulingUri.trim() || undefined,
       freeBusyUri: freeBusyUri.trim() || undefined,
-      media: mediaValue as Record<string, ContactMedia> | undefined,
       ...(selectedBookId ? { addressBookIds: { [selectedBookId]: true } } : {}),
     };
 
     setIsSaving(true);
     try {
-      await onSave(data);
+      // `media` goes out only when the photo changed. An update without it
+      // keeps every entry on the server, while a map replaces them all, and
+      // `null` deletes them. The other entries go back as the server has them
+      // now: a data: URI on 0.16, a blobId on 1.0, which resolves it again. A
+      // blobId from an older copy of the card, say of a logo changed
+      // elsewhere since, makes 1.0 refuse the whole update ("The following
+      // blobIds do not exist or are not accessible").
+      let photoKey: string | undefined;
+      if (photoEdit.kind === "new" || (photoEdit.kind === "removed" && initialPhotoKey)) {
+        const current = contact && loadCurrentMedia ? await loadCurrentMedia().catch(() => null) : null;
+        const known = contact?.media ?? {};
+        const edited = mediaForPhotoEdit(current ? current.media ?? {} : known, known, initialPhotoKey, photoEdit);
+        // Absent, not undefined: contactToWire sends an undefined key as null.
+        data.media = edited.media as Record<string, ContactMedia>;
+        photoKey = edited.photoKey;
+      }
+      await (photoKey ? onSave(data, { photoKey }) : onSave(data));
     } catch (err) {
       setError(err instanceof Error ? err.message : t("save_failed"));
     } finally {
@@ -615,20 +701,22 @@ export function ContactForm({ contact, addressBooks, allKeywords, defaultAddress
   const previewEmail = emails.find(e => e.address.trim())?.address.trim() || "";
 
   return (
-    <form onSubmit={handleSubmit} className="flex flex-col h-full bg-background">
+    // The app checks the fields itself and says what is wrong inline; the
+    // browser's own bubble covered that message.
+    <form onSubmit={handleSubmit} noValidate className="flex flex-col h-full bg-background">
       <div className="flex items-center justify-between px-6 py-4 border-b border-border flex-shrink-0">
         <h2 className="text-lg font-semibold">
           {isEditing ? t("edit_title") : t("create_title")}
         </h2>
-        <button type="button" onClick={onCancel} className="p-1.5 rounded-md hover:bg-muted transition-colors duration-150 text-muted-foreground hover:text-foreground">
-          <X className="w-5 h-5" />
-        </button>
+        <IconButton label={t("close")} onClick={onCancel}>
+          <X />
+        </IconButton>
       </div>
 
       <div className="flex-1 overflow-y-auto">
-        <div className="px-6 py-4 max-w-3xl">
+        <div className="@container px-6 py-4 max-w-3xl">
           {error && (
-            <div className="text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950 px-3 py-2 rounded-lg border border-red-200 dark:border-red-900 mb-4">
+            <div role="alert" className="text-sm text-destructive bg-destructive/10 px-3 py-2 rounded-md mb-4">
               {error}
             </div>
           )}
@@ -638,14 +726,16 @@ export function ContactForm({ contact, addressBooks, allKeywords, defaultAddress
               type="button"
               onClick={() => photoInputRef.current?.click()}
               disabled={photoUploading}
-              className="relative group rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-60"
+              className="relative group rounded-full focus:outline-hidden disabled:opacity-60"
               title={t("upload_photo")}
               aria-label={t("upload_photo")}
             >
               <Avatar
                 name={previewName || undefined}
                 email={previewEmail || undefined}
-                contactPhotoUri={photoUri}
+                contactPhoto={previewPhoto}
+                // Nothing typed yet: a neutral circle, not a coloured "?".
+                fallbackColor={previewName || previewEmail ? undefined : "var(--color-muted-foreground)"}
                 size="lg"
                 className="!w-20 !h-20 !text-xl"
               />
@@ -654,7 +744,7 @@ export function ContactForm({ contact, addressBooks, allKeywords, defaultAddress
                 className="absolute inset-0 rounded-full bg-black/55 text-white flex flex-col items-center justify-center gap-0.5 opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100 transition-opacity"
               >
                 <Camera className="w-5 h-5" />
-                <span className="text-[10px] font-medium leading-none">{t("change_photo")}</span>
+                <span className="text-[0.625rem] font-medium leading-none">{t("change_photo")}</span>
               </span>
               <input
                 ref={photoInputRef}
@@ -667,9 +757,9 @@ export function ContactForm({ contact, addressBooks, allKeywords, defaultAddress
             <div className="flex flex-col gap-1 min-w-0 flex-1">
               <p className="text-xs text-muted-foreground">{t("photo_hint")}</p>
               {photoError && (
-                <p className="text-xs text-red-600 dark:text-red-400">{photoError}</p>
+                <p className="text-xs text-destructive">{photoError}</p>
               )}
-              {photoUri && (
+              {previewPhoto && (
                 <button
                   type="button"
                   onClick={handlePhotoRemove}
@@ -685,16 +775,18 @@ export function ContactForm({ contact, addressBooks, allKeywords, defaultAddress
           <div className="divide-y divide-border/60">
 
           {addressBooks && addressBooks.length > 1 && (
-            <FormSection icon={Book} title={t("section_address_book") || "Directory"}>
+            <FormSection icon={Book} title={t("section_address_book")}>
               <select
+                aria-label={t("section_address_book")}
                 value={selectedBookId}
                 onChange={(e) => setSelectedBookId(e.target.value)}
-                className="w-full px-3 py-2 rounded-md border border-border bg-background text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+                className="w-full px-3 py-2 rounded-md border border-border bg-background text-sm focus:outline-hidden"
               >
-                <option value="">{t("select_address_book") || "Select a directory..."}</option>
+                <option value="">{t("select_address_book")}</option>
                 {addressBooks.map((book) => (
                   <option key={book.id} value={book.id}>
-                    {book.accountName ? `${book.name} (${book.accountName})` : book.name}
+                    {/* A shared book says whose it is, unless its name already does. */}
+                    {book.isShared && book.accountName && !book.name.includes(book.accountName) ? `${book.name} (${book.accountName})` : book.name}
                   </option>
                 ))}
               </select>
@@ -731,48 +823,48 @@ export function ContactForm({ contact, addressBooks, allKeywords, defaultAddress
             {isOrg ? (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <div>
-                  <label className="text-xs text-muted-foreground mb-1 block">
-                    {t("organization")} <span className="text-red-500">*</span>
+                  <label htmlFor={fieldId("organization-required")} className="text-xs text-muted-foreground mb-1 block">
+                    {t("organization")} <span className="text-destructive" aria-hidden="true">*</span>
                   </label>
-                  <Input value={organization} onChange={(e) => setOrganization(e.target.value)} placeholder={t("organization_placeholder")} autoFocus />
+                  <Input id={fieldId("organization-required")} aria-required value={organization} onChange={(e) => setOrganization(e.target.value)} placeholder={t("organization_placeholder")} autoFocus />
                 </div>
                 <div>
-                  <label className="text-xs text-muted-foreground mb-1 block">{t("nickname")}</label>
-                  <Input value={nickname} onChange={(e) => setNickname(e.target.value)} placeholder={t("nickname_placeholder")} />
+                  <label htmlFor={fieldId("nickname")} className="text-xs text-muted-foreground mb-1 block">{t("nickname")}</label>
+                  <Input id={fieldId("nickname")} value={nickname} onChange={(e) => setNickname(e.target.value)} placeholder={t("nickname_placeholder")} />
                 </div>
               </div>
             ) : (
               <>
-                <div className="grid grid-cols-[auto_1fr_1fr_auto] gap-2">
+                {/* Two columns in a narrow pane (title and first name, last name and
+                    suffix), one row once there is room, so no name gets cut. */}
+                <div className="grid grid-cols-2 @lg:grid-cols-[auto_1fr_1fr_auto] gap-2">
                   <div>
-                    <label className="text-xs text-muted-foreground mb-1 block">{t("prefix")}</label>
-                    <Input value={prefix} onChange={(e) => setPrefix(e.target.value)} placeholder={t("prefix_placeholder")} className="w-20" />
+                    <label htmlFor={fieldId("prefix")} className="text-xs text-muted-foreground mb-1 block">{t("prefix")}</label>
+                    <Input id={fieldId("prefix")} value={prefix} onChange={(e) => setPrefix(e.target.value)} placeholder={t("prefix_placeholder")} className="@lg:w-20" />
                   </div>
                   <div>
-                    <label className="text-xs text-muted-foreground mb-1 block">
-                      {t("given_name")} <span className="text-red-500">*</span>
-                    </label>
-                    <Input value={givenName} onChange={(e) => setGivenName(e.target.value)} placeholder={t("given_name")} autoFocus />
+                    <label htmlFor={fieldId("given_name")} className="text-xs text-muted-foreground mb-1 block">{t("given_name")}</label>
+                    <Input id={fieldId("given_name")} value={givenName} onChange={(e) => setGivenName(e.target.value)} placeholder={t("given_name")} autoFocus />
                   </div>
                   <div>
-                    <label className="text-xs text-muted-foreground mb-1 block">
-                      {t("surname")} <span className="text-red-500">*</span>
-                    </label>
-                    <Input value={surname} onChange={(e) => setSurname(e.target.value)} placeholder={t("surname")} />
+                    <label htmlFor={fieldId("surname")} className="text-xs text-muted-foreground mb-1 block">{t("surname")}</label>
+                    <Input id={fieldId("surname")} value={surname} onChange={(e) => setSurname(e.target.value)} placeholder={t("surname")} />
                   </div>
                   <div>
-                    <label className="text-xs text-muted-foreground mb-1 block">{t("suffix")}</label>
-                    <Input value={suffix} onChange={(e) => setSuffix(e.target.value)} placeholder={t("suffix_placeholder")} className="w-20" />
+                    <label htmlFor={fieldId("suffix")} className="text-xs text-muted-foreground mb-1 block">{t("suffix")}</label>
+                    <Input id={fieldId("suffix")} value={suffix} onChange={(e) => setSuffix(e.target.value)} placeholder={t("suffix_placeholder")} className="@lg:w-20" />
                   </div>
                 </div>
+                {/* Either name is enough (or an organization), so neither is starred. */}
+                <p className="text-xs text-muted-foreground -mt-1">{t("name_required")}</p>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   <div>
-                    <label className="text-xs text-muted-foreground mb-1 block">{t("middle_name")}</label>
-                    <Input value={additionalName} onChange={(e) => setAdditionalName(e.target.value)} placeholder={t("middle_name")} />
+                    <label htmlFor={fieldId("middle_name")} className="text-xs text-muted-foreground mb-1 block">{t("middle_name")}</label>
+                    <Input id={fieldId("middle_name")} value={additionalName} onChange={(e) => setAdditionalName(e.target.value)} placeholder={t("middle_name")} />
                   </div>
                   <div>
-                    <label className="text-xs text-muted-foreground mb-1 block">{t("nickname")}</label>
-                    <Input value={nickname} onChange={(e) => setNickname(e.target.value)} placeholder={t("nickname_placeholder")} />
+                    <label htmlFor={fieldId("nickname-1")} className="text-xs text-muted-foreground mb-1 block">{t("nickname")}</label>
+                    <Input id={fieldId("nickname-1")} value={nickname} onChange={(e) => setNickname(e.target.value)} placeholder={t("nickname_placeholder")} />
                   </div>
                 </div>
               </>
@@ -799,7 +891,10 @@ export function ContactForm({ contact, addressBooks, allKeywords, defaultAddress
                       }}
                       onBlur={() => handleEmailBlur(i, entry.address)}
                       placeholder={t("email_placeholder")}
-                      className={cn("flex-1", emailErrors[i] && "border-red-500 focus:ring-red-500")}
+                      aria-label={t("email")}
+                      aria-invalid={emailErrors[i] ? true : undefined}
+                      aria-describedby={emailErrors[i] ? fieldId(`email-error-${i}`) : undefined}
+                      className={cn("flex-1", emailErrors[i] && "border-destructive focus-visible:border-destructive")}
                     />
                     <Select
                       value={entry.context}
@@ -808,19 +903,20 @@ export function ContactForm({ contact, addressBooks, allKeywords, defaultAddress
                         next[i] = { ...next[i], context: e.target.value as EmailEntry["context"] };
                         setEmails(next);
                       }}
+                      aria-label={t("context_label")}
                     >
                       <option value="">-</option>
                       <option value="work">{t("context_work")}</option>
                       <option value="private">{t("context_private")}</option>
                     </Select>
                     {emails.length > 1 && (
-                      <Button type="button" variant="ghost" size="icon" onClick={() => setEmails(emails.filter((_, j) => j !== i))} className="h-8 w-8 shrink-0">
-                        <X className="w-3 h-3" />
-                      </Button>
+                      <IconButton label={t("remove_entry")} onClick={() => setEmails(emails.filter((_, j) => j !== i))} className="shrink-0">
+                        <X />
+                      </IconButton>
                     )}
                   </div>
                   {emailErrors[i] && (
-                    <p className="text-xs text-red-600 dark:text-red-400 mt-1 ms-1">{emailErrors[i]}</p>
+                    <p id={fieldId(`email-error-${i}`)} className="text-xs text-destructive mt-1 ms-1">{emailErrors[i]}</p>
                   )}
                 </div>
               ))}
@@ -846,6 +942,7 @@ export function ContactForm({ contact, addressBooks, allKeywords, defaultAddress
                       setPhones(next);
                     }}
                     placeholder={t("phone_placeholder")}
+                    aria-label={t("phone")}
                     className="flex-1"
                   />
                   <Select
@@ -856,10 +953,11 @@ export function ContactForm({ contact, addressBooks, allKeywords, defaultAddress
                       setPhones(next);
                     }}
                     className="w-[5.5rem]"
+                    aria-label={t("phone_type")}
                   >
                     <option value="">{t("phone_type")}</option>
                     <option value="voice">{t("phone_voice")}</option>
-                    <option value="cell">{t("phone_cell")}</option>
+                    <option value="mobile">{t("phone_cell")}</option>
                     <option value="fax">{t("phone_fax")}</option>
                     <option value="pager">{t("phone_pager")}</option>
                     <option value="video">{t("phone_video")}</option>
@@ -872,14 +970,15 @@ export function ContactForm({ contact, addressBooks, allKeywords, defaultAddress
                       next[i] = { ...next[i], context: e.target.value as PhoneEntry["context"] };
                       setPhones(next);
                     }}
+                    aria-label={t("context_label")}
                   >
                     <option value="">-</option>
                     <option value="work">{t("context_work")}</option>
                     <option value="private">{t("context_private")}</option>
                   </Select>
-                  <Button type="button" variant="ghost" size="icon" onClick={() => setPhones(phones.filter((_, j) => j !== i))} className="h-8 w-8 shrink-0">
-                    <X className="w-3 h-3" />
-                  </Button>
+                  <IconButton label={t("remove_entry")} onClick={() => setPhones(phones.filter((_, j) => j !== i))} className="shrink-0">
+                    <X />
+                  </IconButton>
                 </div>
               ))}
               <Button type="button" variant="ghost" size="sm" onClick={() => setPhones([...phones, { number: "", context: "", feature: "" }])} className="text-xs">
@@ -895,21 +994,21 @@ export function ContactForm({ contact, addressBooks, allKeywords, defaultAddress
               {/* In organization mode the org name is the card's identity, edited above. */}
               {!isOrg && (
                 <div>
-                  <label className="text-xs text-muted-foreground mb-1 block">{t("organization")}</label>
-                  <Input value={organization} onChange={(e) => setOrganization(e.target.value)} placeholder={t("organization_placeholder")} />
+                  <label htmlFor={fieldId("organization")} className="text-xs text-muted-foreground mb-1 block">{t("organization")}</label>
+                  <Input id={fieldId("organization")} value={organization} onChange={(e) => setOrganization(e.target.value)} placeholder={t("organization_placeholder")} />
                 </div>
               )}
               <div>
-                <label className="text-xs text-muted-foreground mb-1 block">{t("department")}</label>
-                <Input value={department} onChange={(e) => setDepartment(e.target.value)} placeholder={t("department_placeholder")} />
+                <label htmlFor={fieldId("department")} className="text-xs text-muted-foreground mb-1 block">{t("department")}</label>
+                <Input id={fieldId("department")} value={department} onChange={(e) => setDepartment(e.target.value)} placeholder={t("department_placeholder")} />
               </div>
               <div>
-                <label className="text-xs text-muted-foreground mb-1 block">{t("job_title")}</label>
-                <Input value={jobTitle} onChange={(e) => setJobTitle(e.target.value)} placeholder={t("job_title_placeholder")} />
+                <label htmlFor={fieldId("job_title")} className="text-xs text-muted-foreground mb-1 block">{t("job_title")}</label>
+                <Input id={fieldId("job_title")} value={jobTitle} onChange={(e) => setJobTitle(e.target.value)} placeholder={t("job_title_placeholder")} />
               </div>
               <div>
-                <label className="text-xs text-muted-foreground mb-1 block">{t("role")}</label>
-                <Input value={role} onChange={(e) => setRole(e.target.value)} placeholder={t("role_placeholder")} />
+                <label htmlFor={fieldId("role")} className="text-xs text-muted-foreground mb-1 block">{t("role")}</label>
+                <Input id={fieldId("role")} value={role} onChange={(e) => setRole(e.target.value)} placeholder={t("role_placeholder")} />
               </div>
             </div>
           </FormSection>
@@ -919,20 +1018,21 @@ export function ContactForm({ contact, addressBooks, allKeywords, defaultAddress
             <div className="space-y-3">
               {addresses.map((addr, i) => (
                 <div key={i} className="rounded-md border border-border/60 bg-muted/20 p-3 space-y-2 relative">
-                  <Button type="button" variant="ghost" size="icon" onClick={() => setAddresses(addresses.filter((_, j) => j !== i))} className="h-6 w-6 absolute top-2 right-2">
-                    <X className="w-3 h-3" />
-                  </Button>
-                  <Input value={addr.street} onChange={(e) => { const n = [...addresses]; n[i] = { ...n[i], street: e.target.value }; setAddresses(n); }} placeholder={t("street")} />
+                  <IconButton label={t("remove_entry")} onClick={() => setAddresses(addresses.filter((_, j) => j !== i))} className="absolute top-1 end-1">
+                    <X />
+                  </IconButton>
+                  <Input value={addr.street} onChange={(e) => { const n = [...addresses]; n[i] = { ...n[i], street: e.target.value }; setAddresses(n); }} placeholder={t("street")} aria-label={t("street")} />
                   <div className="grid grid-cols-2 gap-2">
-                    <Input value={addr.locality} onChange={(e) => { const n = [...addresses]; n[i] = { ...n[i], locality: e.target.value }; setAddresses(n); }} placeholder={t("city")} />
-                    <Input value={addr.region} onChange={(e) => { const n = [...addresses]; n[i] = { ...n[i], region: e.target.value }; setAddresses(n); }} placeholder={t("region")} />
+                    <Input value={addr.locality} onChange={(e) => { const n = [...addresses]; n[i] = { ...n[i], locality: e.target.value }; setAddresses(n); }} placeholder={t("city")} aria-label={t("city")} />
+                    <Input value={addr.region} onChange={(e) => { const n = [...addresses]; n[i] = { ...n[i], region: e.target.value }; setAddresses(n); }} placeholder={t("region")} aria-label={t("region")} />
                   </div>
                   <div className="grid grid-cols-3 gap-2">
-                    <Input value={addr.postcode} onChange={(e) => { const n = [...addresses]; n[i] = { ...n[i], postcode: e.target.value }; setAddresses(n); }} placeholder={t("postcode")} />
-                    <Input value={addr.country} onChange={(e) => { const n = [...addresses]; n[i] = { ...n[i], country: e.target.value }; setAddresses(n); }} placeholder={t("country")} />
+                    <Input value={addr.postcode} onChange={(e) => { const n = [...addresses]; n[i] = { ...n[i], postcode: e.target.value }; setAddresses(n); }} placeholder={t("postcode")} aria-label={t("postcode")} />
+                    <Input value={addr.country} onChange={(e) => { const n = [...addresses]; n[i] = { ...n[i], country: e.target.value }; setAddresses(n); }} placeholder={t("country")} aria-label={t("country")} />
                     <Select
                       value={addr.context}
                       onChange={(e) => { const n = [...addresses]; n[i] = { ...n[i], context: e.target.value as AddressEntry["context"] }; setAddresses(n); }}
+                      aria-label={t("context_label")}
                     >
                       <option value="">-</option>
                       <option value="work">{t("context_work")}</option>
@@ -957,17 +1057,19 @@ export function ContactForm({ contact, addressBooks, allKeywords, defaultAddress
                     value={svc.uri}
                     onChange={(e) => { const n = [...onlineServices]; n[i] = { ...n[i], uri: e.target.value }; setOnlineServices(n); }}
                     placeholder={t("url_placeholder")}
+                    aria-label={t("online_service_url")}
                     className="flex-1"
                   />
                   <Input
                     value={svc.service}
                     onChange={(e) => { const n = [...onlineServices]; n[i] = { ...n[i], service: e.target.value }; setOnlineServices(n); }}
                     placeholder={t("service_placeholder")}
+                    aria-label={t("service_placeholder")}
                     className="w-24"
                   />
-                  <Button type="button" variant="ghost" size="icon" onClick={() => setOnlineServices(onlineServices.filter((_, j) => j !== i))} className="h-8 w-8 shrink-0">
-                    <X className="w-3 h-3" />
-                  </Button>
+                  <IconButton label={t("remove_entry")} onClick={() => setOnlineServices(onlineServices.filter((_, j) => j !== i))} className="shrink-0">
+                    <X />
+                  </IconButton>
                 </div>
               ))}
               <Button type="button" variant="ghost" size="sm" onClick={() => setOnlineServices([...onlineServices, { uri: "", service: "", label: "" }])} className="text-xs">
@@ -986,20 +1088,22 @@ export function ContactForm({ contact, addressBooks, allKeywords, defaultAddress
                     type="date"
                     value={ann.date}
                     onChange={(e) => { const n = [...anniversaries]; n[i] = { ...n[i], date: e.target.value }; setAnniversaries(n); }}
+                    aria-label={t("anniversary_date")}
                     className="flex-1"
                   />
                   <Select
                     value={ann.kind}
                     onChange={(e) => { const n = [...anniversaries]; n[i] = { ...n[i], kind: e.target.value as AnniversaryEntry["kind"] }; setAnniversaries(n); }}
+                    aria-label={t("anniversary_kind")}
                   >
                     <option value="birth">{t("anniversary_birth")}</option>
                     <option value="wedding">{t("anniversary_wedding")}</option>
                     <option value="death">{t("anniversary_death")}</option>
                     <option value="other">{t("anniversary_other")}</option>
                   </Select>
-                  <Button type="button" variant="ghost" size="icon" onClick={() => setAnniversaries(anniversaries.filter((_, j) => j !== i))} className="h-8 w-8 shrink-0">
-                    <X className="w-3 h-3" />
-                  </Button>
+                  <IconButton label={t("remove_entry")} onClick={() => setAnniversaries(anniversaries.filter((_, j) => j !== i))} className="shrink-0">
+                    <X />
+                  </IconButton>
                 </div>
               ))}
               <Button type="button" variant="ghost" size="sm" onClick={() => setAnniversaries([...anniversaries, { date: "", kind: "birth" }])} className="text-xs">
@@ -1018,11 +1122,13 @@ export function ContactForm({ contact, addressBooks, allKeywords, defaultAddress
                     value={pi.value}
                     onChange={(e) => { const n = [...personalInfoEntries]; n[i] = { ...n[i], value: e.target.value }; setPersonalInfoEntries(n); }}
                     placeholder={t("personal_info_placeholder")}
+                    aria-label={t("personal_info")}
                     className="flex-1"
                   />
                   <Select
                     value={pi.kind}
                     onChange={(e) => { const n = [...personalInfoEntries]; n[i] = { ...n[i], kind: e.target.value as PersonalInfoEntry["kind"] }; setPersonalInfoEntries(n); }}
+                    aria-label={t("personal_info_kind")}
                   >
                     <option value="expertise">{t("personal_expertise")}</option>
                     <option value="hobby">{t("personal_hobby")}</option>
@@ -1032,15 +1138,16 @@ export function ContactForm({ contact, addressBooks, allKeywords, defaultAddress
                   <Select
                     value={pi.level}
                     onChange={(e) => { const n = [...personalInfoEntries]; n[i] = { ...n[i], level: e.target.value as PersonalInfoEntry["level"] }; setPersonalInfoEntries(n); }}
+                    aria-label={t("level")}
                   >
                     <option value="">{t("level")}</option>
                     <option value="high">{t("level_high")}</option>
                     <option value="medium">{t("level_medium")}</option>
                     <option value="low">{t("level_low")}</option>
                   </Select>
-                  <Button type="button" variant="ghost" size="icon" onClick={() => setPersonalInfoEntries(personalInfoEntries.filter((_, j) => j !== i))} className="h-8 w-8 shrink-0">
-                    <X className="w-3 h-3" />
-                  </Button>
+                  <IconButton label={t("remove_entry")} onClick={() => setPersonalInfoEntries(personalInfoEntries.filter((_, j) => j !== i))} className="shrink-0">
+                    <X />
+                  </IconButton>
                 </div>
               ))}
               <Button type="button" variant="ghost" size="sm" onClick={() => setPersonalInfoEntries([...personalInfoEntries, { value: "", kind: "hobby", level: "" }])} className="text-xs">
@@ -1055,6 +1162,8 @@ export function ContactForm({ contact, addressBooks, allKeywords, defaultAddress
             <CategoryComboBox
               keywordsStr={keywordsStr}
               onChange={setKeywordsStr}
+              inputValue={categoryDraft}
+              onInputChange={setCategoryDraft}
               allKeywords={allKeywords || []}
               placeholder={t("categories_placeholder")}
               hint={t("categories_hint")}
@@ -1066,8 +1175,8 @@ export function ContactForm({ contact, addressBooks, allKeywords, defaultAddress
           <FormSection icon={UserCircle} title={t("gender")} collapsible defaultOpen={!!(genderSex || genderIdentity)}>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <div>
-                <label className="text-xs text-muted-foreground mb-1 block">{t("gender_sex")}</label>
-                <Select value={genderSex} onChange={(e) => setGenderSex(e.target.value)} className="w-full">
+                <label htmlFor={fieldId("gender_sex")} className="text-xs text-muted-foreground mb-1 block">{t("gender_sex")}</label>
+                <Select id={fieldId("gender_sex")} value={genderSex} onChange={(e) => setGenderSex(e.target.value)} className="w-full">
                   <option value="">-</option>
                   <option value="masculine">{t("gender_male")}</option>
                   <option value="feminine">{t("gender_female")}</option>
@@ -1077,8 +1186,8 @@ export function ContactForm({ contact, addressBooks, allKeywords, defaultAddress
                 </Select>
               </div>
               <div>
-                <label className="text-xs text-muted-foreground mb-1 block">{t("gender_identity")}</label>
-                <Input value={genderIdentity} onChange={(e) => setGenderIdentity(e.target.value)} placeholder={t("gender_identity_placeholder")} />
+                <label htmlFor={fieldId("gender_identity")} className="text-xs text-muted-foreground mb-1 block">{t("gender_identity")}</label>
+                <Input id={fieldId("gender_identity")} value={genderIdentity} onChange={(e) => setGenderIdentity(e.target.value)} placeholder={t("gender_identity_placeholder")} />
               </div>
             </div>
           </FormSection>
@@ -1087,16 +1196,16 @@ export function ContactForm({ contact, addressBooks, allKeywords, defaultAddress
           <FormSection icon={Calendar} title={t("calendar")} collapsible defaultOpen={!!(calendarUri || schedulingUri || freeBusyUri)}>
             <div className="space-y-3">
               <div>
-                <label className="text-xs text-muted-foreground mb-1 block">{t("calendar_uri")}</label>
-                <Input value={calendarUri} onChange={(e) => setCalendarUri(e.target.value)} placeholder="https://..." />
+                <label htmlFor={fieldId("calendar_uri")} className="text-xs text-muted-foreground mb-1 block">{t("calendar_uri")}</label>
+                <Input id={fieldId("calendar_uri")} value={calendarUri} onChange={(e) => setCalendarUri(e.target.value)} placeholder="https://..." />
               </div>
               <div>
-                <label className="text-xs text-muted-foreground mb-1 block">{t("scheduling_uri")}</label>
-                <Input value={schedulingUri} onChange={(e) => setSchedulingUri(e.target.value)} placeholder="https://..." />
+                <label htmlFor={fieldId("scheduling_uri")} className="text-xs text-muted-foreground mb-1 block">{t("scheduling_uri")}</label>
+                <Input id={fieldId("scheduling_uri")} value={schedulingUri} onChange={(e) => setSchedulingUri(e.target.value)} placeholder="https://..." />
               </div>
               <div>
-                <label className="text-xs text-muted-foreground mb-1 block">{t("freebusy_uri")}</label>
-                <Input value={freeBusyUri} onChange={(e) => setFreeBusyUri(e.target.value)} placeholder="https://..." />
+                <label htmlFor={fieldId("freebusy_uri")} className="text-xs text-muted-foreground mb-1 block">{t("freebusy_uri")}</label>
+                <Input id={fieldId("freebusy_uri")} value={freeBusyUri} onChange={(e) => setFreeBusyUri(e.target.value)} placeholder="https://..." />
               </div>
             </div>
           </FormSection>
@@ -1107,7 +1216,8 @@ export function ContactForm({ contact, addressBooks, allKeywords, defaultAddress
               value={note}
               onChange={(e) => setNote(e.target.value)}
               placeholder={t("note_placeholder")}
-              className="w-full min-h-[100px] rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground resize-y outline-none focus:ring-2 focus:ring-ring"
+              aria-label={t("note")}
+              className="w-full min-h-[100px] rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground resize-y outline-none"
             />
           </FormSection>
 
@@ -1115,7 +1225,8 @@ export function ContactForm({ contact, addressBooks, allKeywords, defaultAddress
         </div>
       </div>
 
-      <div className="flex items-center justify-end gap-2 px-6 py-4 border-t border-border flex-shrink-0">
+      {/* Toasts sit above Save and Cancel, not on them. */}
+      <div ref={footerRef} className="flex items-center justify-end gap-2 px-6 py-4 border-t border-border flex-shrink-0">
         <Button type="button" variant="outline" onClick={onCancel} disabled={isSaving}>
           {t("cancel")}
         </Button>
@@ -1130,6 +1241,8 @@ export function ContactForm({ contact, addressBooks, allKeywords, defaultAddress
 function CategoryComboBox({
   keywordsStr,
   onChange,
+  inputValue,
+  onInputChange: setInputValue,
   allKeywords,
   placeholder,
   hint,
@@ -1137,14 +1250,18 @@ function CategoryComboBox({
 }: {
   keywordsStr: string;
   onChange: (value: string) => void;
+  /** The text typed but not added yet; the form adds it on Save. */
+  inputValue: string;
+  onInputChange: (value: string) => void;
   allKeywords: string[];
   placeholder: string;
   hint: string;
   addLabel: string;
 }) {
+  const t = useTranslations("contacts.form");
   const [isOpen, setIsOpen] = useState(false);
-  const [inputValue, setInputValue] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const hintId = useId();
 
   // Parse current keywords from comma-separated string
   const currentKeywords = useMemo(() => {
@@ -1171,7 +1288,7 @@ function CategoryComboBox({
     const next = [...currentKeywords, trimmed].join(", ");
     onChange(next);
     setInputValue("");
-  }, [currentKeywords, onChange]);
+  }, [currentKeywords, onChange, setInputValue]);
 
   const removeKeyword = useCallback((keyword: string) => {
     const next = currentKeywords.filter(k => k !== keyword).join(", ");
@@ -1204,6 +1321,8 @@ function CategoryComboBox({
               <button
                 type="button"
                 onClick={() => removeKeyword(kw)}
+                aria-label={t("remove_category", { name: kw })}
+                title={t("remove_category", { name: kw })}
                 className="hover:text-destructive transition-colors"
               >
                 <X className="w-3 h-3" />
@@ -1222,8 +1341,10 @@ function CategoryComboBox({
         onBlur={() => setIsOpen(false)}
         onKeyDown={handleKeyDown}
         placeholder={currentKeywords.length === 0 ? placeholder : ""}
+        aria-label={t("categories")}
+        aria-describedby={hintId}
       />
-      <p className="text-xs text-muted-foreground mt-1.5">{hint}</p>
+      <p id={hintId} className="text-xs text-muted-foreground mt-1.5">{hint}</p>
 
       {/* Dropdown */}
       {isOpen && (suggestions.length > 0 || canAddNew) && (

@@ -92,9 +92,7 @@ export function useHandleTypeahead(
       setActiveIndex(-1);
 
       const trimmed = value.trim().replace(/^@/, "");
-      // Typeahead searches on prefixes, so we only gate on a minimum length -
-      // not on `looksLikeHandle`, which requires a dot and would suppress
-      // suggestions for a partial handle like "ali".
+      // Typeahead accepts partial handles like "ali".
       if (trimmed.length < minChars) {
         setSuggestions([]);
         setIsOpen(false);

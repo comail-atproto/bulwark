@@ -7,11 +7,14 @@
  * A raw socket keeps the test harness free of a nodemailer dependency.
  */
 import net from 'node:net';
+import tls from 'node:tls';
 import { SMTP_HOST, SMTP_PORT } from './config';
 
 interface SendOptions {
   host?: string;
   port?: number;
+  /** Use certificate-verified implicit TLS for hosted submission. */
+  secure?: boolean;
   /** Envelope + auth sender, e.g. "alice@example.org". */
   from: string;
   /** Auth username; defaults to `from`. */
@@ -49,13 +52,14 @@ export async function sendMail(opts: SendOptions): Promise<void> {
   const recipients = Array.isArray(opts.to) ? opts.to : [opts.to];
   const authUser = opts.authUser ?? opts.from;
 
-  const socket = net.createConnection({ host, port });
+  const socket = opts.secure ? tls.connect({ host, port, servername: net.isIP(host) ? undefined : host }) : net.createConnection({ host, port });
   socket.setEncoding('utf8');
   socket.setTimeout(15000);
 
   let buffer = '';
   let resolveLine: ((line: string) => void) | null = null;
   let pendingError: Error | null = null;
+  let rejectReply: ((error: Error) => void) | null = null;
 
   socket.on('data', (chunk: string) => {
     buffer += chunk;
@@ -66,18 +70,22 @@ export async function sendMail(opts: SendOptions): Promise<void> {
       if (/^\d{3} /.test(line) && resolveLine) {
         const r = resolveLine;
         resolveLine = null;
+        rejectReply = null;
         buffer = lines.slice(i + 1).join('\r\n');
         r(line);
         return;
       }
     }
   });
-  socket.on('timeout', () => { pendingError = new SmtpError('SMTP timeout'); socket.destroy(); });
-  socket.on('error', (e) => { pendingError = e; });
+  const fail = (error: Error) => { pendingError = error; rejectReply?.(error); rejectReply = null; resolveLine = null; };
+  socket.on('timeout', () => { fail(new SmtpError('SMTP timeout')); socket.destroy(); });
+  socket.on('error', fail);
+  socket.on('close', () => fail(new SmtpError('SMTP connection closed')));
 
   const waitReply = (expect: string): Promise<string> =>
     new Promise((resolve, reject) => {
       if (pendingError) return reject(pendingError);
+      rejectReply = reject;
       resolveLine = (line) => {
         if (!line.startsWith(expect)) {
           reject(new SmtpError(`Expected ${expect}, got: ${line}`));
@@ -92,8 +100,9 @@ export async function sendMail(opts: SendOptions): Promise<void> {
 
   try {
     await new Promise<void>((resolve, reject) => {
-      socket.once('connect', resolve);
+      socket.once(opts.secure ? 'secureConnect' : 'connect', resolve);
       socket.once('error', reject);
+      socket.once('close', () => reject(new SmtpError('SMTP connection closed')));
     });
     await waitReply('220');
     send('EHLO integration-tests');

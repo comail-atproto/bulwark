@@ -1,5 +1,6 @@
-import { render, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { noThirdPartyTraffic, setNoThirdPartyTraffic } from '@/lib/third-party-mode';
 
 // Controllable config: tests set demoMode / devMode per case.
 const configState = { devMode: false, demoMode: false };
@@ -15,7 +16,7 @@ vi.mock('@/lib/atproto-avatar', () => ({
   resolveAtprotoAvatar: (did: string) => resolveAtprotoAvatar(did),
 }));
 
-import { Avatar } from '../avatar';
+import { AtprotoAvatar as Avatar } from '../atproto-avatar';
 
 const DID = 'did:plc:abc123';
 const ATPROTO_AVATAR = 'https://cdn.bsky.app/img/avatar/plain/abc/avatar.jpg';
@@ -53,6 +54,21 @@ describe('Avatar atproto profile photo', () => {
     await waitFor(() => {
       expect(resolveAtprotoAvatar).toHaveBeenCalledWith(DID);
     });
+    expect(container.querySelector('img')).toBeNull();
+    expect(container.textContent).toBe('DU');
+  });
+
+  it('waits for privacy settings and updates when public lookups are allowed', async () => {
+    setNoThirdPartyTraffic('unknown');
+    resolveAtprotoAvatar.mockImplementation(async () => noThirdPartyTraffic() ? null : ATPROTO_AVATAR);
+    const { container } = render(<Avatar name="Demo User" did={DID} disableFavicon />);
+
+    expect(container.querySelector('img')).toBeNull();
+
+    act(() => setNoThirdPartyTraffic(false));
+    await waitFor(() => expect(container.querySelector('img')).toHaveAttribute('src', ATPROTO_AVATAR));
+
+    act(() => setNoThirdPartyTraffic(true));
     expect(container.querySelector('img')).toBeNull();
     expect(container.textContent).toBe('DU');
   });
@@ -98,5 +114,22 @@ describe('Avatar atproto profile photo', () => {
 
     expect(container.textContent).toBe('DU');
     expect(container.querySelector('img')).toBeNull();
+  });
+
+  it('falls back to the original contact photo when the DID image fails', async () => {
+    resolveAtprotoAvatar.mockResolvedValue(ATPROTO_AVATAR);
+    const photo = 'data:image/png;base64,c3ludGhldGlj';
+    const { container } = render(<Avatar name="Demo User" did={DID} contactPhoto={{ uri: photo }} disableFavicon />);
+    await waitFor(() => expect(container.querySelector('img')).toHaveAttribute('src', ATPROTO_AVATAR));
+    fireEvent.error(container.querySelector('img')!);
+    await waitFor(() => expect(container.querySelector('img')).toHaveAttribute('src', photo));
+  });
+
+  it('preserves native image restrictions and sizing while a DID resolves', async () => {
+    resolveAtprotoAvatar.mockResolvedValue(ATPROTO_AVATAR);
+    const { container } = render(<Avatar name="Demo User" did={DID} disableImages size="lg" className="account-avatar" />);
+    await waitFor(() => expect(resolveAtprotoAvatar).toHaveBeenCalled());
+    expect(container.querySelector('img')).toBeNull();
+    expect(container.querySelector('[title="Demo User"]')).toHaveClass('account-avatar');
   });
 });

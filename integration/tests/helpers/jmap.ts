@@ -48,6 +48,8 @@ export class JmapClient {
    *  personal mailboxes this equals the mail account, but read it from the
    *  session so the helper stays correct if that ever diverges. */
   filesAccountId = '';
+  /** Stalwart 1.0 (File Storage draft 18) wants `@type` on a FileNode create. */
+  private typedFileNodes = false;
   /** Every account visible in this user's session (own + shared/group),
    *  keyed by accountId -> account name (its email address). */
   accounts: Record<string, string> = {};
@@ -62,7 +64,7 @@ export class JmapClient {
   static async connect(email: string, password: string): Promise<JmapClient> {
     const c = new JmapClient(email, password);
     const res = await fetch(`${JMAP_URL}/jmap/session`, {
-      headers: { Authorization: c.authHeader },
+      headers: { Authorization: c.authHeader }, signal: AbortSignal.timeout(15000),
     });
     if (!res.ok) throw new Error(`JMAP session failed for ${email}: ${res.status}`);
     const session = await res.json();
@@ -70,6 +72,8 @@ export class JmapClient {
     if (!primary) throw new Error(`No mail account for ${email} in JMAP session`);
     c.accountId = primary;
     c.filesAccountId = session.primaryAccounts?.[FILENODE] ?? primary;
+    c.typedFileNodes = 'supportedNodeTypes' in
+      (session.accounts?.[c.filesAccountId]?.accountCapabilities?.[FILENODE] ?? {});
     c.accounts = Object.fromEntries(
       Object.entries(session.accounts ?? {}).map(([id, a]) => [id, (a as { name: string }).name]),
     );
@@ -107,7 +111,7 @@ export class JmapClient {
     const res = await fetch(this.apiUrl, {
       method: 'POST',
       headers: { Authorization: this.authHeader, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ using, methodCalls }),
+      body: JSON.stringify({ using, methodCalls }), signal: AbortSignal.timeout(15000),
     });
     if (!res.ok) throw new Error(`JMAP request failed: ${res.status} ${await res.text()}`);
     return res.json();
@@ -145,7 +149,17 @@ export class JmapClient {
       ],
       [CORE, PRINCIPALS],
     );
-    const list = r.methodResponses[1][1].list as Array<{ id: string; email?: string }>;
+    const [method, result] = r.methodResponses[0];
+    if (method === 'error') {
+      // Stalwart 1.0 answers `forbidden` ("The administrator has disabled
+      // directory queries.") unless the Sharing setting allowDirectoryQueries
+      // is on; the account plan turns it on.
+      const hint = result.type === 'forbidden'
+        ? ' Is Sharing.allowDirectoryQueries on (see stalwart/plan-accounts.ndjson.tpl)?'
+        : '';
+      throw new Error(`Principal/query for ${email} failed: ${result.type}: ${result.description ?? ''}${hint}`);
+    }
+    const list = (r.methodResponses[1][1].list ?? []) as Array<{ id: string; email?: string }>;
     const match = list.find((p) => p.email === email) ?? list[0];
     if (!match) throw new Error(`No principal found for ${email}`);
     return match.id;
@@ -364,6 +378,7 @@ export class JmapClient {
   async createFileDirectory(name: string, parentId: string | null = null): Promise<string> {
     const props: Record<string, unknown> = { name };
     if (parentId !== null) props.parentId = parentId;
+    if (this.typedFileNodes) props['@type'] = 'Directory';
     const r = await this.request(
       [['FileNode/set', { accountId: this.filesAccountId, create: { dir0: props } }, '0']],
       [CORE, FILENODE],

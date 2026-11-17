@@ -57,14 +57,17 @@ describe('relay SSO opaque-code redemption', () => {
         'Content-Type': 'application/json',
         'Cache-Control': 'no-store',
       });
+      expect(new Headers(init?.headers).get('X-Comail-Mail-Protocol')).toBe('1');
       expect(String((init?.headers as Record<string, string>).Authorization)).toMatch(/^Bearer /);
       expect(JSON.parse(String(init?.body))).toEqual({ code: CODE });
       return new Response(JSON.stringify({
         did: 'did:plc:abcdefghijklmnopqrstuvwxyz'.slice(0, 32),
         mailbox: 'alice@example.test',
         app_password: 'durable-secret-from-backchannel',
+        credential_id: 'browser-credential',
         groupware_enabled: true,
         builders_enabled: false,
+        mail_mode: 'pds',
       }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     });
 
@@ -76,8 +79,10 @@ describe('relay SSO opaque-code redemption', () => {
       did: 'did:plc:abcdefghijklmnopqrstuvwxyz'.slice(0, 32),
       mailbox: 'alice@example.test',
       appPassword: 'durable-secret-from-backchannel',
+      credentialId: 'browser-credential',
       groupwareEnabled: true,
       buildersEnabled: false,
+      mailMode: 'pds',
     });
     expect(fetcher).toHaveBeenCalledOnce();
   });
@@ -96,6 +101,17 @@ describe('relay SSO opaque-code redemption', () => {
       app_password: '',
     }), { status: 200 }));
     await expect(redeemRelaySsoCode(CODE, config, badFetcher)).rejects.toThrow();
+  });
+
+  it.each([
+    { body: JSON.stringify({ error: 'client_update_required', message: 'private upstream message' }), update: true },
+    { body: JSON.stringify({ error: 'forbidden' }), update: false },
+    { body: 'invalid JSON', update: false },
+    { body: JSON.stringify({ error: 'client_update_required', padding: 'x'.repeat(4096) }), update: false },
+  ])('recognizes only a bounded update-required response: $update', async ({ body, update }) => {
+    const fetcher = vi.fn(async () => new Response(body, { status: 403 }));
+    await expect(redeemRelaySsoCode(CODE, { sharedSecret: SECRET, redeemUrl: REDEEM_URL }, fetcher))
+      .rejects.toMatchObject({ status: 403, clientUpdateRequired: update });
   });
 
   it('uses a static fragment bootstrap that never interpolates the opaque code', () => {

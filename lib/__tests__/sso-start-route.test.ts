@@ -22,8 +22,12 @@ vi.mock('@/lib/logger', () => ({
   logger: { warn: vi.fn(), error: vi.fn(), debug: vi.fn(), info: vi.fn() },
 }));
 
+const encrypted = vi.hoisted(() => ({ last: null as Record<string, unknown> | null }));
 vi.mock('@/lib/auth/crypto', () => ({
-  encryptPayload: () => 'encrypted',
+  encryptPayload: (payload: Record<string, unknown>) => {
+    encrypted.last = payload;
+    return 'encrypted';
+  },
 }));
 
 vi.mock('@/lib/oauth/pkce-server', () => ({
@@ -32,7 +36,7 @@ vi.mock('@/lib/oauth/pkce-server', () => ({
   generateStateServer: () => 'state-123',
 }));
 
-const getRequiredConfig = vi.fn((_serverId?: string | null) => ({
+const getRequiredConfig = vi.fn((_serverId?: string | null): { clientId: string; discoveryUrl: string; resource?: string } => ({
   clientId: 'client',
   discoveryUrl: 'https://idp.example.com',
 }));
@@ -132,5 +136,63 @@ describe('sso start route', () => {
     const url = new URL(body.authorize_url);
     expect(url.searchParams.has('prompt')).toBe(false);
     expect(url.searchParams.has('max_age')).toBe(false);
+  });
+
+  it('sends the configured RFC 8707 resource with the authorization request (#1461)', async () => {
+    getRequiredConfig.mockReturnValueOnce({
+      clientId: 'client',
+      discoveryUrl: 'https://idp.example.com',
+      resource: 'https://mail.example.com',
+    });
+    const { body } = await callRoute({ redirect_uri: 'https://mail.example.com/auth/callback' });
+
+    expect(new URL(body.authorize_url).searchParams.get('resource')).toBe('https://mail.example.com');
+  });
+
+  it('sends no resource when none applies', async () => {
+    const { body } = await callRoute({ redirect_uri: 'https://mail.example.com/auth/callback' });
+
+    expect(new URL(body.authorize_url).searchParams.has('resource')).toBe(false);
+  });
+});
+
+describe('sso start for the mobile app', () => {
+  const CHALLENGE = 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM';
+  const mobile = (extra: Record<string, unknown> = {}) => callRoute({
+    redirect_uri: 'https://mail.example.com/auth/callback',
+    mobile_redirect_uri: 'bulwarkmobile://auth/callback',
+    mobile_state: 'm-1',
+    ...extra,
+  });
+
+  beforeEach(() => {
+    encrypted.last = null;
+  });
+
+  it('keeps the PKCE challenge of the app for the complete route', async () => {
+    const { status } = await mobile({ mobile_code_challenge: CHALLENGE });
+    expect(status).toBe(200);
+    expect(encrypted.last).toMatchObject({
+      mobile_redirect_uri: 'bulwarkmobile://auth/callback',
+      mobile_state: 'm-1',
+      mobile_code_challenge: CHALLENGE,
+    });
+  });
+
+  it('refuses a malformed challenge instead of falling back to handing over tokens', async () => {
+    const { status } = await mobile({ mobile_code_challenge: 'plain-text' });
+    expect(status).toBe(400);
+    expect(encrypted.last).toBeNull();
+  });
+
+  it('starts as before without a challenge', async () => {
+    const { status } = await mobile();
+    expect(status).toBe(200);
+    expect(encrypted.last).not.toHaveProperty('mobile_code_challenge');
+  });
+
+  it('drops a challenge sent without the app callback', async () => {
+    await callRoute({ redirect_uri: 'https://mail.example.com/auth/callback', mobile_code_challenge: CHALLENGE });
+    expect(encrypted.last).not.toHaveProperty('mobile_code_challenge');
   });
 });

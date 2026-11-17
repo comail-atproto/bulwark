@@ -35,15 +35,17 @@ describe('Next static asset CORS', () => {
       rule.headers.some((header) => header.key.toLowerCase() === 'access-control-allow-origin')
     );
 
-    expect(corsRules?.map((rule) => rule.source)).toEqual(['/_next/static/:path*']);
+    // The plugin sandbox's prebuilt, content-hashed script and stylesheet
+    // (scripts/build-plugin-sandbox.mjs) are public static files too.
+    expect(corsRules?.map((rule) => rule.source)).toEqual(['/_next/static/:path*', '/plugin-sandbox-assets/:path*']);
   });
 });
 
 describe('Comail source and development defaults', () => {
-  it('offers the public fork source by default', async () => {
-    vi.stubEnv('NEXT_PUBLIC_CORRESPONDING_SOURCE_URL', '');
+  it.each([undefined, '', '   '])('offers Tangled source with no configured URL (%s)', async (sourceUrl) => {
+    vi.stubEnv('NEXT_PUBLIC_CORRESPONDING_SOURCE_URL', sourceUrl);
     const config = await loadConfig();
-    expect(config.env?.NEXT_PUBLIC_CORRESPONDING_SOURCE_URL).toBe('https://github.com/comail-atproto/bulwark');
+    expect(config.env?.NEXT_PUBLIC_CORRESPONDING_SOURCE_URL).toBe('https://tangled.org/comail.at/bulwark');
   });
 
   it('preserves an operator source URL override', async () => {
@@ -52,7 +54,7 @@ describe('Comail source and development defaults', () => {
     expect(config.env?.NEXT_PUBLIC_CORRESPONDING_SOURCE_URL).toBe('https://source.example.com/release.tar.gz');
   });
 
-  it('does not authorize a private workstation origin by default', async () => {
+  it('does not authorize the upstream development origin by default', async () => {
     const config = await loadConfig();
     expect(config.allowedDevOrigins ?? []).toEqual([]);
   });

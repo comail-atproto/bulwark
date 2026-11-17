@@ -1,16 +1,20 @@
 import { logger } from '@/lib/logger';
+import { observeUpstream } from '@/lib/metrics/upstream';
 import { discoverOAuth } from '@/lib/oauth/discovery';
 import type { EndpointValidator, OAuthMetadata } from '@/lib/oauth/discovery';
 import { isPublicHttpUrl } from '@/lib/security/url-guard';
 import { readFileEnv } from '@/lib/read-file-env';
 import { configManager } from '@/lib/admin/config-manager';
 import { parseJmapServers, findServerById } from '@/lib/admin/jmap-servers';
+import { stalwartDefaultClientId } from '@/lib/auth/stalwart-password-login';
+import { getOauthResource } from '@/lib/oauth/tokens';
 
 // Fallback OAuth client id used when no client is configured. The password+TOTP
 // login route mints tokens against the mail server's built-in OAuth with this
-// id (Stalwart accepts any client id unless `require_client_registration` is
-// enabled), so refreshing/revoking those tokens must fall back to the same id
-// instead of failing on the missing OAUTH_CLIENT_ID (#873).
+// id (Stalwart 0.16 accepts any client id unless `require_client_registration`
+// is enabled; 1.0 gets a client of its own, see defaultClientOptions), so
+// refreshing/revoking those tokens must fall back to the same id instead of
+// failing on the missing OAUTH_CLIENT_ID (#873).
 export const DEFAULT_CLIENT_ID = 'bulwark-webmail';
 
 export interface ClientConfigOptions {
@@ -118,7 +122,27 @@ export function getRequiredConfig(serverId?: string | null, options?: ClientConf
   if (issuerUrl !== undefined && issuerUrl !== '' && !issuerUrl.trim()) {
     logger.warn('OAUTH_ISSUER_URL is set but empty, falling back to JMAP_SERVER_URL for discovery');
   }
-  return { clientId, serverUrl, discoveryUrl, serverId: entry?.id };
+  // Belongs to the same provider as the issuer, so the same rule applies:
+  // the global OAUTH_END_SESSION_URL only without a server entry (#1279).
+  const endSessionUrl = entry
+    ? entry.oauth?.endSessionUrl
+    : (configManager.get<string>('oauthEndSessionUrl', '') || process.env.OAUTH_END_SESSION_URL)?.trim() || undefined;
+  // The resource names an API of the global provider, so it follows the
+  // issuer's rule too: never sent to a server entry's provider (#1461).
+  const resource = entry ? undefined : getOauthResource() || undefined;
+  return { clientId, serverUrl, discoveryUrl, serverId: entry?.id, endSessionUrl, resource };
+}
+
+/**
+ * Options for refreshing or revoking a token the password+TOTP login may have
+ * minted without a configured client. On Stalwart 1.0 that login signs in
+ * with a client it registers itself (lib/auth/stalwart-password-login.ts),
+ * whose id the refresh must present instead of the default one.
+ */
+export async function defaultClientOptions(serverId?: string | null): Promise<ClientConfigOptions> {
+  const { clientId, serverUrl } = getRequiredConfig(serverId, { fallbackClientId: DEFAULT_CLIENT_ID });
+  if (clientId !== DEFAULT_CLIENT_ID) return { fallbackClientId: DEFAULT_CLIENT_ID };
+  return { fallbackClientId: await stalwartDefaultClientId(serverUrl, DEFAULT_CLIENT_ID, true) };
 }
 
 export function getClientSecret(serverId?: string | null): string {
@@ -186,12 +210,12 @@ export async function exchangeCodeForTokens(
   // The body carries the code, the PKCE verifier and the client secret. The
   // endpoint was validated; a redirect would re-send all of it to a host
   // that was not, so none is followed.
-  const tokenResponse = await fetch(tokenEndpoint, {
+  const tokenResponse = await observeUpstream('oauth', () => fetch(tokenEndpoint, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: params.toString(),
     redirect: 'error',
-  });
+  }));
 
   if (!tokenResponse.ok) {
     const errorText = await tokenResponse.text();

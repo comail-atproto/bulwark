@@ -53,18 +53,22 @@ import { decryptPayload } from '@/lib/auth/crypto';
 import { setStalwartAuthContextInStore, type StalwartAuthContext } from '@/lib/stalwart/auth-context';
 import { IMPERSONATION_GRANT_COOKIE, sealImpersonationGrant } from '@/lib/impersonation/grant-cookie';
 import { resetPairingStoreForTests, stashGrant, type PairingGrant } from '@/lib/auth/pairing-store';
+import { resetStoredCredentialBudgetForTests } from '@/lib/stalwart/stored-credential-budget';
 import { readPairReauthFromStore, setPairReauthInStore } from '@/lib/auth/pair-reauth';
 import { openPhoneRefreshToken } from '@/lib/auth/pair-bundle';
 import { POST as createPOST } from '@/app/api/auth/pair/create/route';
 import { POST as redeemPOST } from '@/app/api/auth/pair/redeem/route';
 import { GET as statusGET } from '@/app/api/auth/pair/status/route';
+import { setStoreForTests } from '@/lib/shared-store';
+import { resetLocalStoreForTests } from '@/lib/shared-store/local';
+import { switchableSharedStore } from './helpers/shared-store-down';
 
 const SERVER = 'https://mail.example.org';
 const CUSTOM_SERVER = 'https://custom.example';
 const WEBMAIL = 'https://webmail.example';
 const USER = 'alice@example.org';
 const PASSWORD = 'Tr0ub4dor&3-correct-horse';
-const WRONG_PASSWORD = 'wrong-password';
+const WRONG_PASSWORD = 'hunter2-wrong-guess';
 const APP_SECRET = 'app_7bq9mobile-secret';
 const TOKENS = { access_token: 'access-1', refresh_token: 'refresh-1', expires_in: 3600 };
 const HOSTILE = 'http://169.254.169.254/latest/meta-data';
@@ -227,6 +231,7 @@ beforeEach(() => {
   vi.stubEnv('OAUTH_CLIENT_SECRET', '');
   vi.stubEnv('OAUTH_CLIENT_SECRET_FILE', '');
   resetPairingStoreForTests();
+  resetStoredCredentialBudgetForTests();
   delete (globalThis as Record<string, unknown>).__bulwarkPairAttempts;
   calls.length = 0;
   handler = mailServer();
@@ -327,23 +332,23 @@ describe('pair/create gatekeeping', () => {
   it('does not accept a proof for another slot or another user', async () => {
     signIn(1, { username: 'bob@example.org' });
 
-    setPairReauthInStore(cookieStore as never, { grantId: stashGrant(grant(), '1:bob@example.org'), owner: '1:bob@example.org' });
+    await setPairReauthInStore(cookieStore as never, { grantId: await stashGrant(grant(), '1:bob@example.org'), owner: '1:bob@example.org' });
     expect(await create({ slot: 0 })).toMatchObject({ status: 401, body: { error: 'reauth_required' } });
 
-    setPairReauthInStore(cookieStore as never, { grantId: stashGrant(grant(), `1:${USER}`), owner: `1:${USER}` });
+    await setPairReauthInStore(cookieStore as never, { grantId: await stashGrant(grant(), `1:${USER}`), owner: `1:${USER}` });
     expect(await create({ slot: 0 })).toMatchObject({ status: 401, body: { error: 'reauth_required' } });
 
-    setPairReauthInStore(cookieStore as never, { grantId: stashGrant(grant(), '0:mallory@example.org'), owner: '0:mallory@example.org' });
+    await setPairReauthInStore(cookieStore as never, { grantId: await stashGrant(grant(), '0:mallory@example.org'), owner: '0:mallory@example.org' });
     expect(await create({ slot: 0 })).toMatchObject({ status: 401, body: { error: 'reauth_required' } });
 
     // The proof's own account gets a code.
-    setPairReauthInStore(cookieStore as never, { grantId: stashGrant(grant(), `0:${USER}`), owner: `0:${USER}` });
+    await setPairReauthInStore(cookieStore as never, { grantId: await stashGrant(grant(), `0:${USER}`), owner: `0:${USER}` });
     expect((await create({ slot: 0 })).status).toBe(200);
   });
 
   it('matches the proof owner case-insensitively', async () => {
     signIn(0, { username: 'Alice@Example.ORG' });
-    setPairReauthInStore(cookieStore as never, { grantId: stashGrant(grant(), `0:${USER}`), owner: `0:${USER}` });
+    await setPairReauthInStore(cookieStore as never, { grantId: await stashGrant(grant(), `0:${USER}`), owner: `0:${USER}` });
     expect((await create({})).status).toBe(200);
   });
 });
@@ -848,5 +853,22 @@ describe('pair/create for a server the app refuses', () => {
     signIn(0, { serverUrl: 'http://localhost:8080' });
     config.jmapServerUrl = 'http://localhost:8080';
     expect((await create({ password: PASSWORD })).status).toBe(200);
+  });
+});
+
+describe('pair/create while the shared store is down (#1066)', () => {
+  afterEach(() => {
+    setStoreForTests(null);
+    resetLocalStoreForTests();
+  });
+
+  it('answers 503 to a password step-up and sends nothing to the mail server', async () => {
+    const store = switchableSharedStore();
+    store.down = true;
+    setStoreForTests(store);
+    const res = await create({ password: PASSWORD });
+    expect(res.status).toBe(503);
+    expect(res.body.error).toBe('temporarily_unavailable');
+    expect(calls).toHaveLength(0);
   });
 });

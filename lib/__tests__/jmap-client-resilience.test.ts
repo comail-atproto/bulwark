@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { JMAPClient, RequestTimeoutError, isReplaySafeRequest } from '../jmap/client';
-import { jmapSession } from './fixtures/jmap-session';
 
 /**
  * A connection that accepts the request and then goes silent: the promise never
@@ -14,6 +13,20 @@ function stalledFetch() {
         reject(new DOMException('The operation was aborted.', 'AbortError'));
       });
     });
+}
+
+// Minimal valid JMAP session response
+function makeSession(overrides?: Record<string, unknown>) {
+  return {
+    capabilities: { 'urn:ietf:params:jmap:core': {} },
+    accounts: { 'acct-1': { name: 'test', isPersonal: true, accountCapabilities: {} } },
+    primaryAccounts: { 'urn:ietf:params:jmap:mail': 'acct-1' },
+    apiUrl: 'https://mail.example.com/jmap/api',
+    downloadUrl: 'https://mail.example.com/jmap/download/{accountId}/{blobId}/{name}',
+    uploadUrl: 'https://mail.example.com/jmap/upload/{accountId}/',
+    eventSourceUrl: 'https://mail.example.com/jmap/eventsource',
+    ...overrides,
+  };
 }
 
 function mockFetchResponse(status: number, body?: unknown): Response {
@@ -72,7 +85,7 @@ describe('JMAPClient resilience', () => {
    * Helper: create a connected basic-auth client by mocking the connect() flow
    */
   async function createConnectedClient(mode: 'basic' | 'bearer' = 'basic'): Promise<JMAPClient> {
-    const session = jmapSession({ accountCapabilities: {} });
+    const session = makeSession();
 
     if (mode === 'basic') {
       // connect() calls authenticatedFetch → fetch for session
@@ -275,7 +288,7 @@ describe('JMAPClient resilience', () => {
   describe('authenticatedFetch - basic auth 401 session refresh', () => {
     it('refreshes session and retries on 401 for API requests', async () => {
       const client = await createConnectedClient();
-      const refreshedSession = jmapSession({ accountCapabilities: {}, overrides: { apiUrl: 'https://mail.example.com/jmap/api-v2' } });
+      const refreshedSession = makeSession({ apiUrl: 'https://mail.example.com/jmap/api-v2' });
       const echoResponse = { methodResponses: [['Core/echo', { ping: 'pong' }, '0']] };
 
       fetchSpy
@@ -323,7 +336,7 @@ describe('JMAPClient resilience', () => {
   describe('authenticatedFetch - bearer token refresh', () => {
     it('refreshes token and retries on 401 for bearer mode', async () => {
       const tokenRefresh = vi.fn().mockResolvedValue('new-token-456');
-      const session = jmapSession({ accountCapabilities: {} });
+      const session = makeSession();
 
       fetchSpy.mockResolvedValueOnce(mockFetchResponse(200, session));
       const client = JMAPClient.withBearer('https://mail.example.com', 'old-token', 'user@test.com', tokenRefresh);
@@ -383,8 +396,8 @@ describe('JMAPClient resilience', () => {
   });
 
   describe('session URL rewriting', () => {
-    async function connectWith(session: Partial<ReturnType<typeof jmapSession>>, serverUrl = 'https://mail.example.com') {
-      fetchSpy.mockResolvedValueOnce(mockFetchResponse(200, jmapSession({ accountCapabilities: {}, overrides: session })));
+    async function connectWith(session: Record<string, unknown>, serverUrl = 'https://mail.example.com') {
+      fetchSpy.mockResolvedValueOnce(mockFetchResponse(200, makeSession(session)));
       const client = new JMAPClient(serverUrl, 'user@test.com', 'pass123');
       await client.connect();
       liveClients.push(client);
@@ -458,6 +471,15 @@ describe('JMAPClient resilience', () => {
       );
     });
 
+    it('keeps only the last path component of a name, so no %2F reaches the proxy (#1371)', async () => {
+      const client = await connectWith({
+        downloadUrl: 'https://mail.example.com/download/{accountId}/{blobId}/{name}?accept={type}',
+      });
+      expect(client.getBlobDownloadUrl('blob1', '/images/banner.jpg', 'image/jpeg', 'acct-1')).toBe(
+        'https://mail.example.com/download/acct-1/blob1/banner.jpg?accept=image%2Fjpeg',
+      );
+    });
+
     it('leaves an empty downloadUrl falsy so the unavailable guard still fires', async () => {
       const client = await connectWith({ downloadUrl: '' });
       expect(() => client.getBlobDownloadUrl('blob1')).toThrow('Download URL not available');
@@ -468,13 +490,10 @@ describe('JMAPClient resilience', () => {
     it('updates session fields from server response', async () => {
       const client = await createConnectedClient();
 
-      const newSession = jmapSession({
-        accountCapabilities: {},
-        overrides: {
-          apiUrl: 'https://mail.example.com/jmap/api-v2',
-          downloadUrl: 'https://mail.example.com/jmap/download-v2/{accountId}/{blobId}/{name}',
-          capabilities: { 'urn:ietf:params:jmap:core': {}, 'urn:ietf:params:jmap:mail': {} },
-        },
+      const newSession = makeSession({
+        apiUrl: 'https://mail.example.com/jmap/api-v2',
+        downloadUrl: 'https://mail.example.com/jmap/download-v2/{accountId}/{blobId}/{name}',
+        capabilities: { 'urn:ietf:params:jmap:core': {}, 'urn:ietf:params:jmap:mail': {} },
       });
 
       // Trigger a 401 → refreshSession flow
@@ -534,13 +553,12 @@ describe('JMAPClient resilience', () => {
       const callback = vi.fn();
       client.onConnectionChange(callback);
 
-      const session = jmapSession({ accountCapabilities: {} });
+      const session = makeSession();
 
       // ping() will call request() → authenticatedFetch → first fetch fails
       // Then retry in authenticatedFetch also fails
       // So ping throws, keep-alive catches it, fires false
       // Then reconnect → connect() → authenticatedFetch(sessionUrl) succeeds
-      // → connectionChangeCallback(true).
       fetchSpy
         // ping fails - network error, retry also fails
         .mockRejectedValueOnce(new TypeError('Failed to fetch'))
@@ -618,6 +636,63 @@ describe('JMAPClient resilience', () => {
       await vi.advanceTimersByTimeAsync(0);
 
       expect(fetchSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  // Each client sent a Core/echo every 30s for as long as the page was open,
+  // tabs in the background included, even while its push stream was proving
+  // every 30s that the server was there.
+  describe('keep-alive while the push stream is live', () => {
+    const encoder = new TextEncoder();
+    const isSSE = (init?: RequestInit) =>
+      (init?.headers as Record<string, string> | undefined)?.['Accept'] === 'text/event-stream';
+    const echoCount = () =>
+      fetchSpy.mock.calls.filter((call: unknown[]) => {
+        const body = (call[1] as RequestInit | undefined)?.body;
+        return typeof body === 'string' && body.includes('Core/echo');
+      }).length;
+
+    /** A stream the test feeds; any other request is answered by `api`. */
+    async function withPushStream(api: () => Promise<Response>) {
+      vi.useFakeTimers({ shouldAdvanceTime: false });
+      const client = await createConnectedClient();
+      let stream!: ReadableStreamDefaultController<Uint8Array>;
+      const body = new ReadableStream<Uint8Array>({ start(c) { stream = c; } });
+      fetchSpy.mockImplementation(((_url: RequestInfo | URL, init?: RequestInit) =>
+        isSSE(init) ? Promise.resolve(new Response(body, { status: 200 })) : api()) as never);
+      client.setupPushNotifications();
+      await vi.advanceTimersByTimeAsync(0);
+      const ping = () => stream.enqueue(encoder.encode('event: ping\ndata: {"interval":30}\n\n'));
+      return { client, ping };
+    }
+
+    const echo = () => Promise.resolve(mockFetchResponse(200, { methodResponses: [['Core/echo', { ping: 'pong' }, '0']] }));
+
+    it('sends no Core/echo while the stream keeps pinging', async () => {
+      const { ping } = await withPushStream(echo);
+
+      for (let i = 0; i < 4; i++) {
+        await vi.advanceTimersByTimeAsync(29_000);
+        ping();
+        await vi.advanceTimersByTimeAsync(1_000);
+      }
+
+      expect(echoCount()).toBe(0);
+    });
+
+    it('pings again, and reports the connection lost, once the stream goes quiet', async () => {
+      const { client, ping } = await withPushStream(() => Promise.reject(new TypeError('Failed to fetch')));
+      const callback = vi.fn();
+      client.onConnectionChange(callback);
+      ping();
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(echoCount()).toBe(0);
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(echoCount()).toBeGreaterThan(0);
+      expect(callback).toHaveBeenCalledWith(false);
     });
   });
 
@@ -887,7 +962,7 @@ describe('JMAPClient resilience', () => {
     });
 
     it('throws when download URL is not available', async () => {
-      fetchSpy.mockResolvedValueOnce(mockFetchResponse(200, jmapSession({ accountCapabilities: {}, overrides: { downloadUrl: '' } })));
+      fetchSpy.mockResolvedValueOnce(mockFetchResponse(200, makeSession({ downloadUrl: '' })));
       const client = new JMAPClient('https://mail.example.com', 'user@test.com', 'pass123');
       // Register for teardown: connect() starts a 30s keep-alive interval
       // that must be stopped in afterEach or it leaks into later tests and
@@ -902,12 +977,12 @@ describe('JMAPClient resilience', () => {
           liveClients.push(client);
           resetFetch();
           // Now reconnect with empty downloadUrl to simulate the issue
-          fetchSpy.mockResolvedValueOnce(mockFetchResponse(200, jmapSession({ accountCapabilities: {}, overrides: { downloadUrl: '' } })));
+          fetchSpy.mockResolvedValueOnce(mockFetchResponse(200, makeSession({ downloadUrl: '' })));
           // Force session refresh to pick up empty downloadUrl
           const echoResponse = { methodResponses: [['Core/echo', { ping: 'pong' }, '0']] };
           fetchSpy
             .mockResolvedValueOnce(mockFetchResponse(401))
-            .mockResolvedValueOnce(mockFetchResponse(200, jmapSession({ accountCapabilities: {}, overrides: { downloadUrl: '' } })))
+            .mockResolvedValueOnce(mockFetchResponse(200, makeSession({ downloadUrl: '' })))
             .mockResolvedValueOnce(mockFetchResponse(200, echoResponse));
           try { await client.ping(); } catch { /* ignore */ }
         })()

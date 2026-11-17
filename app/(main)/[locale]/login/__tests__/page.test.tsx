@@ -7,6 +7,10 @@ import { chromium } from 'playwright';
 import postcss from 'postcss';
 import tailwindcss from '@tailwindcss/postcss';
 import LoginPage from '../page';
+import { COMAIL_THEME } from '@/lib/__tests__/fixtures/comail-theme';
+import { useThemeStore } from '@/stores/theme-store';
+
+const searchState = vi.hoisted(() => ({ value: '' }));
 
 const configState = vi.hoisted(() => ({
   appName: 'Webmail',
@@ -27,6 +31,8 @@ const configState = vi.hoisted(() => ({
   loginImprintUrl: '',
   loginPrivacyPolicyUrl: '',
   loginWebsiteUrl: '',
+  buildersWebsiteUrl: 'https://build.comail.at',
+  hostedInboxLogoutDestination: '',
   sourceCodeUrl: '',
   loginLogoMaxHeight: '',
   loginLogoMaxWidth: '',
@@ -46,15 +52,12 @@ const configState = vi.hoisted(() => ({
 // deterministically without monkey-patching fetch.
 vi.mock('@/lib/atproto/handle', () => ({
   resolveHandle: vi.fn(),
-  // The HandleCombobox imports these but the atproto form never fires a
-  // typeahead lookup during a single submit, so no-op implementations suffice.
   searchActorsTypeahead: vi.fn(async () => []),
   normalizeHandle: (raw: string) => raw.trim().replace(/^@/, '').toLowerCase(),
-  looksLikeHandle: (v: string) => v.includes('.') || v.startsWith('did:'),
   APPVIEW_BASE: 'https://public.api.bsky.app',
 }));
 
-import { resolveHandle } from '@/lib/atproto/handle';
+import { resolveHandle, searchActorsTypeahead } from '@/lib/atproto/handle';
 
 // Minimal store mocks. The login page reads a handful of fields from each
 // store; only the fields the render path touches need to be populated.
@@ -66,6 +69,7 @@ vi.mock('@/stores/auth-store', () => {
     login: vi.fn(async () => true),
     loginDemo: vi.fn(async () => true),
     clearError: vi.fn(),
+    removeAccount: vi.fn(),
   };
   const hook = (sel?: (s: typeof state) => unknown) =>
     typeof sel === 'function' ? sel(state) : state;
@@ -109,7 +113,7 @@ vi.mock('@/stores/update-store', () => ({
 }));
 
 vi.mock('@/stores/account-store', () => ({
-  useAccountStore: () => ({ getNextCookieSlot: () => 0 }),
+  useAccountStore: makeStore({ accounts: [{ id: 'failed', username: 'saved@example.test', hasError: true, isConnected: false }], getNextCookieSlot: () => 0 }),
 }));
 
 vi.mock('@/stores/policy-store', () => ({
@@ -127,14 +131,14 @@ vi.mock('@/hooks/use-config', () => ({
 // include useSearchParams, so provide it here returning an empty search.
 vi.mock('next/navigation', () => ({
   useParams: () => ({ locale: 'en' }),
-  useSearchParams: () => new URLSearchParams(),
+  useSearchParams: () => new URLSearchParams(searchState.value),
   usePathname: () => '/en',
-  useRouter: () => ({ push: vi.fn(), back: vi.fn(), replace: vi.fn() }),
+  useRouter: () => ({ push: vi.fn(), back: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
 }));
 
 // @/i18n/navigation's useRouter is read at module load by the page.
 vi.mock('@/i18n/navigation', () => ({
-  useRouter: () => ({ push: vi.fn(), back: vi.fn(), replace: vi.fn() }),
+  useRouter: () => ({ push: vi.fn(), back: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
   usePathname: () => '/en',
   Link: ({ children }: { children: React.ReactNode }) => children,
 }));
@@ -200,32 +204,106 @@ function typeHandle(value: string) {
 }
 
 function submit() {
-  // The atproto form has no accessible name, so `getByRole('form')` does not
-  // match it under jsdom (a <form> only exposes role=form when labeled).
-  // Query the element directly and dispatch a submit event instead.
-  const form = document.querySelector('form');
-  if (!form) throw new Error('atproto form was not rendered');
-  fireEvent.submit(form);
+  fireEvent.submit(screen.getByRole('form', { name: 'sign_in' }));
 }
 
 describe('LoginPage atproto handle submit (handleAtprotoLogin)', () => {
   const mockedResolveHandle = vi.mocked(resolveHandle);
 
+  it('exposes the login card inside main with a top-level heading', () => {
+    render(<LoginPage />);
+    const main = screen.getByRole('main');
+    expect(main.querySelectorAll('h1')).toHaveLength(1);
+    expect(main.querySelector('h1, h3')?.tagName).toBe('H1');
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
+    searchState.value = "";
+    vi.mocked(searchActorsTypeahead).mockResolvedValue([]);
+    useThemeStore.setState({ theme: 'system', resolvedTheme: 'light' });
     configState.atprotoLoginUrl = 'https://relay.example.com/atproto/login';
     configState.sourceCodeUrl = '';
+    configState.loginWebsiteUrl = '';
+    configState.buildersWebsiteUrl = 'https://build.comail.at';
+    vi.stubEnv('NEXT_PUBLIC_CORRESPONDING_SOURCE_URL', 'https://tangled.org/comail.at/bulwark');
     installMockStorage();
     installMockLocation();
   });
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllEnvs();
   });
 
-  it('offers the public fork source from the Comail login footer by default', () => {
+  it('replaces the hosted sign-in form with the server-confirmed waitlist signup', async () => {
+    searchState.value = 'state=waitlist&handle=forged.example.test';
+    configState.atprotoLoginUrl = 'http://localhost/webmail/login';
+    const request = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      state: 'waitlist', csrf: 'proof', did: 'did:plc:verified', handle: 'alice.bsky.social', recorded: true,
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    try {
+      render(<LoginPage />);
+      await screen.findByRole('heading', { name: 'waitlist.title' });
+      expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
+      expect(screen.getByText('waitlist.saved')).toBeInTheDocument();
+      expect(screen.queryByText('forged.example.test')).not.toBeInTheDocument();
+      expect(request).toHaveBeenCalledWith('http://localhost/inbox/waitlist/session', expect.objectContaining({ credentials: 'same-origin' }));
+    } finally { request.mockRestore(); }
+  });
+
+  it('offers the public fork source and one builders link in the header', () => {
     render(<LoginPage />);
-    expect(screen.getByRole('link', { name: /^Source$/ })).toHaveAttribute('href', 'https://github.com/comail-atproto/bulwark');
+    expect(screen.getByRole('link', { name: /^Source$/ })).toHaveAttribute('href', 'https://tangled.org/comail.at/bulwark');
+    const buildersLinks = screen.getAllByRole('link').filter(link => /^https:\/\/build\.comail\.at\/?$/.test(link.getAttribute('href') || ''));
+    expect(buildersLinks).toHaveLength(1);
+    expect(screen.getByRole('banner')).toContainElement(buildersLinks[0]);
+    expect(screen.queryByRole('note')).not.toBeInTheDocument();
+  });
+
+  it('offers the build-configured source from the Comail login footer', () => {
+    const sourceUrl = 'https://source.example.com/releases/build-revision.tar.gz';
+    vi.stubEnv('NEXT_PUBLIC_CORRESPONDING_SOURCE_URL', sourceUrl);
+    render(<LoginPage />);
+    expect(screen.getByRole('link', { name: /^Source$/ })).toHaveAttribute('href', sourceUrl);
+  });
+
+  it('defaults to Spooky and lets people choose Light and Dark without changing their mailbox theme', () => {
+    render(<LoginPage />);
+    const shell = screen.getByTestId('comail-atproto-login');
+    expect(shell).toHaveAttribute('data-comail-theme', 'spooky');
+    for (const [label, value] of [['Light', 'light'], ['Dark', 'dark'], ['Spooky', 'spooky']]) {
+      fireEvent.click(screen.getByRole('button', { name: /^Theme:/ }));
+      expect(screen.getAllByRole('option')).toHaveLength(3);
+      fireEvent.click(screen.getByRole('option', { name: label }));
+      expect(shell).toHaveAttribute('data-comail-theme', value);
+      expect(localStorage.getItem('comail-login-theme')).toBe(value);
+      expect(screen.getByRole('button', { name: `Theme: ${label}` })).toBeInTheDocument();
+    }
+    expect(useThemeStore.getState().setTheme).not.toHaveBeenCalled();
+  });
+
+  it.each(['light', 'dark', 'spooky'])('restores the explicit %s login theme', value => {
+    localStorage.setItem('comail-login-theme', value);
+    render(<LoginPage />);
+    expect(screen.getByTestId('comail-atproto-login')).toHaveAttribute('data-comail-theme', value);
+  });
+
+  it('keeps the theme picker usable when login theme storage is blocked', () => {
+    const getItem = localStorage.getItem.bind(localStorage);
+    const setItem = localStorage.setItem.bind(localStorage);
+    vi.spyOn(window.localStorage, 'getItem').mockImplementation(key => {
+      if (key === 'comail-login-theme') throw new Error('blocked');
+      return getItem(key);
+    });
+    vi.spyOn(window.localStorage, 'setItem').mockImplementation((key, value) => {
+      if (key === 'comail-login-theme') throw new Error('blocked');
+      setItem(key, value);
+    });
+    render(<LoginPage />);
+    fireEvent.click(screen.getByRole('button', { name: 'Theme: Spooky' }));
+    fireEvent.click(screen.getByRole('option', { name: 'Light' }));
+    expect(screen.getByTestId('comail-atproto-login')).toHaveAttribute('data-comail-theme', 'light');
   });
 
   it('offers the operator-configured source from the Comail login footer', () => {
@@ -234,25 +312,145 @@ describe('LoginPage atproto handle submit (handleAtprotoLogin)', () => {
     expect(screen.getByRole('link', { name: /^Source$/ })).toHaveAttribute('href', configState.sourceCodeUrl);
   });
 
-  it('renders the Comail split-panel shell only for the hosted atproto entry', () => {
+  it('uses the configured staging websites in the header and footer', () => {
+    configState.loginWebsiteUrl = 'https://site.stage.test';
+    configState.buildersWebsiteUrl = 'https://builders.stage.test';
     render(<LoginPage />);
-
-    const shell = screen.getByTestId('comail-atproto-login');
-    expect(shell).toBeInTheDocument();
-    expect(shell.querySelector('aside')).toHaveClass('bg-background');
-    expect(shell.querySelector('section')).toHaveClass('bg-sidebar');
-    const animatedCammie = shell.querySelector('img[src$="/branding/comail/cammie-wiggle.gif"]');
-    expect(animatedCammie).toBeInTheDocument();
-    expect(animatedCammie).toHaveClass('w-56');
-    expect(animatedCammie?.parentElement).not.toHaveClass('bg-card');
-    expect(screen.getByText('comail inbox')).toBeInTheDocument();
-    expect(screen.getByText('your inbox, atproto-native')).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'sign_in' })).toBeInTheDocument();
-    expect(screen.getByRole('navigation', { name: 'footer' })).toHaveTextContent(
-      'Terms · Privacy · Acceptable use · Docs · FAQ · About · Source',
-    );
-    expect(screen.getByText(/Follow us/)).toHaveTextContent('@comail.at');
+    expect(screen.getByRole('link', { name: 'comail' })).toHaveAttribute('href', configState.loginWebsiteUrl);
+    expect(screen.getByRole('link', { name: 'comail_builders' })).toHaveAttribute('href', configState.buildersWebsiteUrl);
+    for (const [name, path] of [['Terms', '/terms'], ['Privacy', '/privacy'], ['Docs', '/docs']]) {
+      expect(screen.getByRole('link', { name })).toHaveAttribute('href', configState.loginWebsiteUrl + path);
+    }
   });
+
+  it('keeps the hosted marketing shell and its links in both themes without changing the saved preference', () => {
+    localStorage.setItem('comail-login-theme', 'dark');
+    useThemeStore.setState({ theme: 'system', resolvedTheme: 'dark' });
+    render(<LoginPage />);
+    expect(screen.getByRole('link', { name: 'comail' })).toHaveAttribute('href', 'https://comail.at');
+    expect(screen.getByRole('link', { name: 'comail_builders' })).toHaveAttribute('href', 'https://build.comail.at');
+    expect(screen.getByRole('link', { name: 'comail' }).querySelector('img[alt="comail"]')).toHaveAttribute('src', '/branding/comail/comail-logo-dark.svg');
+    expect(screen.getByRole('heading', { name: 'comail_welcome' })).toBeInTheDocument();
+    expect(screen.getByRole('navigation', { name: 'footer' })).toHaveTextContent('Source');
+    expect(screen.getByRole('button', { name: 'comail_continue' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Theme: Dark' }));
+    fireEvent.click(screen.getByRole('option', { name: 'Light' }));
+    expect(screen.getByRole('link', { name: 'comail' }).querySelector('img[alt="comail"]')).toHaveAttribute('src', '/branding/comail/comail-logo.svg');
+    expect(screen.getByTestId('comail-atproto-login')).toHaveAttribute('data-comail-theme', 'light');
+    expect(screen.getByRole('link', { name: 'comail' }).querySelector('img')).toHaveAttribute('src', '/branding/comail/cammie-mark.png');
+    expect(useThemeStore.getState().setTheme).not.toHaveBeenCalled();
+  });
+
+  it.runIf(process.env.COMAIL_BROWSER_TESTS === '1')('uses marketing colors despite the mailbox skin and respects reduced motion', async () => {
+    vi.mocked(searchActorsTypeahead).mockResolvedValue([{ did: 'did:plc:test', handle: 'alice.bsky.social', displayName: 'Alice' }]);
+    const { container } = render(<LoginPage />);
+    typeHandle('alice.bsky.social');
+    await screen.findByRole('option', { name: /alice.bsky.social/ });
+    fireEvent.keyDown(screen.getByRole('combobox'), { key: 'ArrowDown' });
+    mockedResolveHandle.mockResolvedValue({ status: 'invalid' });
+    submit();
+    await screen.findByRole('alert');
+    const cssPath = path.resolve('app/globals.css');
+    const css = await postcss([tailwindcss()]).process(await readFile(cssPath, 'utf8'), { from: cssPath });
+    const theme = COMAIL_THEME;
+    const browser = await chromium.launch({ executablePath: process.env.COMAIL_CHROMIUM_PATH || undefined });
+    try {
+      const page = await browser.newPage({ reducedMotion: 'reduce' });
+      await page.setContent(`<!doctype html><html><head><style>${css.css}\n${theme.css}\n${theme.skin}</style></head><body data-theme-skin="builtin-comail">${container.innerHTML}</body></html>`);
+      for (const dark of [false, true]) {
+        await page.getByTestId('comail-atproto-login').evaluate((el, value) => { el.dataset.comailTheme = value ? 'dark' : 'light'; }, dark);
+        await page.evaluate(value => document.documentElement.classList.toggle('dark', value), dark);
+        const shell = page.getByTestId('comail-atproto-login');
+        expect(await shell.evaluate(el => getComputedStyle(el).fontFamily)).toContain('Atkinson Hyperlegible');
+        expect(await shell.locator('h1').evaluate(el => getComputedStyle(el).fontFamily)).toContain('Young Serif');
+        expect(await shell.locator('h1').evaluate(el => getComputedStyle(el).fontWeight)).toBe('400');
+        await expect.poll(() => shell.evaluate(el => getComputedStyle(el).backgroundColor)).toBe(dark ? 'rgb(2, 65, 60)' : 'rgb(223, 224, 192)');
+        const input = page.getByRole('combobox');
+        expect(await input.evaluate(el => getComputedStyle(el).backgroundColor)).toBe(dark ? 'rgb(3, 54, 49)' : 'rgb(245, 245, 224)');
+        expect(await input.evaluate(el => getComputedStyle(el).color)).toBe(dark ? 'rgb(223, 224, 192)' : 'rgb(1, 33, 2)');
+        expect(await input.evaluate(el => getComputedStyle(el).fontFamily)).toContain('Atkinson Hyperlegible');
+        const button = page.getByRole('button', { name: 'comail_continue' });
+        expect(await button.evaluate(el => getComputedStyle(el).backgroundColor)).toBe(dark ? 'rgb(223, 224, 192)' : 'rgb(2, 65, 60)');
+        expect(await button.evaluate(el => getComputedStyle(el).color)).toBe(dark ? 'rgb(2, 65, 60)' : 'rgb(223, 224, 192)');
+        expect(await page.locator('#atproto-handle-error').evaluate(el => getComputedStyle(el).color)).toBe(dark ? 'rgb(255, 170, 170)' : 'rgb(164, 38, 38)');
+        const suggestion = page.getByRole('option', { name: /alice.bsky.social/ });
+        expect(await suggestion.evaluate(el => getComputedStyle(el).backgroundColor)).toBe(dark ? 'rgb(24, 85, 78)' : 'rgb(207, 211, 177)');
+        await input.focus();
+        expect(await input.evaluate(el => getComputedStyle(el).boxShadow)).not.toBe('none');
+        expect(await page.locator('.comail-login-envelopes').evaluate(el => getComputedStyle(el).animationName)).toBe('none');
+      }
+      await page.getByTestId('comail-atproto-login').evaluate(el => { el.dataset.comailTheme = 'spooky'; });
+      for (const dark of [false, true]) {
+        await page.evaluate(value => document.documentElement.classList.toggle('dark', value), dark);
+        const shell = page.getByTestId('comail-atproto-login');
+        await expect.poll(() => shell.evaluate(el => getComputedStyle(el).backgroundColor)).toBe('rgb(49, 54, 56)');
+        const input = page.getByRole('combobox');
+        expect(await input.evaluate(el => getComputedStyle(el).backgroundColor)).toBe('rgb(87, 71, 41)');
+        expect(await input.evaluate(el => getComputedStyle(el).color)).toBe('rgb(255, 229, 150)');
+        const button = page.getByRole('button', { name: 'comail_continue' });
+        expect(await button.evaluate(el => getComputedStyle(el).backgroundColor)).toBe('rgb(255, 173, 59)');
+        expect(await button.evaluate(el => getComputedStyle(el).color)).toBe('rgb(49, 54, 56)');
+      }
+    } finally {
+      await browser.close();
+    }
+  }, 30_000);
+
+  it.runIf(process.env.COMAIL_BROWSER_TESTS === '1')('keeps optional email readable in both themes despite the mailbox skin', async () => {
+    searchState.value = 'state=waitlist';
+    configState.atprotoLoginUrl = 'http://localhost/webmail/login';
+    const request = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      state: 'waitlist', csrf: 'proof', did: 'did:plc:verified', handle: 'alice.bsky.social', recorded: true,
+    }), { status: 200 }));
+    const browser = await chromium.launch({ executablePath: process.env.COMAIL_CHROMIUM_PATH || undefined });
+    try {
+      const { container } = render(<LoginPage />);
+      await screen.findByText('waitlist.saved');
+      const cssPath = path.resolve('app/globals.css');
+      const css = await postcss([tailwindcss()]).process(await readFile(cssPath, 'utf8'), { from: cssPath });
+      const theme = COMAIL_THEME;
+      const page = await browser.newPage();
+      for (const width of [1440, 390]) {
+        await page.setViewportSize({ width, height: 844 });
+        for (const skin of ['default', 'spooky']) {
+          for (const dark of [false, true]) {
+            await page.emulateMedia({ colorScheme: dark ? 'dark' : 'light' });
+            await page.setContent(`<!doctype html><html><head><style>${css.css}\n${theme.css}\n${theme.skin}</style></head><body data-theme-skin="builtin-comail">${container.innerHTML}</body></html>`);
+            await page.evaluate(value => document.documentElement.classList.toggle('dark', value), dark);
+            await page.getByTestId('comail-atproto-login').evaluate((el, value) => { el.dataset.comailTheme = value; }, skin === 'spooky' ? 'spooky' : dark ? 'dark' : 'light');
+            await page.locator('summary').click();
+            for (const selector of ['[role="status"]', '#waitlist-email-title', 'summary', 'label']) {
+              await expect.poll(() => page.locator(selector).evaluate(el => getComputedStyle(el).color)).toBe(skin === 'spooky' ? 'rgb(255, 229, 150)' : dark ? 'rgb(223, 224, 192)' : 'rgb(1, 33, 2)');
+            }
+            const input = page.locator('#waitlist-email');
+            await expect.poll(() => input.evaluate(el => getComputedStyle(el).backgroundColor)).toBe(skin === 'spooky' ? 'rgb(87, 71, 41)' : dark ? 'rgb(3, 54, 49)' : 'rgb(245, 245, 224)');
+            await expect.poll(() => input.evaluate(el => getComputedStyle(el).color)).toBe(skin === 'spooky' ? 'rgb(255, 229, 150)' : dark ? 'rgb(223, 224, 192)' : 'rgb(1, 33, 2)');
+            expect(await input.evaluate(el => getComputedStyle(el).fontFamily)).toContain('Atkinson Hyperlegible');
+            expect(await page.getByRole('heading', { name: 'waitlist.title' }).evaluate(el => getComputedStyle(el).fontFamily)).toContain('Young Serif');
+            const contrast = await page.locator('.comail-login').evaluate(shell => {
+              const luminance = (color: string) => {
+                const channels = color.match(/[\d.]+/g)!.slice(0, 3).map(Number).map(value => {
+                  const channel = value / 255;
+                  return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+                });
+                return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+              };
+              const background = luminance(getComputedStyle(shell).backgroundColor);
+              return [...shell.querySelectorAll('.text-muted-foreground')].map(element => {
+                const foreground = luminance(getComputedStyle(element).color);
+                return (Math.max(background, foreground) + 0.05) / (Math.min(background, foreground) + 0.05);
+              });
+            });
+            expect(contrast.length).toBeGreaterThan(0);
+            expect(Math.min(...contrast)).toBeGreaterThanOrEqual(4.5);
+          }
+        }
+      }
+    } finally {
+      request.mockRestore();
+      await browser.close();
+    }
+  }, 30_000);
 
   it('leaves the generic password login intact when atproto mode is not configured', () => {
     configState.atprotoLoginUrl = '';
@@ -284,6 +482,9 @@ describe('LoginPage atproto handle submit (handleAtprotoLogin)', () => {
           height: document.documentElement.scrollHeight,
         }));
         expect(dimensions).toEqual(viewport);
+        if (process.env.COMAIL_WORDMARK_EVIDENCE) {
+          await page.getByRole('link', { name: 'comail', exact: true }).screenshot({ path: `${process.env.COMAIL_WORDMARK_EVIDENCE}/inbox-login-wordmark-${viewport.width}.png` });
+        }
         await page.mouse.move(0, 0);
         await page.getByRole('link', { name: 'Terms', exact: true }).click({ trial: true, timeout: 1_000 });
         const badge = page.locator('footer .peer');
@@ -295,7 +496,7 @@ describe('LoginPage atproto handle submit (handleAtprotoLogin)', () => {
         expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(viewport.width);
         expect(bounds!.y).toBeGreaterThanOrEqual(0);
         expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(viewport.height);
-        await details.getByRole('button', { name: 'Copy version info' }).hover();
+        await details.getByRole('button', { name: 'copy', exact: true }).hover();
         expect(await details.evaluate(el => getComputedStyle(el).opacity)).toBe('1');
       }
       await page.setViewportSize({ width: 390, height: 320 });

@@ -4,9 +4,10 @@ import { useState, useCallback, useMemo, useRef } from "react";
 import { useTranslations } from "next-intl";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { X, Plus, Trash2 } from "@/components/icons";
-import { useFocusTrap } from "@/hooks/use-focus-trap";
-import { toast } from "@/stores/toast-store";
+import { Plus, X } from "@/components/icons";
+import { IconButton } from "@/components/ui/icon-button";
+import { Dialog } from "@/components/ui/dialog";
+import { useDiscardChanges } from "@/components/settings/use-discard-changes";
 import type {
   FilterRule,
   FilterCondition,
@@ -16,6 +17,8 @@ import type {
   FilterActionType,
 } from "@/lib/jmap/sieve-types";
 import type { Mailbox } from "@/lib/jmap/types";
+import { isValidSieveHeaderName } from "@/lib/sieve/generator";
+import { REGEX_FIELDS, isValidSieveRegex, usesRegex } from "@/lib/sieve/regex";
 import { buildMailboxTree, flattenMailboxTree, type MailboxNode, generateUUID, cn } from "@/lib/utils";
 import type { RuleSuggestion } from "@/lib/filters/quick-rules";
 import { retroactiveSupport } from "@/lib/filters/retroactive";
@@ -48,6 +51,8 @@ interface FilterRuleModalProps {
   forwardsAfter?: number;
   /** The server can confine a rule to a period (Sieve "date" and "relational"). */
   periodsSupported?: boolean;
+  /** The server lists the Sieve "regex" extension. */
+  regexSupported?: boolean;
   onSave: (rule: FilterRule, options?: { applyToExisting: boolean }) => void;
   onClose: () => void;
 }
@@ -70,12 +75,19 @@ const ATTACHMENT_COMPARATORS: FilterComparator[] = ["has_any", "has_type"];
 // "All messages" has nothing to choose: its one comparator is not shown.
 const ALL_MESSAGES_COMPARATORS: FilterComparator[] = ["any"];
 
-function comparatorsFor(field: FilterConditionField): FilterComparator[] {
+function baseComparatorsFor(field: FilterConditionField): FilterComparator[] {
   if (field === "size") return SIZE_COMPARATORS;
   if (field === "attachment") return ATTACHMENT_COMPARATORS;
   if (field === "all") return ALL_MESSAGES_COMPARATORS;
   if (field === "from" || field === "to" || field === "cc") return ADDRESS_COMPARATORS;
   return TEXT_COMPARATORS;
+}
+
+// "matches regex" only where the server can run it, or on a row that already
+// uses it, so editing such a rule does not change its comparator.
+function comparatorsFor(field: FilterConditionField, regex: boolean): FilterComparator[] {
+  const base = baseComparatorsFor(field);
+  return regex && REGEX_FIELDS.has(field) ? [...base, "regex"] : base;
 }
 
 const ALL_ACTION_TYPES: FilterActionType[] = [
@@ -113,6 +125,13 @@ function isConditionValueEmpty(v: string | string[]): boolean {
 // Conditions that test without a value: "has an attachment" and "all messages".
 function takesNoValue(c: Pick<FilterCondition, "field" | "comparator">): boolean {
   return c.field === "all" || (c.field === "attachment" && c.comparator === "has_any");
+}
+
+// A regex row whose expression (or one of them) would not compile.
+function regexInvalid(c: FilterCondition): boolean {
+  if (!usesRegex(c) || isConditionValueEmpty(c.value)) return false;
+  const values = Array.isArray(c.value) ? c.value : [c.value];
+  return values.some((v) => !isValidSieveRegex(v));
 }
 
 function makeEmptyAction(): FilterAction {
@@ -160,6 +179,7 @@ export function FilterRuleModal({
   forwardsBefore = 0,
   forwardsAfter = 0,
   periodsSupported = false,
+  regexSupported = false,
   onSave,
   onClose,
 }: FilterRuleModalProps) {
@@ -188,7 +208,18 @@ export function FilterRuleModal({
   const periodStartRef = useRef<HTMLInputElement>(null);
   const periodEndRef = useRef<HTMLInputElement>(null);
 
-  const modalRef = useFocusTrap({ isActive: true, onEscape: onClose });
+  // Unsaved input is dropped only when the user says so (R5): Escape, the
+  // X and Cancel ask, a click outside is ignored.
+  const draft = JSON.stringify([
+    name, matchType, conditions, actions, stopProcessing, includeSpam, applyToExisting, periodOn, periodStart, periodEnd,
+  ]);
+  const [initialDraft] = useState(draft);
+  const dirty = draft !== initialDraft;
+  const { confirmDiscard, discardDialog } = useDiscardChanges();
+  const requestClose = useCallback(async () => {
+    if (await confirmDiscard(dirty)) onClose();
+  }, [confirmDiscard, dirty, onClose]);
+  const nameRef = useRef<HTMLInputElement>(null);
 
   const { hierarchicalMailboxes, mailboxPathMap } = useMemo(() => {
     const tree = buildMailboxTree(mailboxes.filter((mb) => !mb.isShared));
@@ -224,6 +255,9 @@ export function FilterRuleModal({
   const otherForwards = forwardsBefore + (ruleStops({ actions, stopProcessing }) ? 0 : forwardsAfter);
   const forwardLimit = typeof maxRedirects === "number" && maxRedirects > 0 ? maxRedirects : null;
   const forwardOverLimit = forwardLimit !== null && forwardCount + otherForwards > forwardLimit;
+  // A limit of 0: the server runs no redirect at all, as the out of office
+  // card also takes it. A forward the rule already has stays, to be removed.
+  const forwardUnavailable = maxRedirects === 0;
 
   // While editing, condition.value is always the raw string typed into the
   // input (commas not yet split). Convert to array form here on save so a
@@ -239,11 +273,15 @@ export function FilterRuleModal({
       if (takesNoValue(c)) return c;
       if (c.field === "size") return c; // numeric, single-value only
       if (typeof c.value !== "string") return c; // already structured
+      // A comma belongs to the expression ("a{1,3}"); several patterns are
+      // written with "|".
+      if (usesRegex(c)) return c;
       const parsed = inputStringToValue(c.value);
       return { ...c, value: parsed };
-    }), [conditions]);
+    })
+    .map((c) => (c.field === "header" ? { ...c, headerName: (c.headerName ?? "").trim() } : c)), [conditions]);
 
-  const validActions = useMemo(() => actions
+  const resolvedActions = useMemo(() => actions
     .map((a) => {
       if (!ACTIONS_WITH_MAILBOX.has(a.type)) return a;
       // Store the folder id next to the path and refresh the path from it,
@@ -251,8 +289,17 @@ export function FilterRuleModal({
       const mailboxId = mailboxIdFor(a);
       const path = mailboxId ? mailboxPathMap.get(mailboxId) : undefined;
       return mailboxId ? { ...a, mailboxId, value: path ?? a.value } : a;
-    })
-    .filter((a) => !ACTIONS_WITH_VALUE.has(a.type) || a.value?.trim()), [actions, mailboxIdFor, mailboxPathMap]);
+    }), [actions, mailboxIdFor, mailboxPathMap]);
+  // A row still missing its folder, tag, address or message.
+  const actionIncomplete = useMemo(
+    () => resolvedActions.map((a) => ACTIONS_WITH_VALUE.has(a.type) && !a.value?.trim()),
+    [resolvedActions],
+  );
+  const validActions = useMemo(
+    () => resolvedActions.filter((_, i) => !actionIncomplete[i]),
+    [resolvedActions, actionIncomplete],
+  );
+  const firstIncompleteAction = resolvedActions.find((_, i) => actionIncomplete[i]);
 
   // Old mail can only be sorted by what the client can check the way Sieve
   // does. Until an action is complete (a Move still without its folder), only
@@ -266,40 +313,73 @@ export function FilterRuleModal({
     return retroactiveSupport({ conditions: validConditions, actions: checkActions }).ok;
   }, [offerApplyToExisting, validConditions, validActions, periodOn]);
 
+  // What keeps the rule from being saved, said under the part it is about
+  // once Save was pressed, and updated as the user fixes it.
+  const [showErrors, setShowErrors] = useState(false);
+  const [halfFilledPeriod, setHalfFilledPeriod] = useState(false);
+  const activeFrom = periodOn ? fromPeriodInput(periodStart, start?.activeFrom) : undefined;
+  const activeUntil = periodOn ? fromPeriodInput(periodEnd, start?.activeUntil) : undefined;
+  const errors = {
+    name: !name.trim() ? t("validation_empty_name") : null,
+    conditions: validConditions.length === 0
+      ? t("validation_empty_conditions")
+      // Stalwart's Sieve compiler refuses any other header name, and with
+      // it the whole script, so every other rule would stop working too.
+      : validConditions.some((c) => c.field === "header" && !isValidSieveHeaderName(c.headerName ?? ""))
+        ? t("validation_header_name")
+        // The server compiles every expression on save and refuses the
+        // whole script for one that does not compile.
+        : validConditions.some(regexInvalid)
+          ? t("validation_regex")
+          : null,
+    // A row that is there but unfinished says what it misses; "at least one
+    // action" is left for when no row has a type at all.
+    actions: firstIncompleteAction
+      ? t(ACTIONS_WITH_MAILBOX.has(firstIncompleteAction.type)
+        ? "validation_action_folder"
+        : firstIncompleteAction.type === "add_label"
+          ? "validation_action_tag"
+          : firstIncompleteAction.type === "forward"
+            ? "validation_action_forward"
+            : "validation_action_reject")
+      : validActions.length === 0 ? t("validation_empty_actions") : null,
+    period: !periodOn
+      ? null
+      // A field the browser holds half filled in (a date without its time)
+      // reads as empty, and must not pass for an open end of the period.
+      : activeFrom === null || activeUntil === null || halfFilledPeriod
+        ? t("validation_period_invalid")
+        : !activeFrom && !activeUntil
+          ? t("validation_period_empty")
+          : activeFrom && activeUntil && Date.parse(activeUntil) <= Date.parse(activeFrom)
+            ? t("validation_period_order")
+            : null,
+  };
+  const hasErrors = Object.values(errors).some(Boolean);
+  const shown = (error: string | null) => (showErrors ? error : null);
+  // The fields the shown errors are about: every empty value while no
+  // condition has one, a header name Sieve refuses, an unfinished action.
+  const valueMissing = (c: FilterCondition) =>
+    !!shown(errors.conditions) && validConditions.length === 0 && !takesNoValue(c) && isConditionValueEmpty(c.value);
+  const headerInvalid = (c: FilterCondition) =>
+    !!shown(errors.conditions) && c.field === "header" && !isConditionValueEmpty(c.value) &&
+    !isValidSieveHeaderName((c.headerName ?? "").trim());
+  const regexInvalidShown = (c: FilterCondition) => !!shown(errors.conditions) && regexInvalid(c);
+  const actionInvalid = (index: number) => !!shown(errors.actions) && actionIncomplete[index];
+
   const handleSave = useCallback(() => {
+    const halfFilled = periodOn &&
+      (!!periodStartRef.current?.validity.badInput || !!periodEndRef.current?.validity.badInput);
+    setHalfFilledPeriod(halfFilled);
+    if (halfFilled || hasErrors) {
+      setShowErrors(true);
+      // Focus goes to the first part that needs fixing.
+      requestAnimationFrame(() => {
+        document.querySelector<HTMLElement>('[data-rule-error="true"]')?.focus();
+      });
+      return;
+    }
     const trimmedName = name.trim();
-    if (!trimmedName) {
-      toast.error(t("validation_empty_name"));
-      return;
-    }
-
-    if (validConditions.length === 0) {
-      toast.error(t("validation_empty_conditions"));
-      return;
-    }
-
-    if (validActions.length === 0) {
-      toast.error(t("validation_empty_actions"));
-      return;
-    }
-
-    const activeFrom = periodOn ? fromPeriodInput(periodStart, start?.activeFrom) : undefined;
-    const activeUntil = periodOn ? fromPeriodInput(periodEnd, start?.activeUntil) : undefined;
-    // A field the browser holds half filled in (a date without its time)
-    // reads as empty, and must not pass for an open end of the period.
-    const halfFilled = !!periodStartRef.current?.validity.badInput || !!periodEndRef.current?.validity.badInput;
-    if (activeFrom === null || activeUntil === null || (periodOn && halfFilled)) {
-      toast.error(t("validation_period_invalid"));
-      return;
-    }
-    if (periodOn && !activeFrom && !activeUntil) {
-      toast.error(t("validation_period_empty"));
-      return;
-    }
-    if (activeFrom && activeUntil && Date.parse(activeUntil) <= Date.parse(activeFrom)) {
-      toast.error(t("validation_period_order"));
-      return;
-    }
 
     onSave({
       id: start?.id || generateUUID(),
@@ -313,10 +393,10 @@ export function FilterRuleModal({
       // is off: the settings page merges the result into the stored rule, and
       // a field left out would keep its old value there.
       includeSpam: includeSpam && validActions.some((a) => ACTIONS_WITH_MAILBOX.has(a.type)) ? true : undefined,
-      activeFrom,
-      activeUntil,
+      activeFrom: activeFrom ?? undefined,
+      activeUntil: activeUntil ?? undefined,
     }, { applyToExisting: applyToExisting && canApplyToExisting });
-  }, [name, matchType, validConditions, validActions, stopProcessing, includeSpam, periodOn, periodStart, periodEnd, start, onSave, t, applyToExisting, canApplyToExisting]);
+  }, [name, matchType, validConditions, validActions, stopProcessing, includeSpam, periodOn, activeFrom, activeUntil, hasErrors, start, onSave, applyToExisting, canApplyToExisting]);
 
   const visibleSuggestions = suggestions.filter((s) => !usedSuggestions.has(s.id));
 
@@ -340,7 +420,7 @@ export function FilterRuleModal({
         // with e.g. (field=attachment, comparator=contains) — invalid for the
         // Sieve generator. Each field has its own valid comparator set.
         if (updates.field && updates.field !== c.field) {
-          const allowed = comparatorsFor(updates.field);
+          const allowed = comparatorsFor(updates.field, regexSupported);
           if (!allowed.includes(c.comparator)) {
             updated.comparator = allowed[0];
           }
@@ -381,11 +461,6 @@ export function FilterRuleModal({
         if (updates.type && updates.type !== "forward") {
           delete updated.keepCopy;
         }
-        if (updates.type && ACTIONS_WITH_MAILBOX.has(updates.type) && !updated.value) {
-          const firstMb = hierarchicalMailboxes[0];
-          updated.value = firstMb ? (mailboxPathMap.get(firstMb.id) || firstMb.name) : "";
-          if (firstMb) updated.mailboxId = firstMb.id;
-        }
         return updated;
       })
     );
@@ -397,43 +472,47 @@ export function FilterRuleModal({
   };
 
   const selectClass =
-    "px-2.5 py-1.5 text-sm rounded-md bg-muted border border-border text-foreground focus:outline-none focus:ring-2 focus:ring-ring transition-colors duration-150 cursor-pointer hover:border-muted-foreground";
+    "px-2.5 py-1.5 text-sm rounded-md bg-muted border border-border text-foreground focus:outline-hidden transition-colors duration-150 cursor-pointer hover:border-muted-foreground";
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-[1px]" onClick={onClose} aria-hidden="true" />
-      <div
-        ref={modalRef}
-        role="dialog"
-        aria-modal="true"
-        aria-label={isEdit ? t("edit_rule") : t("new_rule")}
-        className="relative bg-background border border-border rounded-lg shadow-xl w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto animate-in zoom-in-95 duration-200"
-      >
-        <div className="flex items-center justify-between px-6 py-4 border-b border-border">
-          <h2 className="text-lg font-semibold text-foreground">
-            {isEdit ? t("edit_rule") : t("new_rule")}
-          </h2>
-          <button
-            onClick={onClose}
-            className="p-1.5 rounded-md hover:bg-muted transition-colors duration-150 text-muted-foreground hover:text-foreground"
-            aria-label={t("cancel")}
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        <div className="px-6 py-4 space-y-6">
+    <>
+    <Dialog
+      isOpen
+      onClose={() => void requestClose()}
+      dirty={dirty}
+      title={isEdit ? t("edit_rule") : t("new_rule")}
+      size="lg"
+      className="max-h-[90vh]"
+      initialFocus={nameRef}
+      footer={
+        <>
+          <Button variant="outline" onClick={() => void requestClose()}>
+            {t("cancel")}
+          </Button>
+          <Button onClick={handleSave}>
+            {t("save")}
+          </Button>
+        </>
+      }
+    >
+        <div className="pt-4 space-y-6">
           <div>
             <label className="text-sm font-medium mb-1 block text-foreground">
               {t("rule_name")}
             </label>
             <Input
+              aria-label={t("rule_name")}
+              ref={nameRef}
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder={t("rule_name_placeholder")}
               maxLength={200}
-              autoFocus
+              aria-invalid={!!shown(errors.name)}
+              aria-describedby={shown(errors.name) ? "rule-name-error" : undefined}
+              data-rule-error={!!shown(errors.name)}
+              className={cn(shown(errors.name) && "border-destructive")}
             />
+            <FieldError id="rule-name-error" text={shown(errors.name)} />
           </div>
 
           <div>
@@ -510,7 +589,10 @@ export function FilterRuleModal({
                         updateCondition(index, { headerName: e.target.value })
                       }
                       placeholder={t("header_name")}
-                      className="w-28"
+                      aria-label={t("header_name")}
+                      aria-invalid={headerInvalid(condition)}
+                      data-rule-error={headerInvalid(condition)}
+                      className={cn("w-28", headerInvalid(condition) && "border-destructive")}
                     />
                   )}
 
@@ -523,7 +605,7 @@ export function FilterRuleModal({
                       className={selectClass}
                       aria-label={t("comparators.contains")}
                     >
-                      {comparatorsFor(condition.field).map((c) => (
+                      {comparatorsFor(condition.field, regexSupported || condition.comparator === "regex").map((c) => (
                         <option key={c} value={c}>
                           {t(`comparators.${c}`)}
                         </option>
@@ -551,6 +633,7 @@ export function FilterRuleModal({
                         // stays numeric/single-value; attachment-has_any has
                         // no value at all.
                         if (condition.field === "size") return;
+                        if (usesRegex(condition)) return;
                         if (
                           condition.field === "attachment" &&
                           condition.comparator === "has_any"
@@ -571,22 +654,27 @@ export function FilterRuleModal({
                           ? t("size_placeholder")
                           : condition.field === "attachment"
                             ? t("attachment_type_placeholder")
-                            : t("value_placeholder_multi")
+                            : usesRegex(condition)
+                              ? t("regex_placeholder")
+                              : t("value_placeholder_multi")
                       }
-                      className="flex-1 min-w-[120px]"
+                      aria-label={t("condition_value")}
+                      aria-invalid={valueMissing(condition) || regexInvalidShown(condition)}
+                      aria-describedby={valueMissing(condition) || regexInvalidShown(condition) ? "rule-conditions-error" : undefined}
+                      data-rule-error={valueMissing(condition) || regexInvalidShown(condition)}
+                      className={cn("flex-1 min-w-[120px]", (valueMissing(condition) || regexInvalidShown(condition)) && "border-destructive")}
                       type={condition.field === "size" ? "number" : "text"}
                     />
                   )}
 
-                  <button
-                    type="button"
+                  <IconButton
+                    label={t("remove_condition")}
                     onClick={() => removeCondition(index)}
                     disabled={conditions.length <= 1}
-                    className="p-1.5 rounded hover:bg-muted text-muted-foreground hover:text-destructive transition-colors disabled:opacity-30 disabled:pointer-events-none"
-                    aria-label={t("delete_rule")}
+                    className="text-muted-foreground hover:text-destructive disabled:opacity-30"
                   >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
+                    <X />
+                  </IconButton>
                 </div>
               ))}
             </div>
@@ -598,6 +686,7 @@ export function FilterRuleModal({
               <Plus className="w-3.5 h-3.5" />
               {t("add_condition")}
             </button>
+            <FieldError id="rule-conditions-error" text={shown(errors.conditions)} />
           </div>
 
           <div>
@@ -615,7 +704,7 @@ export function FilterRuleModal({
                     className={selectClass}
                     aria-label={t("actions")}
                   >
-                    {ALL_ACTION_TYPES.map((a) => (
+                    {ALL_ACTION_TYPES.filter((a) => !(forwardUnavailable && a === "forward" && action.type !== "forward")).map((a) => (
                       <option
                         key={a}
                         value={a}
@@ -631,6 +720,7 @@ export function FilterRuleModal({
 
                   {ACTIONS_WITH_MAILBOX.has(action.type) && (() => {
                     const selectedId = mailboxIdFor(action);
+                    const invalid = actionInvalid(index);
                     const missing = !!selectedId && !mailboxPathMap.has(selectedId);
                     return (
                       <select
@@ -642,8 +732,11 @@ export function FilterRuleModal({
                             value: id ? (mailboxPathMap.get(id) ?? "") : "",
                           });
                         }}
-                        className={`${selectClass} flex-1 min-w-[140px]`}
+                        className={cn(selectClass, "flex-1 min-w-[140px]", invalid && "border-destructive")}
                         aria-label={t("move_to_folder")}
+                        aria-invalid={invalid}
+                        aria-describedby={invalid ? "rule-actions-error" : undefined}
+                        data-rule-error={invalid}
                       >
                         <option value="">{t("move_to_folder")}</option>
                         {missing && <option value={selectedId}>{action.value}</option>}
@@ -663,7 +756,11 @@ export function FilterRuleModal({
                         onChange={(e) => updateAction(index, { value: e.target.value })}
                         placeholder={t("forward_placeholder")}
                         type="email"
-                        className="flex-1 min-w-[180px]"
+                        aria-label={t("forward_to")}
+                        aria-invalid={actionInvalid(index)}
+                        aria-describedby={actionInvalid(index) ? "rule-actions-error" : undefined}
+                        data-rule-error={actionInvalid(index)}
+                        className={cn("flex-1 min-w-[180px]", actionInvalid(index) && "border-destructive")}
                       />
                       <label className="flex items-center gap-1.5 text-sm text-foreground cursor-pointer">
                         <input
@@ -682,7 +779,11 @@ export function FilterRuleModal({
                       value={action.value || ""}
                       onChange={(e) => updateAction(index, { value: e.target.value })}
                       placeholder={t("reject_placeholder")}
-                      className="flex-1 min-w-[180px]"
+                      aria-label={t("reject_message")}
+                      aria-invalid={actionInvalid(index)}
+                      aria-describedby={actionInvalid(index) ? "rule-actions-error" : undefined}
+                      data-rule-error={actionInvalid(index)}
+                      className={cn("flex-1 min-w-[180px]", actionInvalid(index) && "border-destructive")}
                     />
                   )}
 
@@ -690,8 +791,11 @@ export function FilterRuleModal({
                     <select
                       value={action.value || ""}
                       onChange={(e) => updateAction(index, { value: e.target.value })}
-                      className={`${selectClass} flex-1 min-w-[140px]`}
+                      className={cn(selectClass, "flex-1 min-w-[140px]", actionInvalid(index) && "border-destructive")}
                       aria-label={t("label_placeholder")}
+                      aria-invalid={actionInvalid(index)}
+                      aria-describedby={actionInvalid(index) ? "rule-actions-error" : undefined}
+                      data-rule-error={actionInvalid(index)}
                     >
                       <option value="">{t("label_placeholder")}</option>
                       {emailKeywords.map((kw) => (
@@ -700,18 +804,22 @@ export function FilterRuleModal({
                     </select>
                   )}
 
-                  <button
-                    type="button"
+                  <IconButton
+                    label={t("remove_action")}
                     onClick={() => removeAction(index)}
                     disabled={actions.length <= 1}
-                    className="p-1.5 rounded hover:bg-muted text-muted-foreground hover:text-destructive transition-colors disabled:opacity-30 disabled:pointer-events-none"
-                    aria-label={t("delete_rule")}
+                    className="text-muted-foreground hover:text-destructive disabled:opacity-30"
                   >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
+                    <X />
+                  </IconButton>
                 </div>
               ))}
             </div>
+            {forwardUnavailable && forwardCount > 0 && (
+              <p className="mt-2 text-xs text-amber-600 dark:text-amber-400">
+                {t("forward_unavailable")}
+              </p>
+            )}
             {forwardOverLimit && (
               <p className="mt-2 text-xs text-amber-600 dark:text-amber-400">
                 {t("forward_limit", { count: forwardLimit })}
@@ -725,6 +833,7 @@ export function FilterRuleModal({
               <Plus className="w-3.5 h-3.5" />
               {t("add_action")}
             </button>
+            <FieldError id="rule-actions-error" text={shown(errors.actions)} />
           </div>
 
           <div className="flex items-center gap-2">
@@ -781,8 +890,8 @@ export function FilterRuleModal({
                         type="datetime-local"
                         max={PERIOD_INPUT_MAX}
                         value={periodStart}
-                        onChange={(e) => setPeriodStart(e.target.value)}
-                        className="px-3 py-1.5 text-sm rounded-md bg-muted border border-border text-foreground focus:outline-none focus:ring-2 focus:ring-ring transition-colors duration-150 hover:border-muted-foreground"
+                        onChange={(e) => { setPeriodStart(e.target.value); setHalfFilledPeriod(false); }}
+                        className="px-3 py-1.5 text-sm rounded-md bg-muted border border-border text-foreground focus:outline-hidden transition-colors duration-150 hover:border-muted-foreground"
                       />
                     </label>
                     <label className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -792,12 +901,13 @@ export function FilterRuleModal({
                         type="datetime-local"
                         max={PERIOD_INPUT_MAX}
                         value={periodEnd}
-                        onChange={(e) => setPeriodEnd(e.target.value)}
-                        className="px-3 py-1.5 text-sm rounded-md bg-muted border border-border text-foreground focus:outline-none focus:ring-2 focus:ring-ring transition-colors duration-150 hover:border-muted-foreground"
+                        onChange={(e) => { setPeriodEnd(e.target.value); setHalfFilledPeriod(false); }}
+                        className="px-3 py-1.5 text-sm rounded-md bg-muted border border-border text-foreground focus:outline-hidden transition-colors duration-150 hover:border-muted-foreground"
                       />
                     </label>
                   </div>
                   <p className="text-xs text-muted-foreground">{t("period_hint")}</p>
+                  <FieldError text={shown(errors.period)} />
                 </div>
               )}
             </div>
@@ -831,15 +941,18 @@ export function FilterRuleModal({
           )}
         </div>
 
-        <div className="flex items-center justify-end gap-2 px-6 py-4 border-t border-border">
-          <Button variant="outline" onClick={onClose}>
-            {t("cancel")}
-          </Button>
-          <Button onClick={handleSave} disabled={!name.trim()}>
-            {t("save")}
-          </Button>
-        </div>
-      </div>
-    </div>
+    </Dialog>
+    {discardDialog}
+    </>
+  );
+}
+
+/** Why the rule can't be saved yet, under the part it is about. */
+function FieldError({ id, text }: { id?: string; text: string | null }) {
+  if (!text) return null;
+  return (
+    <p id={id} role="alert" className="mt-1.5 text-xs text-red-600 dark:text-red-400">
+      {text}
+    </p>
   );
 }

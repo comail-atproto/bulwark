@@ -46,7 +46,12 @@ function clientKey(client: IJMAPClient): number {
 export function resolveQuickRuleTarget(email: Email): QuickRuleTarget | null {
   const auth = useAuthStore.getState();
   if (!auth.client) return null;
-  const context = resolveEmailActionContext(email, auth.client);
+  let context: ReturnType<typeof resolveEmailActionContext>;
+  try {
+    context = resolveEmailActionContext(email, auth.client);
+  } catch {
+    return null; // a message of a login that is gone
+  }
   const client = context.client;
   const ownAccountId = client.getAccountId();
   const accountId = context.accountId ?? ownAccountId;
@@ -69,6 +74,31 @@ export function resolveQuickRuleTarget(email: Email): QuickRuleTarget | null {
     shared: accountId !== ownAccountId || inSharedFolder,
     supportsSieve: typeof client.supportsSieve === 'function' && client.supportsSieve(),
     mailboxes: context.mailboxes.filter(m => !m.isShared),
+  };
+}
+
+/**
+ * The account a folder of the sidebar belongs to, for running rules on it.
+ * Resolved like the other folder actions (the viewed account); null when the
+ * folder is not one of that account's own.
+ */
+export function resolveMailboxRuleTarget(mailbox: Mailbox): QuickRuleTarget | null {
+  const auth = useAuthStore.getState();
+  if (!auth.client) return null;
+  const context = resolveEmailActionContext({}, auth.client);
+  const client = context.client;
+  const accountId = client.getAccountId();
+  const mailboxes = context.mailboxes.filter(m => !m.isShared);
+  if (!mailboxes.some(m => m.id === mailbox.id)) return null;
+  return {
+    client,
+    clientAccountId: useEmailStore.getState().viewingAccountId ?? auth.activeAccountId ?? null,
+    key: `${clientKey(client)}|${accountId}`,
+    accountId,
+    sieveAccountId: client.getSieveAccountId(),
+    shared: false,
+    supportsSieve: typeof client.supportsSieve === 'function' && client.supportsSieve(),
+    mailboxes,
   };
 }
 

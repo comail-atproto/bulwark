@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { detectSetupState } from '@/lib/setup/state';
-import { authenticateWizardRequest } from '@/lib/setup/session';
+import { wizardSessionRefusal } from '@/lib/setup/session';
+import { trimTrailingSlashes } from '@/lib/url-normalization';
+import { configManager } from '@/lib/admin/config-manager';
 
 export const dynamic = 'force-dynamic';
 
@@ -30,7 +32,7 @@ async function probe(url: string, method: 'GET' | 'HEAD'): Promise<Response> {
     if (!location) return res;
     const next = new URL(location, current);
     const sameHost = next.host === current.host && next.protocol === current.protocol;
-    const httpsUpgrade = next.protocol === 'https:' && next.hostname === current.hostname;
+    const httpsUpgrade = current.protocol === 'http:' && next.protocol === 'https:' && next.hostname === current.hostname && next.port === '';
     if (!sameHost && !httpsUpgrade) {
       throw new Error(`Redirected to a different host (${next.host})`);
     }
@@ -52,9 +54,8 @@ export async function POST(request: NextRequest) {
   if (detectSetupState() !== 'bootstrap') {
     return NextResponse.json({ error: 'Setup is not active' }, { status: 404 });
   }
-  if (!(await authenticateWizardRequest())) {
-    return NextResponse.json({ error: 'Wizard session required' }, { status: 401 });
-  }
+  const wizardRefused = await wizardSessionRefusal();
+  if (wizardRefused) return wizardRefused;
 
   let body: { url?: unknown };
   try {
@@ -68,17 +69,29 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'url required' }, { status: 400 });
   }
 
+  await configManager.ensureLoaded();
+  const selected = configManager.get<string>('jmapServerUrl', '').trim();
+  if (!selected) {
+    return NextResponse.json({ status: 'invalid_url', message: 'Select a server before testing the connection' }, { status: 400 });
+  }
+  if (raw !== selected) {
+    return NextResponse.json({ status: 'invalid_url', message: 'The selected server changed. Select the address again before testing.' }, { status: 409 });
+  }
+
   let parsed: URL;
   try {
-    parsed = new URL(raw);
+    parsed = new URL(selected);
   } catch {
     return NextResponse.json({ status: 'invalid_url', message: 'URL is not well-formed' });
   }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     return NextResponse.json({ status: 'invalid_url', message: 'URL must use http or https' });
   }
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+    return NextResponse.json({ status: 'invalid_url', message: 'URL must not contain credentials, a query or a fragment' });
+  }
 
-  const base = raw.replace(/\/+$/, '');
+  const base = trimTrailingSlashes(selected);
 
   for (const endpoint of JMAP_ENDPOINTS) {
     const target = base + endpoint;

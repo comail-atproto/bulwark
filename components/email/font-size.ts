@@ -77,3 +77,32 @@ declare module "@tiptap/core" {
     };
   }
 }
+
+/** The font and size a message starts with (Settings > Accessibility). */
+export interface ComposeTextStyle {
+  fontFamily?: string;
+  fontSize?: string;
+}
+
+// The settings sync from the server: only plain family lists and lengths
+// go into a style attribute.
+const SAFE_FONT_FAMILY = /^[a-z0-9 ,'-]{1,200}$/i;
+const SAFE_FONT_SIZE = /^\d{1,3}(\.\d{1,2})?(px|pt|em|rem|%)$/;
+
+/** The composeFontFamily / composeFontSize settings, checked; empty means the default. */
+export function composeTextStyle(fontFamily: string | undefined, fontSize: string | undefined): ComposeTextStyle {
+  const style: ComposeTextStyle = {};
+  const family = fontFamily?.trim();
+  const size = fontSize?.trim();
+  if (family && SAFE_FONT_FAMILY.test(family)) style.fontFamily = family;
+  if (size && SAFE_FONT_SIZE.test(size)) style.fontSize = size;
+  return style;
+}
+
+/** The style as CSS declarations for an inline style attribute ("" when there is none). */
+export function composeTextStyleCss(style: ComposeTextStyle): string {
+  return [
+    style.fontFamily ? `font-family: ${style.fontFamily}` : '',
+    style.fontSize ? `font-size: ${style.fontSize}` : '',
+  ].filter(Boolean).join('; ');
+}

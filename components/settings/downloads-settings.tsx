@@ -6,6 +6,7 @@ import { useSettingsStore } from "@/stores/settings-store";
 import { SettingsSection, SettingItem, Select, ToggleSwitch } from "./settings-section";
 import { RotateCcw } from "@/components/icons";
 import { cn } from "@/lib/utils";
+import { useArchiveActionEnabled } from "@/lib/archive-gate";
 import {
   DEFAULT_ATTACHMENT_TEMPLATE,
   DEFAULT_BUNDLE_TEMPLATE,
@@ -76,13 +77,14 @@ function TemplateEditor({
       <div className="flex flex-col gap-2">
         <div className="flex items-stretch gap-2">
           <input
+            aria-label={label}
             ref={inputRef}
             type="text"
             value={value}
             placeholder={placeholder}
             onChange={(e) => onChange(e.target.value)}
             spellCheck={false}
-            className="flex-1 px-3 py-1.5 text-sm rounded-md bg-muted border border-border text-foreground font-mono focus:outline-none focus:ring-2 focus:ring-ring transition-colors duration-150"
+            className="flex-1 px-3 py-1.5 text-sm rounded-md bg-muted border border-border text-foreground font-mono focus:outline-hidden transition-colors duration-150"
           />
           <button
             type="button"
@@ -130,6 +132,7 @@ function TemplateEditor({
 
 export function DownloadsSettings() {
   const t = useTranslations("settings.downloads");
+  const archiveActionEnabled = useArchiveActionEnabled();
   const {
     emailDownloadTemplate,
     attachmentDownloadTemplate,
@@ -141,6 +144,8 @@ export function DownloadsSettings() {
     postExportAction,
     updateSetting,
   } = useSettingsStore();
+  // With the Archive action off a stored "archive" keeps the message, so it shows as "keep".
+  const postExportShown = archiveActionEnabled || postExportAction !== "archive" ? postExportAction : "keep";
 
   const sampleEmail = useMemo(() => buildSampleEmail(), []);
   const sampleAttachment = useMemo(() => ({ name: "Invoice-2026-05.pdf", type: "application/pdf" }), []);
@@ -184,7 +189,7 @@ export function DownloadsSettings() {
   );
 
   return (
-    <SettingsSection title={t("title")} description={t("description")}>
+    <SettingsSection id="downloads" advanced title={t("title")} description={t("description")}>
       <TemplateEditor
         label={t("email_template.label")}
         description={t("email_template.description")}
@@ -252,11 +257,11 @@ export function DownloadsSettings() {
       </SettingItem>
       <SettingItem label={t("after_export.label")} description={t("after_export.description")}>
         <Select
-          value={postExportAction}
+          value={postExportShown}
           onChange={(value) => updateSetting("postExportAction", value as "keep" | "archive" | "trash")}
           options={[
             { value: "keep", label: t("after_export.keep") },
-            { value: "archive", label: t("after_export.archive") },
+            ...(archiveActionEnabled ? [{ value: "archive", label: t("after_export.archive") }] : []),
             { value: "trash", label: t("after_export.trash") },
           ]}
         />

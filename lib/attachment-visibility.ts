@@ -14,12 +14,33 @@
  */
 
 /**
- * The exact pattern the viewers rewrite to blob URLs, so "referenced" here
- * means "rendered" and a chip is only ever hidden for a part the body shows.
+ * The exact pattern the viewers rewrite to blob URLs (rewriteCidReferences),
+ * so "referenced" here means "rendered" and a chip is only ever hidden for a
+ * part the body shows. A reference ends at `<`/`>` too: an unquoted
+ * `<img src=cid:logo>` would otherwise take the rest of the markup with it.
  */
-const CID_REFERENCE = /\bcid:([^"'\s)]+)/gi;
+const CID_REFERENCE = /\bcid:([^"'\s)<>]+)/gi;
+
+/**
+ * Swaps every `cid:` reference in a raw HTML body for the URL fetched for that
+ * part, or `fallback` when there is none.
+ */
+export function rewriteCidReferences(html: string, urls: Readonly<Record<string, string>>, fallback: string): string {
+  return html.replace(CID_REFERENCE, (_match, cid: string) =>
+    (Object.prototype.hasOwnProperty.call(urls, cid) ? urls[cid] : fallback));
+}
 
 const EMPTY: ReadonlySet<string> = new Set();
+
+/**
+ * Strips the RFC angle brackets a Content-ID header may still carry (e.g.
+ * `<logo123@sender>`). Body `cid:` references never have them, so every
+ * comparison between an attachment's `cid`/`contentId` and a body reference
+ * must normalize through this first.
+ */
+export function normalizeCid(cid: string): string {
+  return cid.replace(/^<|>$/g, '');
+}
 
 /**
  * Content-IDs a raw HTML body references via `cid:` URLs (img src, table
@@ -34,6 +55,23 @@ export function collectReferencedCids(html: string | null | undefined): Readonly
     cids.add(match[1]);
   }
   return cids;
+}
+
+/**
+ * Machine-readable report parts: the delivery status of a bounce (RFC 3464),
+ * the disposition of a read receipt (RFC 8098) and their RFC 6533 UTF-8
+ * forms. A multipart/report needs them, but they are not files anyone
+ * attached, so no view lists them and a forward leaves them out.
+ */
+const REPORT_PART_TYPES: ReadonlySet<string> = new Set([
+  'message/delivery-status',
+  'message/disposition-notification',
+  'message/global-delivery-status',
+  'message/global-disposition-notification',
+]);
+
+export function isReportPart(type: string | null | undefined): boolean {
+  return REPORT_PART_TYPES.has((type || '').toLowerCase());
 }
 
 export interface AttachmentPartLike {
@@ -65,6 +103,5 @@ export function isEmbeddedInBody(
   if (att.disposition === 'attachment') return false;
   const genericType = !type || type === 'application/octet-stream';
   if (!isImage && !genericType) return false;
-  // The Content-ID may still carry its angle brackets; body references never do.
-  return referencedCids.has(att.cid.replace(/^<|>$/g, ''));
+  return referencedCids.has(normalizeCid(att.cid));
 }

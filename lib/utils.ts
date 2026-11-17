@@ -1,16 +1,11 @@
-import { type ClassValue, clsx } from "clsx";
-import { twMerge } from "tailwind-merge";
-import { Mailbox, UNIFIED_MAILBOX_IDS } from "./jmap/types";
-import type { UnifiedMailboxRole } from "./jmap/types";
+import { Mailbox } from "./jmap/types";
 import { debug } from "./debug";
 import { getEffectiveLocale } from '@/i18n/detect-locale';
 import { useSettingsStore } from "@/stores/settings-store";
-import type { DateLocale } from "@/stores/settings-store";
+import type { DateFormat, DateLocale } from "@/stores/settings-store";
 import { getEffectiveTimeZone, getWallClock } from "./timezone";
 
-export function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs));
-}
+export { cn } from "./cn";
 
 /**
  * Strip embedded Basic-auth credentials from a URL for display.
@@ -53,8 +48,8 @@ export function generateUUID(): string {
  *   - `en-GB` → `en-GB`  (DD/MM/YYYY)
  *   - `en-US` → `en-US`  (MM/DD/YYYY)
  */
-function resolveDateLocale<T extends string | undefined>(
-  dateLocale: DateLocale,
+export function resolveDateLocale<T extends string | undefined>(
+  dateLocale: DateLocale | undefined,
   fallback: T,
 ): string | T {
   switch (dateLocale) {
@@ -70,6 +65,25 @@ function resolveDateLocale<T extends string | undefined>(
   }
 }
 
+const dateFormatters = new Map<string, Intl.DateTimeFormat>();
+
+/**
+ * An Intl.DateTimeFormat for `locale` and `options`, built once. Each
+ * toLocale*String call constructs one afresh, and the list formats every
+ * row's date on every render. Only for option sets that name a date or time
+ * field: then toLocaleString, toLocaleDateString and toLocaleTimeString all
+ * format exactly as the formatter does.
+ */
+function cachedDateFormat(locale: string, options: Intl.DateTimeFormatOptions): Intl.DateTimeFormat {
+  const key = `${locale}|${JSON.stringify(options)}`;
+  let formatter = dateFormatters.get(key);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat(locale, options);
+    dateFormatters.set(key, formatter);
+  }
+  return formatter;
+}
+
 /**
  * Formats a received-at date for the email list. The output style is
  * controlled by the `dateFormat` user setting:
@@ -78,6 +92,8 @@ function resolveDateLocale<T extends string | undefined>(
  *       today        → time only           ("15:31" or "3:31 PM")
  *       last 7 days  → short weekday+time  ("Fr 15:31", "Fri 3:31 PM")
  *       older        → full locale date    ("28.04.2026", "04/28/2026")
+ *       With `listStyle: 'mountain-view'` the buckets are Gmail's instead:
+ *       today → time, this year → "Oct 10", older → "10/10/25".
  *   - `relative` — legacy en-US relative format ("1h ago", "2d ago").
  *   - `full` — always the full locale date+time.
  *
@@ -94,7 +110,11 @@ function resolveDateLocale<T extends string | undefined>(
  * bucketing - a browser pinned to UTC for anti-fingerprinting must not
  * roll a 00:30 local mail into "yesterday" (#755).
  */
-export function formatDate(date: Date | string): string {
+export function formatDate(
+  date: Date | string,
+  // Settings preview: render as if these were picked, without saving them.
+  overrides?: { dateFormat?: DateFormat; dateLocale?: DateLocale; listStyle?: 'mountain-view' },
+): string {
   const d = typeof date === "string" ? new Date(date) : date;
   // An unparsable receivedAt (e.g. a 5-digit year) makes Intl throw
   // "RangeError: Invalid time value" and takes the whole list down with it.
@@ -107,7 +127,7 @@ export function formatDate(date: Date | string): string {
   // en-US in Intl; everything else uses the language subtag as-is and lets
   // the runtime pick a sensible default region.
   const uiLocale = locale === "en" ? "en-US" : locale;
-  const { dateFormat, dateLocale, timeFormat } = useSettingsStore.getState();
+  const { dateFormat, dateLocale, timeFormat } = { ...useSettingsStore.getState(), ...overrides };
   // Numeric dates additionally honour the regional `dateLocale` override
   // (defaults to `auto` = the UI language, preserving prior behaviour). (#456)
   const numericLocale = resolveDateLocale(dateLocale, uiLocale);
@@ -126,16 +146,16 @@ export function formatDate(date: Date | string): string {
     if (minutes < 60) return rtf.format(-minutes, "minute");
     if (hours < 24) return rtf.format(-hours, "hour");
     if (days < 7) return rtf.format(-days, "day");
-    return d.toLocaleDateString(uiLocale, {
+    return cachedDateFormat(uiLocale, {
       timeZone,
       month: "short",
       day: "numeric",
       year: getWallClock(d, timeZone).year !== getWallClock(now, timeZone).year ? "numeric" : undefined,
-    });
+    }).format(d);
   }
 
   if (dateFormat === "full") {
-    return d.toLocaleString(numericLocale, {
+    return cachedDateFormat(numericLocale, {
       timeZone,
       year: "numeric",
       month: "2-digit",
@@ -143,16 +163,16 @@ export function formatDate(date: Date | string): string {
       hour: "2-digit",
       minute: "2-digit",
       hour12,
-    });
+    }).format(d);
   }
 
   // 'smart' (default)
-  const timeStr = d.toLocaleTimeString(uiLocale, {
+  const timeStr = cachedDateFormat(uiLocale, {
     timeZone,
     hour: "2-digit",
     minute: "2-digit",
     hour12,
-  });
+  }).format(d);
 
   // Calendar-day comparison in the display zone, not the browser zone.
   const dWall = getWallClock(d, timeZone);
@@ -163,22 +183,29 @@ export function formatDate(date: Date | string): string {
     dWall.day === nowWall.day;
   if (isSameDay) return timeStr;
 
+  if (overrides?.listStyle === 'mountain-view') {
+    if (dWall.year === nowWall.year) {
+      return cachedDateFormat(uiLocale, { timeZone, month: "short", day: "numeric" }).format(d);
+    }
+    return cachedDateFormat(numericLocale, { timeZone, year: "2-digit", month: "numeric", day: "numeric" }).format(d);
+  }
+
   const daysAgo = Math.floor((now.getTime() - d.getTime()) / 86400000);
   if (daysAgo < 7) {
     // German Intl outputs "Fr." with a trailing dot for `weekday: 'short'`;
     // strip it so the result reads cleanly next to the time.
-    const weekday = d
-      .toLocaleDateString(uiLocale, { timeZone, weekday: "short" })
+    const weekday = cachedDateFormat(uiLocale, { timeZone, weekday: "short" })
+      .format(d)
       .replace(/\.$/, "");
     return `${weekday} ${timeStr}`;
   }
 
-  return d.toLocaleDateString(numericLocale, {
+  return cachedDateFormat(numericLocale, {
     timeZone,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
-  });
+  }).format(d);
 }
 
 /**
@@ -223,88 +250,60 @@ export function formatDateTime(
   return d.toLocaleString(effectiveLocale, localeOptions);
 }
 
-// Marketing emails pad the preheader with whitespace, format chars (soft
-// hyphens, zero-width chars, BOM, directional marks) and combining marks
-// (e.g. U+034F) to push real content past the preview window. Strip them all.
-// \p{Cf} = Format, \p{Mn} = combining marks; \s covers figure space, NBSP, etc.
-const LEADING_INVISIBLE_RE = /^[\s\p{Cf}\p{Mn}]+/u;
-// After stripping, a server-side truncation indicator like "..." may be all
-// that's left. Treat that as no preview so callers can fall back.
-const ONLY_PUNCTUATION_RE = /^[.\u2026\s]+$/;
-
-export function stripInvisibleLeading(text: string): string {
-  const stripped = text.replace(LEADING_INVISIBLE_RE, '');
-  if (ONLY_PUNCTUATION_RE.test(stripped)) return '';
-  return stripped;
+/**
+ * How long ago `date` was, in words ("3 minutes ago", "2 days ago"), for the
+ * parenthesis Gmail puts after a message's time. Empty once it is a month
+ * old, where the date alone says enough.
+ *
+ * Days are calendar days in the user's effective time zone, so a mail from
+ * the day before yesterday is never called "yesterday" just because fewer
+ * than 48 hours have passed. (#1259)
+ */
+export function formatRelativeAgo(date: Date | string, now: Date = new Date()): string {
+  const d = typeof date === 'string' ? new Date(date) : date;
+  if (!d || Number.isNaN(d.getTime())) return '';
+  const diff = Math.max(0, now.getTime() - d.getTime());
+  const minutes = Math.floor(diff / 60000);
+  const hours = Math.floor(diff / 3600000);
+  const timeZone = getEffectiveTimeZone();
+  const dayNumber = (x: Date) => {
+    const w = getWallClock(x, timeZone);
+    return Date.UTC(w.year, w.month - 1, w.day) / 86400000;
+  };
+  const days = dayNumber(now) - dayNumber(d);
+  if (days >= 30) return '';
+  const locale = getEffectiveLocale();
+  const rtf = new Intl.RelativeTimeFormat(locale === 'en' ? 'en-US' : locale, { numeric: 'auto' });
+  if (minutes < 1) return rtf.format(0, 'second');
+  if (minutes < 60) return rtf.format(-minutes, 'minute');
+  // The day the clocks go back has 25 hours: 24 of them can still be today.
+  if (hours < 24 || days < 1) return rtf.format(-hours, 'hour');
+  return rtf.format(-days, 'day');
 }
 
-// A style sheet at the start of the text: an at-rule, or a selector opening a
-// rule. Plain prose does not start like this - "@" or "#" followed by a word
-// and then, before any sentence ends, a "{".
-const DECLARATIONS_RE = /^\s*(?:[-\w]+\s*:|[.#@a-z*][^{}]*\{)/i;
-// At-rule names are matched case-sensitively: style sheets write them in lower
-// case, while "@Page …" at the start of a preview is a mention. A selector's
-// colon is a pseudo-class ("a:hover"), never followed by a space as in
-// "Reminder: your appointment {date: …}".
-const AT_RULE_RE = /^@(?:media|font-face|import|supports|keyframes|charset|page)\b/;
-const SELECTOR_RE = /^[.#]?[a-z*](?:[\w\-.#,>~+*\s[\]="']|:(?!\s))*\{/i;
+export { cleanPreview, stripEmphasisMarkers, stripInvisibleLeading, stripLeadingCss } from './preview-text';
 
 /**
- * Drops a style sheet from the start of a text preview.
- *
- * Some servers build the preview from an HTML body without skipping its
- * <style> element, so a marketing mail's preview can begin with
- * "@media screen and (min-width:600px){.hide{display:none!important;…" and
- * never reach the text. Whole leading rules are removed; a preview that ends
- * inside one was nothing but CSS and becomes empty, so callers fall back to
- * their "no preview" text.
+ * A size people can read at a glance: whole numbers from 10 up ("67 KB"),
+ * one decimal below that ("2.1 MB"), never a trailing ".0".
  */
-export function stripLeadingCss(text: string): string {
-  let rest = text.trimStart();
-  for (let guard = 0; guard < 100 && (AT_RULE_RE.test(rest) || SELECTOR_RE.test(rest)); guard++) {
-    const brace = rest.indexOf('{');
-    const semicolon = rest.indexOf(';');
-    // `@import url(...);` and `@charset "x";` end without a block.
-    if (semicolon >= 0 && (brace < 0 || semicolon < brace) && /^@(?:import|charset)\b/.test(rest)) {
-      rest = rest.slice(semicolon + 1).trimStart();
-      continue;
-    }
-    // An at-rule word with no block after it ("@media team, …", "@page 3 …")
-    // starts prose, not a style sheet.
-    if (brace < 0) return rest;
-    let depth = 0;
-    let end = -1;
-    for (let i = brace; i < rest.length; i++) {
-      if (rest[i] === '{') depth++;
-      else if (rest[i] === '}' && --depth === 0) { end = i; break; }
-    }
-    if (end < 0) return rest.startsWith('@') || DECLARATIONS_RE.test(rest.slice(brace + 1)) ? '' : rest;
-    // A rule's block holds declarations ("color: red") or further rules; a
-    // brace in prose ("at {time} tomorrow") holds neither and ends the strip.
-    if (!rest.startsWith('@') && !DECLARATIONS_RE.test(rest.slice(brace + 1, end))) return rest;
-    rest = rest.slice(end + 1).trimStart();
-  }
-  return rest;
-}
-
-/** A message preview ready to show: no leading padding, no leading style sheet. */
-export function cleanPreview(text: string | null | undefined): string {
-  return stripInvisibleLeading(stripLeadingCss(stripInvisibleLeading(text ?? '')));
-}
-
-export function truncateText(text: string, maxLength: number): string {
-  if (text.length <= maxLength) return text;
-  return text.substring(0, maxLength).trim() + "...";
-}
-
 export function formatFileSize(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return '0 Bytes';
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
 
   const k = 1024;
-  const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(k)));
+  let value = bytes / Math.pow(k, i);
+  if (i === 0) return `${Math.round(bytes)} B`;
 
-  return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+  let rounded = value < 10 ? Math.round(value * 10) / 10 : Math.round(value);
+  // 1023.6 KB rounds to 1024 KB: show it as 1 MB instead.
+  if (rounded >= k && i < units.length - 1) {
+    i += 1;
+    value /= k;
+    rounded = Math.round(value * 10) / 10;
+  }
+  return `${rounded} ${units[i]}`;
 }
 
 // Types for mailbox tree
@@ -596,39 +595,6 @@ export function buildMailboxTree(mailboxes: Mailbox[]): MailboxNode[] {
   sortNodes(rootMailboxes);
 
   return rootMailboxes;
-}
-
-/**
- * Builds virtual MailboxNode entries for unified mailbox roles with aggregated counts.
- */
-export function buildUnifiedMailboxNodes(
-  counts: Array<{ role: UnifiedMailboxRole; unreadEmails: number; totalEmails: number }>,
-): MailboxNode[] {
-  return counts.map((count) => ({
-    id: UNIFIED_MAILBOX_IDS[count.role],
-    name: count.role, // Display name is handled by i18n in the component
-    role: count.role,
-    parentId: undefined,
-    sortOrder: 0,
-    totalEmails: count.totalEmails,
-    unreadEmails: count.unreadEmails,
-    totalThreads: 0,
-    unreadThreads: 0,
-    myRights: {
-      mayReadItems: true,
-      mayAddItems: false,
-      mayRemoveItems: false,
-      maySetSeen: true,
-      maySetKeywords: true,
-      mayCreateChild: false,
-      mayRename: false,
-      mayDelete: false,
-      maySubmit: false,
-    },
-    isSubscribed: true,
-    children: [],
-    depth: 0,
-  }));
 }
 
 // Flatten a mailbox tree for rendering with proper depth info

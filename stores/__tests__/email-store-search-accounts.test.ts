@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { emailKeyFor } from '@/lib/thread-utils';
 import { useEmailStore } from '../email-store';
 import { useSettingsStore } from '../settings-store';
 import { useAuthStore } from '../auth-store';
@@ -109,8 +110,8 @@ describe('"All folders" search across the own and group accounts (#1082)', () =>
     expect(state.hasMoreEmails).toBe(false);
     // One folder-less query per account.
     expect(client.searchEmails).toHaveBeenCalledTimes(2);
-    expect(client.searchEmails).toHaveBeenCalledWith('acesso', undefined, undefined, 50, 0);
-    expect(client.searchEmails).toHaveBeenCalledWith('acesso', undefined, 'group', 50, 0);
+    expect(client.searchEmails).toHaveBeenCalledWith('acesso', undefined, undefined, 50, 0, { deferSnippets: true });
+    expect(client.searchEmails).toHaveBeenCalledWith('acesso', undefined, 'group', 50, 0, { deferSnippets: true });
   });
 
   it('merges own and group hits newest first and stamps each with its source', async () => {
@@ -144,13 +145,31 @@ describe('"All folders" search across the own and group accounts (#1082)', () =>
     expect(useEmailStore.getState().emails.map(e => e.id)).toEqual(['grp-1', 'grp-2']);
   });
 
+  it('sends a quoted phrase to every account as a condition of its own', async () => {
+    useEmailStore.setState({
+      searchQuery: '"acesso negado" 2026',
+      searchFilters: { ...DEFAULT_SEARCH_FILTERS, from: 'sender@example.com' },
+    });
+
+    await useEmailStore.getState().advancedSearch(client);
+
+    const calls = client.advancedSearchEmails.mock.calls;
+    expect(calls.map(([, accountId]) => accountId)).toEqual([undefined, 'group']);
+    for (const [filter] of calls) {
+      expect(filter).toEqual({
+        operator: 'AND',
+        conditions: [{ text: '"acesso negado"' }, { text: '2026' }, { from: 'sender@example.com' }],
+      });
+    }
+  });
+
   it('still asks only the chosen account when the search is scoped to a group folder', async () => {
     useEmailStore.getState().setSearchMailboxId(groupInbox.id);
 
     await useEmailStore.getState().searchEmails(client, 'acesso');
 
     expect(client.searchEmails).toHaveBeenCalledTimes(1);
-    expect(client.searchEmails).toHaveBeenCalledWith('acesso', 'inbox', 'group', 50, 0);
+    expect(client.searchEmails).toHaveBeenCalledWith('acesso', 'inbox', 'group', 50, 0, { deferSnippets: true });
   });
 
   it('makes a single own-account query for a login without group folders', async () => {
@@ -159,7 +178,7 @@ describe('"All folders" search across the own and group accounts (#1082)', () =>
     await useEmailStore.getState().searchEmails(client, 'fatura');
 
     expect(client.searchEmails).toHaveBeenCalledTimes(1);
-    expect(client.searchEmails).toHaveBeenCalledWith('fatura', undefined, undefined, 50, 0);
+    expect(client.searchEmails).toHaveBeenCalledWith('fatura', undefined, undefined, 50, 0, { deferSnippets: true });
     expect(useEmailStore.getState().emails.map(e => e.id)).toEqual(['own-1', 'own-2']);
   });
 
@@ -180,7 +199,8 @@ describe('"All folders" search across the own and group accounts (#1082)', () =>
 
   it('marks a mixed selection read in each owning account', async () => {
     await useEmailStore.getState().searchEmails(client, 'a');
-    useEmailStore.setState({ selectedEmailIds: new Set(['own-1', 'grp-1']) });
+    useEmailStore.setState({ selectedEmailKeys: new Set(useEmailStore.getState().emails
+      .filter(e => ['own-1', 'grp-1'].includes(e.id)).map(emailKeyFor)) });
 
     await useEmailStore.getState().batchMarkAsRead(client, true);
 
@@ -279,8 +299,8 @@ describe('Spam and Trash in the folder-less search scopes', () => {
     await useEmailStore.getState().searchEmails(client, 'acesso');
 
     expect(client.advancedSearchEmails).not.toHaveBeenCalled();
-    expect(client.searchEmails).toHaveBeenCalledWith('acesso', undefined, undefined, 50, 0);
-    expect(client.searchEmails).toHaveBeenCalledWith('acesso', undefined, 'group', 50, 0);
+    expect(client.searchEmails).toHaveBeenCalledWith('acesso', undefined, undefined, 50, 0, { deferSnippets: true });
+    expect(client.searchEmails).toHaveBeenCalledWith('acesso', undefined, 'group', 50, 0, { deferSnippets: true });
 
     client.searchEmails.mockClear();
     useEmailStore.setState({ searchFilters: { ...DEFAULT_SEARCH_FILTERS, from: 'sender@example.com' } });
@@ -294,7 +314,7 @@ describe('Spam and Trash in the folder-less search scopes', () => {
     await useEmailStore.getState().searchEmails(client, 'fatura');
 
     expect(client.searchEmails).toHaveBeenCalledTimes(1);
-    expect(client.searchEmails).toHaveBeenCalledWith('fatura', 'trash', undefined, 50, 0);
+    expect(client.searchEmails).toHaveBeenCalledWith('fatura', 'trash', undefined, 50, 0, { deferSnippets: true });
   });
 
   it('goes back to the default scope when the filters are cleared', () => {
@@ -309,7 +329,7 @@ describe('Spam and Trash in the folder-less search scopes', () => {
 
     await useEmailStore.getState().searchEmails(client, 'fatura');
     expect(client.searchEmails).toHaveBeenCalledTimes(1);
-    expect(client.searchEmails).toHaveBeenCalledWith('fatura', 'trash', undefined, 50, 0);
+    expect(client.searchEmails).toHaveBeenCalledWith('fatura', 'trash', undefined, 50, 0, { deferSnippets: true });
 
     useEmailStore.getState().selectMailbox(ownJunk.id);
     expect(useEmailStore.getState().searchMailboxId).toBe('junk');
@@ -324,7 +344,7 @@ describe('Spam and Trash in the folder-less search scopes', () => {
     await useEmailStore.getState().searchEmails(client, 'acesso');
 
     expect(client.searchEmails).toHaveBeenCalledTimes(1);
-    expect(client.searchEmails).toHaveBeenCalledWith('acesso', 'trash', 'group', 50, 0);
+    expect(client.searchEmails).toHaveBeenCalledWith('acesso', 'trash', 'group', 50, 0, { deferSnippets: true });
   });
 
   it('keeps a scope the user picked when entering or leaving Spam and Trash', () => {

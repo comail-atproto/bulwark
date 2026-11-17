@@ -1,14 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { BUILTIN_THEMES } from '../builtin-themes';
+import { COMAIL_THEME } from '@/lib/__tests__/fixtures/comail-theme';
 
-// Guards the comail dark palette port (chainlink #675 / issue #1761).
-// The docs Starlight theme reverted the darkestBlue (#012102) + sage-text
-// dark palette as muddy/low-contrast; web-frontend/src/styles/starlight-comail.css
-// holds the approved dark neutrals. These tests pin the comail builtin theme's
-// `.dark` token block + skin to those exact values and assert the login
-// regressions (ghost primary button, white handle input) can't recur.
+// Keep controls readable on Comail's docs charcoal palette, including login.
 
-const comail = BUILTIN_THEMES.find((t) => t.id === 'builtin-comail')!;
+const comail = COMAIL_THEME;
 
 // Approved dark neutrals, copied verbatim from starlight-comail.css.
 const DOCS_DARK = {
@@ -23,8 +18,7 @@ const DOCS_DARK = {
   hairlineShade: '#25282e',
 } as const;
 
-// The brand cyan input surface for dark mode, per the issue spec.
-const DARK_INPUT = '#053a36';
+const DARK_INPUT = DOCS_DARK.inlineCode;
 
 /** Extract the body of the `.dark { ... }` block from a theme's css string. */
 function darkBlock(css: string): string {
@@ -66,17 +60,15 @@ describe('comail dark palette (issue #1761)', () => {
     expect(tokenValue(dark, '--color-sidebar-border')).toBe(DOCS_DARK.hairlineLight);
   });
 
-  it('dark input surface renders #053a36 (never white)', () => {
+  it('dark inputs use the charcoal surface token instead of white or green', () => {
     // Token layer.
     expect(tokenValue(dark, '--color-input')).toBe(DARK_INPUT);
-    // Skin layer: the comail skin hardcodes input colours; the dark override
-    // must repaint them to #053a36 so the handle field isn't a white hole.
     expect(comail.skin).toBeTruthy();
     const skin = comail.skin!;
     const darkInputRuleIdx = skin.indexOf('.dark body[data-theme-skin="builtin-comail"] input');
     expect(darkInputRuleIdx).toBeGreaterThan(-1);
     const darkInputRule = skin.slice(darkInputRuleIdx, skin.indexOf('}', darkInputRuleIdx) + 1);
-    expect(darkInputRule).toContain('#053a36');
+    expect(darkInputRule).toContain('var(--color-input)');
     expect(darkInputRule).not.toContain('#ffffff');
   });
 

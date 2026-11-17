@@ -28,8 +28,8 @@ function badgeClassLists(src: string): string[] {
   const re = /className=\{?(?:cn\()?\s*"([^"]*rounded-full[^"]*)"/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(src)) !== null) {
-    // A count badge carries the tiny bold text sizing used for the number.
-    if (/text-\[10px\]/.test(m[1]) && /font-bold/.test(m[1])) out.push(m[1]);
+    // The number in a count badge is bold.
+    if (/font-bold/.test(m[1])) out.push(m[1]);
   }
   return out;
 }

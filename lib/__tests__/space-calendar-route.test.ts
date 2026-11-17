@@ -54,6 +54,114 @@ function tokenClaims(input: RequestInfo | URL, init?: RequestInit): Record<strin
 }
 
 describe('/api/calendar same-origin bridge', () => {
+  it('forwards only the fixed metadata selector through the entitled slot', async () => {
+    const fetcher = vi.fn().mockResolvedValue(Response.json({ events: [], metadata: {} }));
+    vi.stubGlobal('fetch', fetcher);
+    const prefix = 'https://bulwark.test/api/calendar/events?slot=1&after=2026-10-08T00%3A00%3A00Z&before=2026-10-09T00%3A00%3A00Z';
+    const response = await GET(request('GET', `${prefix}&includeMetadata=true`, { cookie: bothSessionCookies() }), { params: Promise.resolve({ seg: ['events'] }) });
+    expect(response.status).toBe(200);
+    expect(new URL(String(fetcher.mock.calls[0][0])).searchParams.get('includeMetadata')).toBe('true');
+    expect(tokenClaims(fetcher.mock.calls[0][0], fetcher.mock.calls[0][1])).toMatchObject({ mailbox: 'bob@example.test' });
+    fetcher.mockClear();
+    for (const query of ['includeMetadata=false', 'includeMetadata=true&includeMetadata=true', 'includeMetadata=True']) {
+      const rejected = await GET(request('GET', `${prefix}&${query}`, { cookie: bothSessionCookies() }), { params: Promise.resolve({ seg: ['events'] }) });
+      expect(rejected.status).toBe(400);
+    }
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+
+  it('forwards actor-private commands only through the selected entitled slot', async () => {
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json({ id: 'event1' }));
+    vi.stubGlobal('fetch', fetcher);
+    const body = JSON.stringify({ requestId: 'private-update-0001', basePersonalRevision: `personal-state-${'a'.repeat(64)}`, patch: { color: 'red' } });
+    for (const enabled of [false, true, false]) {
+      const req = request('PUT', 'https://bulwark.test/api/calendar/events/event1/personal?slot=1', {
+        cookie: bothSessionCookies(true, enabled), fetchSite: 'same-origin', body,
+      });
+      const response = await PUT(req, { params: Promise.resolve({ seg: ['events', 'event1', 'personal'] }) });
+      expect(response.status).toBe(enabled ? 200 : 404);
+    }
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(String(fetcher.mock.calls[0][0])).toBe(`${BASE}/events/event1/personal`);
+    expect(fetcher.mock.calls[0][1]?.body).toBe(body);
+    expect(tokenClaims(...fetcher.mock.calls[0])).toMatchObject({ mailbox: 'bob@example.test' });
+  });
+
+  it.each(['owner-personal', 'member-personal'])('preserves the typed %s consent and fixed ticket route', async (profile) => {
+    const ticket = `https://space-host.test/oauth/calendar/tickets/${'A'.repeat(43)}`;
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json({ error: 'authorization_required', authorizationProfile: profile, credential: 'synthetic-do-not-expose' }, { status: 409 }));
+    vi.stubGlobal('fetch', fetcher);
+    const req = request('GET', 'https://bulwark.test/api/calendar/calendars?slot=1', { cookie: bothSessionCookies() });
+    const response = await GET(req, { params: Promise.resolve({ seg: ['calendars'] }) });
+    expect(await response.json()).toEqual({ error: 'authorization_required', authorizationProfile: profile });
+    fetcher.mockImplementation(async () => Response.json({ status: 'authorization_required', authorizationUrl: ticket }, { status: 202 }));
+    const start = request('POST', 'https://bulwark.test/api/calendar/personal/start?slot=1', {
+      cookie: bothSessionCookies(), fetchSite: 'same-origin', body: '{"requestId":"private-consent-0001"}',
+    });
+    const authorized = await POST(start, { params: Promise.resolve({ seg: ['personal', 'start'] }) });
+    expect(authorized.status).toBe(202);
+    expect(await authorized.json()).toEqual({ status: 'authorization_required', authorizationUrl: ticket });
+    expect(String(fetcher.mock.calls[1][0])).toBe(`${BASE}/personal/start`);
+    expect(tokenClaims(fetcher.mock.calls[1][0], fetcher.mock.calls[1][1])).toMatchObject({ mailbox: 'bob@example.test' });
+  });
+
+  it('forwards public actions and keeps owner-public consent on its distinct start route', async () => {
+    const ticket = `https://space-host.test/oauth/calendar/tickets/${'A'.repeat(43)}`;
+    const rsvpBody = JSON.stringify({
+      requestId: 'public-rsvp-0001',
+      eventUri: 'at://did:plc:organizer/community.lexicon.calendar.event/3m3z2a2b3c4d5',
+      eventCid: 'bafyreiaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      expectedRsvpCid: null,
+      status: 'going',
+    });
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(Response.json({ error: 'authorization_required', authorizationProfile: 'owner-public' }, { status: 409 }))
+      .mockResolvedValueOnce(Response.json({ status: 'authorization_required', authorizationUrl: ticket }, { status: 202 }));
+    vi.stubGlobal('fetch', fetcher);
+
+    const action = request('POST', 'https://bulwark.test/api/calendar/public/rsvps?slot=1', {
+      cookie: bothSessionCookies(), fetchSite: 'same-origin', body: rsvpBody,
+    });
+    const pending = await POST(action, { params: Promise.resolve({ seg: ['public', 'rsvps'] }) });
+
+    expect(pending.status).toBe(409);
+    expect(await pending.json()).toEqual({ error: 'authorization_required', authorizationProfile: 'owner-public' });
+    expect(String(fetcher.mock.calls[0][0])).toBe(`${BASE}/public/rsvps`);
+    expect(fetcher.mock.calls[0][1]?.body).toBe(rsvpBody);
+
+    const startBody = '{"requestId":"public-consent-0001"}';
+    const start = request('POST', 'https://bulwark.test/api/calendar/public/start?slot=1', {
+      cookie: bothSessionCookies(), fetchSite: 'same-origin', body: startBody,
+    });
+    const authorized = await POST(start, { params: Promise.resolve({ seg: ['public', 'start'] }) });
+
+    expect(authorized.status).toBe(202);
+    expect(await authorized.json()).toEqual({ status: 'authorization_required', authorizationUrl: ticket });
+    expect(String(fetcher.mock.calls[1][0])).toBe(`${BASE}/public/start`);
+    expect(fetcher.mock.calls[1][1]?.body).toBe(startBody);
+    expect(tokenClaims(fetcher.mock.calls[1][0], fetcher.mock.calls[1][1])).toMatchObject({ mailbox: 'bob@example.test' });
+  });
+
+  it.each([
+    ['subscriptions', ['subscriptions']],
+    ['public event publication', ['public', 'events']],
+  ] as const)('forwards the fixed %s action route', async (_name, seg) => {
+    const fetcher = vi.fn().mockResolvedValue(Response.json({ uri: 'at://did:plc:member/community.lexicon.calendar.event/3m3z2a2b3c4d5', cid: 'bafyreiaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' }));
+    vi.stubGlobal('fetch', fetcher);
+    const body = '{"requestId":"public-action-0001"}';
+    const suffix = seg.join('/');
+    const req = request('POST', `https://bulwark.test/api/calendar/${suffix}?slot=1`, {
+      cookie: bothSessionCookies(), fetchSite: 'same-origin', body,
+    });
+
+    const response = await POST(req, { params: Promise.resolve({ seg: [...seg] }) });
+
+    expect(response.status).toBe(200);
+    expect(String(fetcher.mock.calls[0][0])).toBe(`${BASE}/${suffix}`);
+    expect(fetcher.mock.calls[0][1]?.body).toBe(body);
+  });
+
   beforeEach(() => {
     routeConfig.calendarEnabled = true;
     routeConfig.demoMode = false;
@@ -323,13 +431,14 @@ describe('/api/calendar same-origin bridge', () => {
     expect(await response.json()).toEqual({ error: 'provider_unavailable' });
   });
 
+  // Allow browser startup and teardown on shared workers; page actions keep their own deadlines.
   it.runIf(process.env.COMAIL_BROWSER_TESTS === '1')('keeps browser account-slot selection bound to each encrypted session', async () => {
     const assertions: Record<string, unknown>[] = [];
     const sessions = sessionTokens();
     const browserRequests: Array<{ method?: string; url?: string; origin?: string; referer?: string; fetchSite?: string }> = [];
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       assertions.push(tokenClaims(input, init));
-      if (String(input).endsWith('/owner/data/start')) {
+      if (String(input).endsWith('/owner/data/start') || String(input).endsWith('/personal/start')) {
         return Response.json({ status: 'authorization_required', authorizationUrl: 'https://space-host.test/oauth/calendar/tickets/abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG' }, { status: 202 });
       }
       return Response.json({ events: [] });
@@ -358,8 +467,7 @@ describe('/api/calendar same-origin bridge', () => {
           headers,
           ...(body !== undefined ? { body } : {}),
         });
-        const seg = url.pathname.endsWith('/calendars') ? ['calendars']
-          : url.pathname.endsWith('/owner/data/start') ? ['owner', 'data', 'start'] : ['events', 'event1'];
+        const seg = url.pathname.split('/').filter(Boolean).slice(2);
         const response = incoming.method === 'GET'
           ? await GET(req, { params: Promise.resolve({ seg }) })
           : incoming.method === 'POST'
@@ -407,11 +515,19 @@ describe('/api/calendar same-origin bridge', () => {
           });
           return response.status;
         };
-        return [list.status, start.status, await send(0), await send(1)];
+        const shared = [list.status, start.status, await send(0), await send(1)];
+        const personalStart = await fetch('/api/calendar/personal/start?slot=1', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requestId: 'private-browser-start' }),
+        });
+        const personalSave = await fetch('/api/calendar/events/event1/personal?slot=1', {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ requestId: 'private-browser-save', basePersonalRevision: `personal-state-${'a'.repeat(64)}`, patch: { color: 'red' } }),
+        });
+        return [...shared, personalStart.status, personalSave.status];
       });
 
-      expect(statuses).toEqual([200, 202, 200, 200]);
-      expect(assertions.map((claims) => claims.mailbox)).toEqual(['alice@example.test', 'alice@example.test', 'alice@example.test', 'bob@example.test']);
+      expect(statuses).toEqual([200, 202, 200, 200, 202, 200]);
+      expect(assertions.map((claims) => claims.mailbox)).toEqual(['alice@example.test', 'alice@example.test', 'alice@example.test', 'bob@example.test', 'bob@example.test', 'bob@example.test']);
       expect(assertions.every((claims) => !('did' in claims) && !('sub' in claims))).toBe(true);
       const [popup] = await Promise.all([page.waitForEvent('popup'), page.locator('#authorize').click()]);
       await popup.waitForLoadState('domcontentloaded');
@@ -425,5 +541,5 @@ describe('/api/calendar same-origin bridge', () => {
       await browser?.close();
       await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     }
-  }, 30_000);
+  }, 90_000);
 });

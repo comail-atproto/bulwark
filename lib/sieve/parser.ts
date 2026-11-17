@@ -144,6 +144,19 @@ function skipBlockComment(s: string, i: number): number {
   return end === -1 ? s.length : end + 2;
 }
 
+// Past a `text:` string: every line up to and including the lone ".".
+function skipMultiLineString(s: string, i: number): number {
+  let line = s.indexOf('\n', i) + 1;
+  if (line === 0) return s.length;
+  while (line < s.length) {
+    const nl = s.indexOf('\n', line);
+    const next = nl === -1 ? s.length : nl + 1;
+    if (s.slice(line, next).replace(/\r?\n$/, '') === '.') return next;
+    line = next;
+  }
+  return s.length;
+}
+
 function skipStatement(s: string, i: number): number {
   while (i < s.length) {
     const c = s[i];
@@ -429,21 +442,40 @@ function parseAtom(raw: string): FilterCondition | null {
     // Header part: accept either a single quoted string or a 2-element list
     // containing exactly Content-Disposition + Content-Type (in any order).
     const single = /^"Content-Disposition"$/.exec(rawHeaders.trim());
-    const listForm = /^\[\s*((?:"(?:[^"\\]|\\.)*"\s*,?\s*)+)\]$/.exec(rawHeaders.trim());
     let headersOk = false;
     if (single) {
       headersOk = true;
-    } else if (listForm) {
-      const inner = listForm[1];
-      const items: string[] = [];
-      const re = /"((?:[^"\\]|\\.)*)"/g;
-      let mm: RegExpExecArray | null;
-      while ((mm = re.exec(inner)) !== null) items.push(unescapeSieveString(mm[1]));
-      const expected = new Set(['Content-Disposition', 'Content-Type']);
-      const got = new Set(items);
-      headersOk =
-        items.length === expected.size &&
-        [...expected].every((h) => got.has(h));
+    } else {
+      const list = rawHeaders.trim();
+      if (list.startsWith('[') && list.endsWith(']')) {
+        const inner = list.slice(1, -1);
+        const items: string[] = [];
+        const re = /"((?:[^"\\]|\\.)*)"/y;
+        let cursor = 0;
+        let valid = true;
+        while (cursor < inner.length) {
+          const next = inner.indexOf('"', cursor);
+          if (next < 0) break;
+          const separator = inner.slice(cursor, next).trim();
+          if (separator !== '' && (items.length === 0 || separator !== ',')) {
+            valid = false;
+            break;
+          }
+          re.lastIndex = next;
+          const match = re.exec(inner);
+          if (!match) {
+            valid = false;
+            break;
+          }
+          items.push(unescapeSieveString(match[1]));
+          cursor = re.lastIndex;
+        }
+        const trailing = inner.slice(cursor).trim();
+        const expected = new Set(['Content-Disposition', 'Content-Type']);
+        headersOk = valid && (trailing === '' || trailing === ',') &&
+          items.length === expected.size && items.every((item) => expected.has(item)) &&
+          new Set(items).size === expected.size;
+      }
     }
     if (!headersOk) return null;
     const tail = parseValueTail(rawValue);
@@ -484,11 +516,13 @@ function parseAtom(raw: string): FilterCondition | null {
     return { field, comparator: part === ':domain' ? 'domain_is' : 'address_is', value };
   }
 
-  m = /^header\s+:(contains|is|matches)\s+"((?:[^"\\]|\\.)*)"\s+([\s\S]+)$/.exec(s);
+  m = /^header\s+:(contains|is|matches|regex)\s+"((?:[^"\\]|\\.)*)"\s+([\s\S]+)$/.exec(s);
   if (m) {
     const [, tag, headerName, rawTail] = m;
     const value = parseValueTail(rawTail);
     if (value === null) return null;
+    // The builder has no "does not match regex".
+    if (tag === 'regex' && negated) return null;
     const { field, headerName: customHeaderName } = normalizeHeaderName(unescapeSieveString(headerName));
 
     let comparator: FilterComparator;
@@ -498,6 +532,9 @@ function parseAtom(raw: string): FilterCondition | null {
       finalValue = value;
     } else if (tag === 'is') {
       comparator = negated ? 'not_is' : 'is';
+      finalValue = value;
+    } else if (tag === 'regex') {
+      comparator = 'regex';
       finalValue = value;
     } else {
       const classified = classifyMatches(value);
@@ -510,11 +547,12 @@ function parseAtom(raw: string): FilterCondition | null {
     return cond;
   }
 
-  m = /^body\s+:(contains|is)\s+([\s\S]+)$/.exec(s);
+  m = /^body\s+:(contains|is|regex)\s+([\s\S]+)$/.exec(s);
   if (m) {
     const value = parseValueTail(m[2]);
     if (value === null) return null;
-    return { field: 'body', comparator: m[1] === 'is' ? 'is' : 'contains', value };
+    const comparator = m[1] === 'is' ? 'is' : m[1] === 'regex' ? 'regex' : 'contains';
+    return { field: 'body', comparator, value };
   }
 
   m = /^size\s+:(over|under)\s+(\d+)$/.exec(s);
@@ -700,14 +738,25 @@ function extractNextcloudRegions(content: string): {
   requires: string[];
 } {
   const marker = NEXTCLOUD_BLOCK_MARKER;
+  // Only a comment line counts. The same text inside a string (a rule's value,
+  // an auto-reply) is data, and taken for a region it would be written back
+  // as live Sieve.
   const positions: number[] = [];
-  let searchFrom = 0;
-  while (true) {
-    const idx = content.indexOf(marker, searchFrom);
-    if (idx === -1) break;
-    const atLineStart = idx === 0 || content[idx - 1] === '\n';
-    if (atLineStart) positions.push(idx);
-    searchFrom = idx + marker.length;
+  let i = 0;
+  while (i < content.length) {
+    const c = content[i];
+    if (c === '"') { i = skipStringLit(content, i); continue; }
+    if (c === '/' && content[i + 1] === '*') { i = skipBlockComment(content, i); continue; }
+    if (c === '#') {
+      if ((i === 0 || content[i - 1] === '\n') && content.startsWith(marker, i)) positions.push(i);
+      i = skipHashComment(content, i);
+      continue;
+    }
+    if (content.slice(i, i + 5).toLowerCase() === 'text:' && !/\w/.test(content[i - 1] ?? '')) {
+      i = skipMultiLineString(content, i);
+      continue;
+    }
+    i++;
   }
 
   if (positions.length < 2) {

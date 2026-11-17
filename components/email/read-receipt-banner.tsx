@@ -18,7 +18,7 @@ export function ReadReceiptBanner({ requestedBy, onSend, onIgnore }: ReadReceipt
   const [state, setState] = useState<'idle' | 'sending' | 'sent'>('idle');
 
   // Matches the host's "External Content" banner row: a round tinted icon chip,
-  // an uppercase eyebrow, a foreground message, and neutral bordered actions.
+  // a small muted label, a foreground message, and neutral bordered actions.
   if (state === 'sent') {
     return (
       <div className="flex items-center gap-3 py-1">
@@ -37,14 +37,14 @@ export function ReadReceiptBanner({ requestedBy, onSend, onIgnore }: ReadReceipt
       </div>
       <div className="flex-1 min-w-0 space-y-2">
         <div>
-          <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+          <div className="text-[0.6875rem] font-semibold text-muted-foreground">
             Read receipt
           </div>
           <div className="text-sm font-medium text-foreground break-words">
             {t('prompt')}
           </div>
           <div className="text-xs text-muted-foreground break-all">
-            Requested by <span className="text-foreground/80">{requestedBy}</span>
+            Requested by <span className="text-foreground">{requestedBy}</span>
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-1.5 pt-0.5">

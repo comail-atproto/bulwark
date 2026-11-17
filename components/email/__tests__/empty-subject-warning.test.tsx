@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import React from 'react';
 import { EmailComposer } from '../email-composer';
 import { useAuthStore } from '@/stores/auth-store';
+import { useSettingsStore } from '@/stores/settings-store';
 
 // ─── Heavy component mocks (mirrors reply-addressing.test.tsx) ────────────────
 
@@ -141,6 +142,14 @@ vi.mock('@/stores/toast-store', () => ({
 }));
 
 vi.mock('@/lib/plugin-hooks', () => ({
+  identityHooks: {
+    onSignatureRender: { size: 0, transform: async (value: unknown) => value },
+    onIdentitySelect: { size: 0, emit: async () => {} },
+  },
+  templateHooks: {
+    onTemplateRender: { size: 0, transform: async (value: unknown) => value },
+    onTemplateApply: { size: 0, emit: async () => {} },
+  },
   emailHooks: {
     onComposerOpen: { call: async () => [] },
     onRecipientChange: { call: async () => [] },
@@ -148,8 +157,8 @@ vi.mock('@/lib/plugin-hooks', () => ({
     onRecipientChipsChange: { transform: async (chips: unknown) => chips },
     onDraftChange: { emit: () => {} },
     onBeforeDraftAutoSave: { transform: async (draft: unknown) => draft },
-    onBeforeEmailSend: { intercept: async () => true },
-    onComposeSend: { intercept: async () => true },
+    onBeforeEmailSend: { intercept: async () => true, interceptOutcome: async () => 'allowed' },
+    onComposeSend: { takeOver: async () => 'default' },
     onTransformOutgoingEmail: { transform: async (email: unknown) => email },
   },
   contactHooks: {
@@ -252,6 +261,27 @@ describe('composer empty subject warning', () => {
     await waitFor(() =>
       expect(updateSetting).toHaveBeenCalledWith('emptySubjectWarningEnabled', false)
     );
+  });
+
+  it('does not ask again after Send anyway and a trip back to add an attachment', async () => {
+    useSettingsStore.setState({ attachmentReminderEnabled: true, attachmentReminderKeywords: ['hello'] } as never);
+    try {
+      const onSend = vi.fn();
+      render(<EmailComposer initialData={DRAFT_WITHOUT_SUBJECT} onSend={onSend} />);
+
+      fireEvent.click(sendButton());
+      fireEvent.click(await screen.findByText('empty_subject.send_anyway'));
+      // The body says "Hello", so the attachment reminder stops the send.
+      fireEvent.click(await screen.findByText('forgot_attachment.back'));
+      await waitFor(() => expect(screen.queryByText('forgot_attachment.title')).not.toBeInTheDocument());
+
+      fireEvent.click(sendButton());
+
+      expect(await screen.findByText('forgot_attachment.title')).toBeInTheDocument();
+      expect(screen.queryByText('empty_subject.title')).not.toBeInTheDocument();
+    } finally {
+      useSettingsStore.setState({ attachmentReminderEnabled: false, attachmentReminderKeywords: [] } as never);
+    }
   });
 
   it('goes back to editing without sending', async () => {

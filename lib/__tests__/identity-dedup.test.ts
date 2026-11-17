@@ -1,36 +1,21 @@
 import { describe, it, expect } from 'vitest';
-import { isSameIdentity } from '@/lib/account-utils';
+import { accountRowText } from '@/lib/account-utils';
 
-describe('isSameIdentity', () => {
-  it('returns true when name and email are identical', () => {
-    expect(isSameIdentity('example@example.com', 'example@example.com')).toBe(true);
-  });
-
-  it('returns true when name and email differ only by case', () => {
-    expect(isSameIdentity('Example@Example.com', 'example@example.com')).toBe(true);
-  });
-
-  it('returns true when name and email differ only by whitespace', () => {
-    expect(isSameIdentity('  example@example.com  ', 'example@example.com')).toBe(true);
-  });
-
-  it('returns false when a real display name differs from email', () => {
-    expect(isSameIdentity('Example User', 'example@example.com')).toBe(false);
-  });
-
-  it('returns false when name is a different email address', () => {
-    expect(isSameIdentity('alice@example.com', 'example@example.com')).toBe(false);
-  });
-
-  it('returns true when both are empty', () => {
-    expect(isSameIdentity('', '')).toBe(true);
-  });
-
-  it('returns true when name is empty and email is whitespace only', () => {
-    expect(isSameIdentity('  ', ' ')).toBe(true);
-  });
-
-  it('returns false when name is a label like "Alice" and email is "alice@example.com"', () => {
-    expect(isSameIdentity('Alice', 'alice@example.com')).toBe(false);
+describe('account identity display', () => {
+  it.each([
+    ['identical name and address', 'example@example.com', 'example@example.com', null],
+    ['case-insensitive duplicate', 'Example@Example.com', 'example@example.com', null],
+    ['whitespace around duplicate', '  example@example.com  ', 'example@example.com', null],
+    ['real display name', 'Example User', 'example@example.com', 'example@example.com'],
+    ['different email as name', 'alice@example.com', 'example@example.com', 'example@example.com'],
+    ['empty name and address', '', '', null],
+    ['whitespace-only name and address', '  ', ' ', null],
+    ['label distinct from address', 'Alice', 'alice@example.com', 'alice@example.com'],
+  ] as const)('%s', (_case, name, email, subtitle) => {
+    const account = { id: 'account', displayName: name, label: name, email, username: email };
+    expect(accountRowText(account, [account])).toEqual({
+      title: subtitle === null ? email : name,
+      subtitle,
+    });
   });
 });

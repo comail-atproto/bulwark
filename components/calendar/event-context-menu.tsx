@@ -8,16 +8,18 @@ import {
 } from "@/components/ui/context-menu";
 import {
   Pencil,
+  CopyPlus,
   Copy,
   Download,
-  ClipboardCopy,
+  Video,
   Link as LinkIcon,
-  CalendarArrowUp as CalendarLinkIcon,
   Trash2,
+  Printer,
 } from "@/components/icons";
 import type { CalendarEvent } from "@/lib/jmap/types";
 import { buildCalendarPath } from "@/lib/deep-links";
 import { useCopyLink } from "@/hooks/use-copy-link";
+import { isPublicAtprotoEvent } from "@/lib/calendar-editability";
 import { findMeetingLink } from "@/lib/event-links";
 
 interface Position {
@@ -37,6 +39,10 @@ interface EventContextMenuProps {
   onCopyTitle: () => void;
   onCopyMeetingLink?: () => void;
   onDelete: () => void;
+  /** Prints the event on a sheet of its own. */
+  onPrint?: () => void;
+  /** False for an event the user can't change (a birthday, a subscription, a read-only share): no Edit or Delete. */
+  editable?: boolean;
 }
 
 export function EventContextMenu({
@@ -51,9 +57,12 @@ export function EventContextMenu({
   onCopyTitle,
   onCopyMeetingLink,
   onDelete,
+  onPrint,
+  editable = true,
 }: EventContextMenuProps) {
   const t = useTranslations("calendar");
   const tDeepLink = useTranslations("deep_link");
+  const tCommon = useTranslations("common");
   const copyLink = useCopyLink();
 
   const handle = (fn: () => void) => () => {
@@ -61,12 +70,13 @@ export function EventContextMenu({
     onClose();
   };
 
+  const isPublicSource = isPublicAtprotoEvent(event);
   const hasMeetingLink = !!findMeetingLink(event);
 
   return (
     <ContextMenu ref={menuRef} isOpen={isOpen} position={position} onClose={onClose}>
-      <ContextMenuItem icon={Pencil} label={t("events.edit")} onClick={handle(onEdit)} />
-      <ContextMenuItem icon={Copy} label={t("events.duplicate")} onClick={handle(onDuplicate)} />
+      {editable && !isPublicSource && <ContextMenuItem icon={Pencil} label={t("events.edit")} onClick={handle(onEdit)} />}
+      {!isPublicSource && <ContextMenuItem icon={CopyPlus} label={t("events.duplicate")} onClick={handle(onDuplicate)} />}
       <ContextMenuSeparator />
       <ContextMenuItem
         icon={Download}
@@ -74,13 +84,13 @@ export function EventContextMenu({
         onClick={handle(onExportICS)}
       />
       <ContextMenuItem
-        icon={ClipboardCopy}
+        icon={Copy}
         label={t("events.copy_title")}
         onClick={handle(onCopyTitle)}
       />
       {hasMeetingLink && onCopyMeetingLink && (
         <ContextMenuItem
-          icon={LinkIcon}
+          icon={Video}
           label={t("events.copy_link")}
           onClick={handle(onCopyMeetingLink)}
         />
@@ -88,7 +98,7 @@ export function EventContextMenu({
       {/* Permalink into Bulwark (#733) - distinct from the meeting URL above,
           which points at whatever conferencing tool the organiser used. */}
       <ContextMenuItem
-        icon={CalendarLinkIcon}
+        icon={LinkIcon}
         label={tDeepLink("copy_event")}
         onClick={handle(() => {
           void copyLink(buildCalendarPath({
@@ -99,13 +109,18 @@ export function EventContextMenu({
           }));
         })}
       />
-      <ContextMenuSeparator />
-      <ContextMenuItem
-        icon={Trash2}
-        label={t("events.delete")}
-        onClick={handle(onDelete)}
-        destructive
-      />
+      {onPrint && <ContextMenuItem icon={Printer} label={tCommon("print")} onClick={handle(onPrint)} />}
+      {editable && !isPublicSource && (
+        <>
+          <ContextMenuSeparator />
+          <ContextMenuItem
+            icon={Trash2}
+            label={t("events.delete")}
+            onClick={handle(onDelete)}
+            destructive
+          />
+        </>
+      )}
     </ContextMenu>
   );
 }

@@ -1,12 +1,15 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useTranslations } from 'next-intl';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import type { Identity, EmailAddress } from '@/lib/jmap/types';
 import { sanitizeSignatureHtml, sanitizeSignatureHtmlForDisplay } from '@/lib/email-sanitization';
 import { getEmailValidationError, validateEmailList } from '@/lib/validation';
+import { getPlainTextSignature } from '@/lib/signature-utils';
+import { useOrgSignatureSetup } from '@/hooks/use-org-signature';
+import { OrgLockedNote } from '@/components/settings/org-locked-note';
 import { useConfig } from '@/hooks/use-config';
 
 // Stalwarts JMAP Identity/set caps signature fields at 2047 UTF-8 bytes
@@ -47,12 +50,15 @@ interface IdentityFormProps {
   identity?: Identity;
   onSave: (data: IdentityFormData) => Promise<void>;
   onCancel: () => void;
+  /** Told whenever the form starts or stops holding unsaved input. */
+  onDirtyChange?: (dirty: boolean) => void;
 }
 
-export function IdentityForm({ identity, onSave, onCancel }: IdentityFormProps) {
+export function IdentityForm({ identity, onSave, onCancel, onDirtyChange }: IdentityFormProps) {
   const t = useTranslations('identities.form');
   const tValidation = useTranslations('identities.validation_errors');
   const tDisplay = useTranslations('identities.display');
+  const tOrg = useTranslations('org_signature');
   const isEditing = !!identity;
   // When identity management is disabled (comail prod, chainlink #1790) the
   // From-address is constrained to the relay-provisioned alias set: the email
@@ -80,6 +86,25 @@ export function IdentityForm({ identity, onSave, onCancel }: IdentityFormProps) 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
 
+  // The admin's `signature` restriction: locked shows the signature this
+  // address sends with, read-only; hidden shows no signature editor.
+  const org = useOrgSignatureSetup({ name: formData.name, email: formData.email || identity?.email || '' });
+  const signatureHidden = org.restriction.hidden;
+  const signatureLocked = org.restriction.locked && !signatureHidden;
+  const signatureEditable = !signatureHidden && !signatureLocked;
+
+  const dirty =
+    formData.name !== (identity?.name || '') ||
+    formData.email !== (identity?.email || '') ||
+    (formData.textSignature || '') !== (identity?.textSignature || '') ||
+    (formData.htmlSignature || '') !== (identity?.htmlSignature || '') ||
+    replyToInput !== (identity?.replyTo?.map(a => a.email).join(', ') || '') ||
+    bccInput !== (identity?.bcc?.map(a => a.email).join(', ') || '');
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
+
   const parseEmailList = (input: string): EmailAddress[] | undefined => {
     if (!input.trim()) return undefined;
 
@@ -90,9 +115,8 @@ export function IdentityForm({ identity, onSave, onCancel }: IdentityFormProps) 
   const validate = (): boolean => {
     const newErrors: Record<string, string> = {};
 
-    if (!formData.name.trim()) {
-      newErrors.name = t('name_required');
-    }
+    // The display name may be empty (RFC 8621 §6, default ""): the From line
+    // then carries only the address.
 
     // Use secure email validation
     const emailError = getEmailValidationError(formData.email);
@@ -134,11 +158,17 @@ export function IdentityForm({ identity, onSave, onCancel }: IdentityFormProps) 
       const trimmedHtml = formData.htmlSignature?.trim() ?? '';
       const sanitizedData: IdentityFormData = {
         ...formData,
+        name: formData.name.trim() ? formData.name : '',
         textSignature: trimmedText ? formData.textSignature : null,
         htmlSignature: trimmedHtml ? sanitizeSignatureHtml(formData.htmlSignature!) : null,
         replyTo: parseEmailList(replyToInput) ?? null,
         bcc: parseEmailList(bccInput) ?? null,
       };
+      // A locked or hidden signature leaves the identity's own as it is.
+      if (!signatureEditable) {
+        delete sanitizedData.textSignature;
+        delete sanitizedData.htmlSignature;
+      }
 
       await onSave(sanitizedData);
     } finally {
@@ -151,7 +181,7 @@ export function IdentityForm({ identity, onSave, onCancel }: IdentityFormProps) 
       {/* Name */}
       <div>
         <label htmlFor="identity-name" className="block text-sm font-medium mb-1">
-          {t('name_label')} <span className="text-destructive">*</span>
+          {t('name_label')}
         </label>
         <Input
           id="identity-name"
@@ -273,6 +303,14 @@ export function IdentityForm({ identity, onSave, onCancel }: IdentityFormProps) 
         )}
       </div>
 
+      {signatureLocked && (
+        <LockedSignature
+          html={org.signature ? org.signature.html : formData.htmlSignature ?? ''}
+          text={org.signature ? org.signature.text : formData.textSignature ?? ''}
+        />
+      )}
+
+      {signatureEditable && (<>
       {/* Text Signature */}
       <div>
         <label htmlFor="identity-text-sig" className="block text-sm font-medium mb-1">
@@ -286,9 +324,14 @@ export function IdentityForm({ identity, onSave, onCancel }: IdentityFormProps) 
           disabled={isSubmitting}
           aria-label={t('text_signature_label')}
           aria-describedby="identity-text-sig-counter"
-          className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground transition-all duration-200 placeholder:text-muted-foreground hover:border-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-ring disabled:cursor-not-allowed disabled:opacity-50"
+          className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground transition-all duration-200 placeholder:text-muted-foreground hover:border-muted-foreground focus-visible:outline-hidden focus-visible:border-ring disabled:cursor-not-allowed disabled:opacity-50"
         />
         <SignatureByteCounter id="identity-text-sig-counter" value={formData.textSignature || ''} />
+        {org.signature && (
+          <p className="text-xs text-muted-foreground mt-1" data-testid="identity-org-signature-default">
+            {tOrg('identity_default')}
+          </p>
+        )}
       </div>
 
       {/* HTML Signature */}
@@ -304,7 +347,7 @@ export function IdentityForm({ identity, onSave, onCancel }: IdentityFormProps) 
           disabled={isSubmitting}
           aria-label={t('html_signature_label')}
           aria-describedby="identity-html-sig-counter"
-          className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground font-mono transition-all duration-200 placeholder:text-muted-foreground hover:border-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-ring disabled:cursor-not-allowed disabled:opacity-50"
+          className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground font-mono transition-all duration-200 placeholder:text-muted-foreground hover:border-muted-foreground focus-visible:outline-hidden focus-visible:border-ring disabled:cursor-not-allowed disabled:opacity-50"
         />
         <SignatureByteCounter id="identity-html-sig-counter" value={formData.htmlSignature || ''} />
         {formData.htmlSignature && (
@@ -318,6 +361,7 @@ export function IdentityForm({ identity, onSave, onCancel }: IdentityFormProps) 
           </div>
         )}
       </div>
+      </>)}
 
       {/* Actions */}
       <div className="flex justify-end gap-2 pt-4">
@@ -338,6 +382,28 @@ export function IdentityForm({ identity, onSave, onCancel }: IdentityFormProps) 
         </Button>
       </div>
     </form>
+  );
+}
+
+/** The signature an address sends with when the admin locked signatures, read-only. */
+function LockedSignature({ html, text }: { html: string; text: string }) {
+  const t = useTranslations('org_signature');
+  const preview = html.trim() ? sanitizeSignatureHtmlForDisplay(html) : '';
+  const plain = preview ? '' : getPlainTextSignature({ textSignature: text, htmlSignature: html });
+  return (
+    <div data-testid="identity-locked-signature">
+      <span className="block text-sm font-medium mb-1">{t('identity_signature_label')}</span>
+      <div className="p-2 border rounded bg-muted text-sm break-words min-w-0">
+        {preview ? (
+          <div dangerouslySetInnerHTML={{ __html: preview }} />
+        ) : plain ? (
+          <div className="whitespace-pre-wrap">{plain}</div>
+        ) : (
+          <div className="text-muted-foreground">{t('identity_no_signature')}</div>
+        )}
+      </div>
+      <OrgLockedNote className="mt-1" />
+    </div>
   );
 }
 

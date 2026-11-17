@@ -1,0 +1,156 @@
+import { fireEvent, render, screen, within } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { AccessibilitySettings } from '../accessibility-settings';
+import { useSettingsStore } from '@/stores/settings-store';
+import { usePolicyStore } from '@/stores/policy-store';
+import { DEFAULT_POLICY } from '@/lib/admin/types';
+import { ACCESSIBILITY_PRESET_IDS, presetChanges } from '@/lib/accessibility-presets';
+
+// Labels are their keys; plural/ICU arguments are appended so tests can see them.
+vi.mock('next-intl', () => ({
+  useTranslations: (ns?: string) => (key: string, values?: Record<string, unknown>) =>
+    `${ns ? `${ns}.` : ''}${key}${values ? ` ${JSON.stringify(values)}` : ''}`,
+  useLocale: () => 'de',
+}));
+
+const settings = () => useSettingsStore.getState();
+
+beforeEach(() => {
+  localStorage.clear();
+  usePolicyStore.setState({ policy: { ...DEFAULT_POLICY }, loaded: true });
+  settings().resetToDefaults();
+});
+
+function presetButton(name: string) {
+  return screen.getByRole('button', { name: new RegExp(`settings\\.accessibility\\.presets\\.${name}\\.label`) });
+}
+
+describe('accessibility presets', () => {
+  it('changes several settings at once and lists what changed', () => {
+    render(<AccessibilitySettings />);
+    fireEvent.click(presetButton('low-vision'));
+    expect(settings().fontSize).toBe('xx-large');
+    expect(settings().contrast).toBe('more');
+    expect(settings().largeCursor).toBe(true);
+    const summary = screen.getByTestId('preset-summary');
+    expect(within(summary).getByText('settings.accessibility.text_size.label')).toBeTruthy();
+    expect(within(summary).getByText('settings.accessibility.contrast.label')).toBeTruthy();
+  });
+
+  it('undoes exactly what the preset changed', () => {
+    settings().updateSetting('fontSize', 'large');
+    settings().updateSetting('underlineLinks', true);
+    render(<AccessibilitySettings />);
+    fireEvent.click(presetButton('low-vision'));
+    expect(settings().fontSize).toBe('xx-large');
+    fireEvent.click(screen.getByRole('button', { name: 'settings.accessibility.presets.undo' }));
+    expect(settings().fontSize).toBe('large');
+    // Already on before the preset; the undo must not switch it off.
+    expect(settings().underlineLinks).toBe(true);
+    expect(settings().contrast).toBe('system');
+  });
+
+  it('draws each preset on its card without adding to the name screen readers hear', () => {
+    render(<AccessibilitySettings />);
+    for (const id of ACCESSIBILITY_PRESET_IDS) {
+      // jsdom joins the two spans without a space, so compare without any.
+      const expected = `settings.accessibility.presets.${id}.labelsettings.accessibility.presets.${id}.description`;
+      const button = screen.getByRole('button', { name: (name) => name.replace(/\s/g, '') === expected });
+      const preview = within(button).getByTestId(`preset-preview-${id}`);
+      expect(preview.getAttribute('aria-hidden')).toBe('true');
+      expect(preview.querySelector('span, svg')).toBeTruthy();
+    }
+  });
+
+  it('combines presets: a second one keeps what the first set', () => {
+    render(<AccessibilitySettings />);
+    fireEvent.click(presetButton('dyslexia'));
+    fireEvent.click(presetButton('motion'));
+    expect(settings().appFont).toBe('atkinson');
+    expect(settings().reduceMotion).toBe('on');
+  });
+
+  it('offers to show the quick button after a preset', () => {
+    render(<AccessibilitySettings />);
+    fireEvent.click(presetButton('motor'));
+    fireEvent.click(screen.getByRole('button', { name: 'settings.accessibility.presets.show_button' }));
+    expect(settings().showAccessibilityButton).toBe(true);
+  });
+
+  it('skips settings the admin locked and toast durations under the minimum', () => {
+    const state = { ...settings() } as unknown as Record<string, unknown>;
+    const changes = presetChanges('hearing', state, (key) => key === 'emailNotificationSound');
+    expect(changes.map((c) => c.key)).not.toContain('emailNotificationSound');
+
+    const motor = presetChanges('motor', state, () => false, (key, value) => key !== 'toastDuration' || (value as number) >= 60);
+    expect(motor.map((c) => c.key)).not.toContain('toastDuration');
+  });
+});
+
+describe('reset', () => {
+  it('puts the accessibility settings back to their defaults', () => {
+    settings().updateSetting('appFont', 'lexend');
+    settings().updateSetting('fontSize', 'huge');
+    settings().updateSetting('disableThreading', true);
+    render(<AccessibilitySettings />);
+    fireEvent.click(screen.getByRole('button', { name: 'settings.accessibility.reset.button' }));
+    expect(settings().appFont).toBe('default');
+    expect(settings().fontSize).toBe('medium');
+    // A shared everyday preference is not an accessibility setting to reset.
+    expect(settings().disableThreading).toBe(true);
+  });
+
+  it("gives back the organisation's defaults instead of writing Bulwark's as the user's choice", () => {
+    usePolicyStore.setState({ policy: { ...DEFAULT_POLICY, defaults: { appFont: 'atkinson', fontSize: 'large' } }, loaded: true });
+    settings().applyAdminPolicy();
+    settings().updateSetting('appFont', 'lexend');
+    settings().updateSetting('fontSize', 'huge');
+    render(<AccessibilitySettings />);
+    fireEvent.click(screen.getByRole('button', { name: 'settings.accessibility.reset.button' }));
+    expect(settings().appFont).toBe('atkinson');
+    expect(settings().fontSize).toBe('large');
+    // Nothing is left marked as chosen, so a later change of the default reaches the user.
+    expect(settings().explicitSettings).not.toContain('appFont');
+    expect(settings().explicitSettings).not.toContain('fontSize');
+  });
+
+  it('also resets the plain text font and the send confirmation', () => {
+    settings().updateSetting('plainTextFont', 'mono');
+    settings().updateSetting('sendConfirmation', true);
+    render(<AccessibilitySettings />);
+    fireEvent.click(screen.getByRole('button', { name: 'settings.accessibility.reset.button' }));
+    expect(settings().plainTextFont).toBe('sans');
+    expect(settings().sendConfirmation).toBe(false);
+  });
+});
+
+describe('toast duration', () => {
+  it('only offers durations at or above the admin minimum', () => {
+    usePolicyStore.setState({ policy: { ...DEFAULT_POLICY, restrictions: { toastDuration: { min: 20 } } }, loaded: true });
+    render(<AccessibilitySettings />);
+    const select = screen.getAllByRole('combobox').find((el) =>
+      Array.from((el as HTMLSelectElement).options).some((o) => o.textContent?.includes('until_closed')),
+    ) as HTMLSelectElement;
+    const values = Array.from(select.options).map((o) => o.value);
+    expect(values).toEqual(['20', '60', '0']);
+  });
+});
+
+describe('read aloud voice', () => {
+  const voice = (name: string, lang: string) => ({ name, lang, voiceURI: `uri:${name}`, default: false, localService: true });
+
+  it('offers the browser default and the voices for the interface language', () => {
+    const voices = [voice('Anna', 'de-DE'), voice('Daniel', 'en-GB'), voice('Markus', 'de-AT')];
+    vi.stubGlobal('SpeechSynthesisUtterance', class {});
+    vi.stubGlobal('speechSynthesis', { getVoices: () => voices, addEventListener() {}, removeEventListener() {} });
+    try {
+      render(<AccessibilitySettings />);
+      const select = screen.getByRole('combobox', { name: 'settings.accessibility.read_aloud_voice.label' }) as HTMLSelectElement;
+      expect(Array.from(select.options).map((o) => o.textContent)).toEqual(['settings.accessibility.read_aloud_voice.default', 'Anna', 'Markus']);
+      fireEvent.change(select, { target: { value: 'uri:Markus' } });
+      expect(settings().readAloudVoice).toBe('uri:Markus');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});

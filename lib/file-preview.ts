@@ -104,6 +104,9 @@ const EXT_TO_MIME: Record<string, string> = {
 
 const GENERIC_MIME_TYPES = new Set(['', 'application/octet-stream', 'binary/octet-stream']);
 
+// Kinds the preview renders from the file's text, not from a blob: URL.
+const DOCUMENT_KINDS = new Set<FilePreviewKind>(['html', 'eml', 'text', 'markdown']);
+
 // Blob types the browser actually shows in each blob-backed preview.
 const RENDERABLE_FOR_KIND: Partial<Record<FilePreviewKind, (mimeType: string) => boolean>> = {
   pdf: (t) => t === 'application/pdf',
@@ -127,7 +130,12 @@ export function previewBlobType(name: string | undefined, declaredType?: string,
   const declared = normalizeMimeType(declaredType);
   const served = normalizeMimeType(blobType);
   const fromName = EXT_TO_MIME[getExtension(name)];
-  const renderable = RENDERABLE_FOR_KIND[getFilePreviewKind(name, declared || served)];
+  const kind = getFilePreviewKind(name, declared || served);
+  // Documents are previewed from their text (sanitised, in a srcdoc frame),
+  // never from a blob: URL. Should one still be minted for them, it must be
+  // nothing a browser would render as the webmail origin.
+  if (DOCUMENT_KINDS.has(kind)) return 'application/octet-stream';
+  const renderable = RENDERABLE_FOR_KIND[kind];
   if (renderable) {
     const match = [declared, served, fromName].find((t): t is string => !!t && renderable(t));
     if (match) return match;
@@ -149,7 +157,11 @@ const INLINE_PREVIEW_UNSAFE_MIME_TYPES = new Set([
 // XML variants would execute in our origin. Only an explicit allowlist of inert
 // types is permitted; everything else must be downloaded.
 export function isMimeTypeSafeForInlinePreview(type?: string): boolean {
-  const mimeType = type?.split(';')[0]?.trim().toLowerCase() || '';
+  // new Blob() drops a type with any character outside U+0020-U+007E to "",
+  // and Firefox sniffs an untyped blob: document. A winmail.dat MIME tag is
+  // free text, so judge only types the Blob keeps as written.
+  if (!type || !/^[\x20-\x7e]+$/.test(type)) return false;
+  const mimeType = type.split(';')[0]?.trim().toLowerCase() || '';
   if (!mimeType) return false;
   if (INLINE_PREVIEW_UNSAFE_MIME_TYPES.has(mimeType)) return false;
   if (INLINE_PREVIEW_SAFE_MIME_TYPES.has(mimeType)) return true;

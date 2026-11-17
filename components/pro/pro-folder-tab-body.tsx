@@ -4,9 +4,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
 import { Folder, Loader2, Paperclip, RefreshCw, Star } from "@/components/icons";
 import { cn, cleanPreview, formatDate } from "@/lib/utils";
+import { emailDisplayDate } from "@/lib/email-date";
 import { localizeMailboxName } from "@/lib/mailbox-label";
 import { EmailViewer } from "@/components/email/email-viewer";
 import { ProEmailView } from "@/components/pro/pro-email-tab-body";
+import { RetentionNotice } from "@/components/email/retention-notice";
 import { useAuthStore } from "@/stores/auth-store";
 import { useEmailStore } from "@/stores/email-store";
 import { getMessageListOrderFor, useSettingsStore } from "@/stores/settings-store";
@@ -14,6 +16,8 @@ import { useProTabStore, type ProFolderTabData } from "@/stores/pro-tab-store";
 import { useDeviceDetection } from "@/hooks/use-media-query";
 import { usePaneId } from "@/hooks/use-pane-context";
 import type { Email, Mailbox } from "@/lib/jmap/types";
+import { emailHooks } from "@/lib/plugin-hooks";
+import { scheduleAutoMarkAsRead } from "@/lib/mark-as-read-delay";
 
 interface ProFolderTabBodyProps {
   tabId: string;
@@ -36,6 +40,7 @@ export function ProFolderTabBody({ tabId, data }: ProFolderTabBodyProps) {
   const tSidebar = useTranslations('sidebar');
 
   const activeClient = useAuthStore((s) => s.client);
+  const activeAccountId = useAuthStore((s) => s.activeAccountId);
   const getClientForAccount = useAuthStore((s) => s.getClientForAccount);
   const activeMailboxes = useEmailStore((s) => s.mailboxes);
   const accountMailboxes = useEmailStore((s) => s.accountMailboxes);
@@ -49,6 +54,10 @@ export function ProFolderTabBody({ tabId, data }: ProFolderTabBodyProps) {
     () => (data.accountId ? getClientForAccount(data.accountId) ?? activeClient : activeClient),
     [data.accountId, getClientForAccount, activeClient],
   );
+  // The login `client` belongs to. A message of this folder is read again
+  // through it, and a draft reopened from it is saved over and removed
+  // through it: the same ids name other messages on another server.
+  const clientLogin = (data.accountId && getClientForAccount(data.accountId) ? data.accountId : activeAccountId) ?? undefined;
 
   // The folder's metadata, resolved from whichever account's mailbox list it
   // was dragged from. Shared folders are namespaced in the store, so JMAP
@@ -118,32 +127,51 @@ export function ProFolderTabBody({ tabId, data }: ProFolderTabBodyProps) {
     }
   }, [hasMore, isLoadingMore, isLoading, loadPage, emails.length]);
 
-  const markRowAsRead = useCallback((email: Email) => {
+  const markRowAsRead = useCallback(async (email: Email) => {
     if (!client || email.keywords?.$seen) return;
+    // Straight to the client: the store's markAsRead only serves emails in
+    // its own (global) list, which this tab's rows are not part of. So the
+    // plugin hooks the store action fires are fired here.
+    if (emailHooks.onBeforeEmailReadStateChange.size > 0
+      && !(await emailHooks.onBeforeEmailReadStateChange.intercept({ emailIds: [email.id], read: true }))) {
+      return;
+    }
     setEmails((prev) => prev.map((e) => e.id === email.id
       ? { ...e, keywords: { ...e.keywords, $seen: true } }
       : e));
-    // Straight to the client: the store's markAsRead only serves emails in
-    // its own (global) list, which this tab's rows are not part of.
-    void client.markAsRead(email.id, true, jmapAccountId).catch((err) => {
+    try {
+      await client.markAsRead(email.id, true, jmapAccountId);
+      void emailHooks.onEmailReadStateChange.emit({ emailIds: [email.id], read: true });
+    } catch (err) {
       console.error('Mark as read failed:', err);
-    });
+    }
   }, [client, jmapAccountId]);
 
   const openAsEmailTab = useCallback((email: Email, reuseReader: boolean) => {
     useProTabStore.getState().openEmailTab(
       {
-        accountId: email.accountId ?? '',
+        accountId: jmapAccountId ?? '',
+        clientAccountId: clientLogin,
         emailId: email.id,
         mailboxId: data.mailboxId,
         title: email.subject?.trim() || t('email_composer.new_message'),
       },
       { pane: paneId ?? 'main', reuseReader },
     );
-  }, [data.mailboxId, paneId, t]);
+  }, [jmapAccountId, clientLogin, data.mailboxId, paneId, t]);
+
+  // Opening a row marks it read on the user's markAsReadDelay, like the
+  // reading pane does; a pending delayed mark is dropped when another row is
+  // opened or the tab goes away.
+  const cancelRowReadRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => cancelRowReadRef.current?.(), []);
 
   const handleRowClick = useCallback((email: Email) => {
-    markRowAsRead(email);
+    cancelRowReadRef.current?.();
+    cancelRowReadRef.current = scheduleAutoMarkAsRead(
+      useSettingsStore.getState().markAsReadDelay,
+      () => void markRowAsRead(email),
+    );
     if (isMobile) {
       // No room for a reading pane - promote to a dedicated email tab.
       openAsEmailTab(email, true);
@@ -178,9 +206,10 @@ export function ProFolderTabBody({ tabId, data }: ProFolderTabBodyProps) {
           title={t('common.refresh')}
           aria-label={t('common.refresh')}
         >
-          <RefreshCw className={cn("h-3.5 w-3.5", isLoading && "animate-spin")} />
+          <RefreshCw className={cn("h-3.5 w-3.5", isLoading && "animate-spin [animation-direction:reverse]")} />
         </button>
       </div>
+      <RetentionNotice role={mailboxRole} accountId={clientLogin ?? null} />
 
       <div className="flex-1 overflow-y-auto" onScroll={handleScroll}>
         {isLoading && emails.length === 0 ? (
@@ -226,7 +255,7 @@ export function ProFolderTabBody({ tabId, data }: ProFolderTabBodyProps) {
                       {who}
                     </span>
                     <span className="flex-shrink-0 text-xs text-muted-foreground">
-                      {formatDate(email.receivedAt)}
+                      {formatDate(emailDisplayDate(email))}
                     </span>
                   </div>
                   <div className="mt-0.5 flex items-center gap-1.5">
@@ -272,6 +301,7 @@ export function ProFolderTabBody({ tabId, data }: ProFolderTabBodyProps) {
           key={selectedEmailId}
           emailId={selectedEmailId}
           client={client}
+          clientAccountId={clientLogin}
           accountId={jmapAccountId}
           onClose={handleViewerClose}
           className="min-w-0 flex-1"

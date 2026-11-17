@@ -1,10 +1,10 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useMemo } from "react";
 import { useTranslations } from "next-intl";
-import { Folder, FolderOpen, FileText, FileCode, ImageIcon, FileAudio, File, Home, ChevronRight, ChevronDown } from "@/components/icons";
+import { Folder, FileText, FileCode, ImageIcon, FileAudio, File } from "@/components/icons";
 import { SettingsSection, SettingItem, ToggleSwitch, RadioGroup } from "./settings-section";
-import { loadFilesSettings, saveFilesSettings, type FilesSettings, type FolderLayout } from "@/components/files/files-settings-dialog";
+import { useFilesSettings, type FilesSettings } from "@/components/files/files-settings";
 import { cn } from "@/lib/utils";
 import { withBasePath } from "@/lib/browser-navigation";
 import { useConfig } from "@/hooks/use-config";
@@ -65,7 +65,6 @@ function FilesSettingsPreview({ settings }: { settings: FilesSettings }) {
   const sortedFiles = useMemo(() => {
     let files = SAMPLE_FILES.map((f) => (f.thumbnailUrl ? { ...f, thumbnailUrl } : f)).filter((f) => {
       if (!settings.showHiddenFiles && f.hidden) return false;
-      if (settings.folderLayout === "sidebar" && f.isFolder) return false;
       return true;
     });
 
@@ -83,11 +82,11 @@ function FilesSettingsPreview({ settings }: { settings: FilesSettings }) {
     });
 
     return files;
-  }, [settings.showHiddenFiles, settings.folderLayout, settings.defaultSortKey, settings.defaultSortDir, thumbnailUrl]);
+  }, [settings.showHiddenFiles, settings.defaultSortKey, settings.defaultSortDir, thumbnailUrl]);
 
   const listView = (
     <div className="flex-1 min-w-0 overflow-hidden">
-      <div className="flex items-center gap-3 px-2 py-1 text-[10px] font-medium text-muted-foreground border-b border-border bg-muted/50">
+      <div className="flex items-center gap-3 px-2 py-1 text-[0.625rem] font-medium text-muted-foreground border-b border-border bg-muted/50">
         <span className="flex-1 min-w-0">Name</span>
         <span className="w-14 text-end">Size</span>
         <span className="w-16 text-end">Modified</span>
@@ -105,13 +104,13 @@ function FilesSettingsPreview({ settings }: { settings: FilesSettings }) {
           ) : settings.showIcons ? (
             getPreviewIcon(file, settings.coloredIcons, "sm")
           ) : null}
-          <span className={cn("flex-1 min-w-0 truncate text-[11px]", file.isFolder && "font-medium")}>
+          <span className={cn("flex-1 min-w-0 truncate text-[0.6875rem]", file.isFolder && "font-medium")}>
             {file.name}
           </span>
-          <span className="w-14 text-end text-[10px] text-muted-foreground tabular-nums">
+          <span className="w-14 text-end text-[0.625rem] text-muted-foreground tabular-nums">
             {formatSize(file.size)}
           </span>
-          <span className="w-16 text-end text-[10px] text-muted-foreground tabular-nums">
+          <span className="w-16 text-end text-[0.625rem] text-muted-foreground tabular-nums">
             {file.modified.slice(5)}
           </span>
         </div>
@@ -137,7 +136,7 @@ function FilesSettingsPreview({ settings }: { settings: FilesSettings }) {
             ) : (
               <div className="w-8 h-8" />
             )}
-            <span className={cn("text-[9px] truncate w-full text-center", file.isFolder && "font-medium")}>
+            <span className={cn("text-[0.5625rem] truncate w-full text-center", file.isFolder && "font-medium")}>
               {file.name}
             </span>
           </div>
@@ -146,29 +145,9 @@ function FilesSettingsPreview({ settings }: { settings: FilesSettings }) {
     </div>
   );
 
-  const sidebar = settings.folderLayout === "sidebar" && (
-    <div className="w-24 border-e border-border bg-muted/30 py-1.5 flex-shrink-0">
-      <div className="flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium text-foreground">
-        <Home className="w-3 h-3 flex-shrink-0" />
-        <span className="truncate">Files</span>
-      </div>
-      <div className="flex items-center gap-1 px-2 py-0.5 text-[10px] text-foreground bg-accent rounded-sm mx-1">
-        <ChevronDown className="w-2.5 h-2.5 flex-shrink-0" />
-        <FolderOpen className="w-3 h-3 flex-shrink-0 text-blue-500" />
-        <span className="truncate">Documents</span>
-      </div>
-      <div className="flex items-center gap-1 px-2 py-0.5 text-[10px] text-muted-foreground" style={{ paddingLeft: "1.25rem" }}>
-        <ChevronRight className="w-2.5 h-2.5 flex-shrink-0" />
-        <Folder className="w-3 h-3 flex-shrink-0 text-blue-500" />
-        <span className="truncate">Photos</span>
-      </div>
-    </div>
-  );
-
   return (
     <div className="mt-4 rounded-lg border border-border overflow-hidden bg-background text-xs select-none">
       <div className="flex" style={{ minHeight: "10rem" }}>
-        {sidebar}
         {settings.defaultViewMode === "grid" ? gridView : listView}
       </div>
     </div>
@@ -177,26 +156,7 @@ function FilesSettingsPreview({ settings }: { settings: FilesSettings }) {
 
 export function FilesSettingsComponent() {
   const t = useTranslations("settings.files");
-  const [settings, setSettings] = useState<FilesSettings>(loadFilesSettings);
-
-  // Listen for external changes (e.g. if file-browser updates settings)
-  useEffect(() => {
-    const handleStorage = (e: StorageEvent) => {
-      if (e.key === "files-settings") {
-        setSettings(loadFilesSettings());
-      }
-    };
-    window.addEventListener("storage", handleStorage);
-    return () => window.removeEventListener("storage", handleStorage);
-  }, []);
-
-  const update = useCallback((patch: Partial<FilesSettings>) => {
-    setSettings(prev => {
-      const next = { ...prev, ...patch };
-      saveFilesSettings(next);
-      return next;
-    });
-  }, []);
+  const [settings, update] = useFilesSettings();
 
   return (
     <div>
@@ -206,17 +166,7 @@ export function FilesSettingsComponent() {
       </div>
 
       <div className="space-y-8">
-        <SettingsSection title={t("display.title")} description={t("display.description")}>
-        <SettingItem label={t("folder_layout.label")} description={t("folder_layout.description")}>
-          <RadioGroup
-            value={settings.folderLayout}
-            onChange={(v) => update({ folderLayout: v as FolderLayout })}
-            options={[
-              { value: "inline", label: t("folder_layout.inline") },
-              { value: "sidebar", label: t("folder_layout.sidebar") },
-            ]}
-          />
-        </SettingItem>
+        <SettingsSection id="display" title={t("display.title")} description={t("display.description")}>
         <SettingItem label={t("default_view.label")} description={t("default_view.description")}>
           <RadioGroup
             value={settings.defaultViewMode}
@@ -250,7 +200,7 @@ export function FilesSettingsComponent() {
         </SettingItem>
       </SettingsSection>
 
-      <SettingsSection title={t("icons.title")} description={t("icons.description")}>
+      <SettingsSection id="icons" title={t("icons.title")} description={t("icons.description")}>
         <SettingItem label={t("show_icons.label")} description={t("show_icons.description")}>
           <ToggleSwitch
             checked={settings.showIcons}
@@ -272,8 +222,8 @@ export function FilesSettingsComponent() {
         </SettingItem>
       </SettingsSection>
 
-      <SettingsSection title={t("behavior.title")} description={t("behavior.description")}>
-        <SettingItem label={t("show_hidden.label")} description={t("show_hidden.description")}>
+      <SettingsSection id="behavior" advanced title={t("behavior.title")} description={t("behavior.description")}>
+        <SettingItem advanced label={t("show_hidden.label")} description={t("show_hidden.description")}>
           <ToggleSwitch
             checked={settings.showHiddenFiles}
             onChange={(v) => update({ showHiddenFiles: v })}

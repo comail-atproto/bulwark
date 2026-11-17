@@ -1,6 +1,26 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { JMAPClient } from '../jmap/client';
-import { jmapSession } from './fixtures/jmap-session';
+
+// Minimal valid JMAP session response
+function makeSession(overrides?: Record<string, unknown>) {
+  return {
+    capabilities: { 'urn:ietf:params:jmap:core': {} },
+    accounts: { 'acct-1': { name: 'test', isPersonal: true, accountCapabilities: {} } },
+    primaryAccounts: { 'urn:ietf:params:jmap:mail': 'acct-1' },
+    apiUrl: 'https://mail.example.com/jmap/api',
+    downloadUrl: 'https://mail.example.com/jmap/download/{accountId}/{blobId}/{name}',
+    uploadUrl: 'https://mail.example.com/jmap/upload/{accountId}/',
+    eventSourceUrl: 'https://mail.example.com/jmap/eventsource',
+    ...overrides,
+  };
+}
+
+function mockFetchResponse(status: number, body?: unknown): Response {
+  return new Response(body ? JSON.stringify(body) : null, {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
 
 describe('JMAPClient truncated body refetch (#884)', () => {
   let fetchSpy: ReturnType<typeof vi.spyOn>;
@@ -14,7 +34,7 @@ describe('JMAPClient truncated body refetch (#884)', () => {
   });
 
   async function createConnectedClient(): Promise<JMAPClient> {
-    fetchSpy.mockResolvedValueOnce(Response.json(jmapSession({ accountCapabilities: {} })));
+    fetchSpy.mockResolvedValueOnce(mockFetchResponse(200, makeSession()));
     const client = new JMAPClient('https://mail.example.com', 'user@test.com', 'pass123');
     await client.connect();
     fetchSpy.mockReset();
@@ -46,12 +66,12 @@ describe('JMAPClient truncated body refetch (#884)', () => {
     const client = await createConnectedClient();
 
     fetchSpy.mockResolvedValueOnce(
-      Response.json({
+      mockFetchResponse(200, {
         methodResponses: [['Email/get', { list: [truncatedEmail()] }, '0']],
       }),
     );
     fetchSpy.mockResolvedValueOnce(
-      Response.json({
+      mockFetchResponse(200, {
         methodResponses: [
           [
             'Email/get',
@@ -85,7 +105,7 @@ describe('JMAPClient truncated body refetch (#884)', () => {
     email.bodyValues.html1.isTruncated = false;
 
     fetchSpy.mockResolvedValueOnce(
-      Response.json({ methodResponses: [['Email/get', { list: [email] }, '0']] }),
+      mockFetchResponse(200, { methodResponses: [['Email/get', { list: [email] }, '0']] }),
     );
 
     await client.getEmail('email-1');
@@ -97,7 +117,7 @@ describe('JMAPClient truncated body refetch (#884)', () => {
     const client = await createConnectedClient();
 
     fetchSpy.mockResolvedValueOnce(
-      Response.json({
+      mockFetchResponse(200, {
         methodResponses: [['Email/get', { list: [truncatedEmail()] }, '0']],
       }),
     );
@@ -114,20 +134,20 @@ describe('JMAPClient truncated body refetch (#884)', () => {
     const client = await createConnectedClient();
 
     fetchSpy.mockResolvedValueOnce(
-      Response.json({
+      mockFetchResponse(200, {
         methodResponses: [['Thread/get', { list: [{ id: 'thread-1', emailIds: ['email-1', 'email-2'] }] }, '0']],
       }),
     );
 
     const secondTruncated = { ...truncatedEmail(), id: 'email-2' };
     fetchSpy.mockResolvedValueOnce(
-      Response.json({
+      mockFetchResponse(200, {
         methodResponses: [['Email/get', { list: [truncatedEmail(), secondTruncated] }, '0']],
       }),
     );
 
     fetchSpy.mockResolvedValueOnce(
-      Response.json({
+      mockFetchResponse(200, {
         methodResponses: [
           [
             'Email/get',
@@ -151,5 +171,27 @@ describe('JMAPClient truncated body refetch (#884)', () => {
     expect(refetchBody.methodCalls[0][1].ids.sort()).toEqual(['email-1', 'email-2']);
     expect(emails.find((e) => e.id === 'email-1')?.bodyValues?.html1.value).toBe('full-1');
     expect(emails.find((e) => e.id === 'email-2')?.bodyValues?.html1.value).toBe('full-2');
+  });
+
+  it('getEmail fetches a body just over the list cap in one request', async () => {
+    // Opening one message needs all of its body; at the list-sized 256 kB cap
+    // a 300 kB newsletter came back truncated and was fetched twice.
+    const client = await createConnectedClient();
+    const html = '<html>' + 'x'.repeat(300_000) + '</html>';
+    fetchSpy.mockImplementation(async (_input: unknown, init?: RequestInit) => {
+      const call = JSON.parse((init as RequestInit).body as string).methodCalls[0][1];
+      const cap = call.maxBodyValueBytes as number;
+      return mockFetchResponse(200, {
+        methodResponses: [['Email/get', { list: [{
+          ...truncatedEmail(),
+          bodyValues: { html1: { value: html.slice(0, cap), isTruncated: html.length > cap } },
+        }] }, '0']],
+      });
+    });
+
+    const email = await client.getEmail('email-1');
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(email?.bodyValues?.html1.value).toBe(html);
   });
 });

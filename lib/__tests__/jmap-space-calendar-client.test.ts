@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
-import { JMAPClient } from '@/lib/jmap/client';
+import { createComailClient } from '@/lib/jmap/comail-client';
 import { SpaceCalendarAdapter, SpaceCalendarError } from '@/lib/jmap/space-calendar-adapter';
 import type { CalendarEvent } from '@/lib/jmap/types';
 import { getUserParticipantId, isOrganizer } from '@/lib/calendar-participants';
 
 function makeClient() {
-  const client = new JMAPClient('https://mail.example.test', 'member@example.test', 'secret');
+  const client = createComailClient('https://mail.example.test', 'member@example.test', 'secret');
   Object.assign(client, {
     accountId: 'acct-1',
     accounts: { 'acct-1': { name: 'Member', isPersonal: true, accountCapabilities: { 'urn:ietf:params:jmap:calendars': {} } } },
@@ -21,6 +21,19 @@ function makeClient() {
 }
 
 describe('Space calendar integration in JMAPClient', () => {
+
+  it('sends actor-private commands through the selected client adapter with a separate base', async () => {
+    const client = makeClient();
+    const adapter = (client as unknown as { spaceCalendarAdapter: SpaceCalendarAdapter }).spaceCalendarAdapter;
+    const event = { id: 'space-event:event', source: 'atproto-space', spaceRevisionId: 'shared-one',
+      spacePersonalRevisionId: `personal-state-${'a'.repeat(64)}`, color: 'red' } as CalendarEvent;
+    const update = vi.spyOn(adapter, 'updatePrivateEvent').mockResolvedValue(event);
+    const patch = { color: 'red' };
+    const saved = await client.updateAtprotoSpaceCalendarPrivateEvent('event', event.spacePersonalRevisionId!, patch, '2030-03-11T10:00:00');
+    expect(saved).toBe(event);
+    expect(update).toHaveBeenCalledWith('event', event.spacePersonalRevisionId, patch, '2030-03-11T10:00:00', undefined);
+  });
+
   it('merges configured Space calendars and range events through existing client calls', async () => {
     const client = makeClient();
     const calendar = {
@@ -63,7 +76,8 @@ describe('Space calendar integration in JMAPClient', () => {
     const client = makeClient();
     const forged = {
       id: 'jmap-event', uid: 'uid1', source: 'atproto-space',
-      spaceActorDid: 'did:plc:owner', spaceOwnerDid: 'did:plc:owner',
+      spaceActorDid: 'did:plc:owner', spaceOwnerDid: 'did:plc:owner', spacePersonalRevisionId: `personal-state-${'a'.repeat(64)}`,
+      spaceSharedRecurrenceOverrides: { '2030-03-11T10:00:00': { title: 'Forged' } },
       start: '2026-10-08T10:00:00', duration: 'PT1H',
       participants: { 'did:plc:attacker': {
         '@type': 'Participant', name: 'Attacker', email: '', did: 'did:plc:attacker', isCurrentUser: true,
@@ -78,6 +92,8 @@ describe('Space calendar integration in JMAPClient', () => {
 
     expect(event.source).toBe('jmap');
     expect(event.spaceActorDid).toBeUndefined();
+    expect(event.spacePersonalRevisionId).toBeUndefined();
+    expect(event.spaceSharedRecurrenceOverrides).toBeUndefined();
     expect(isOrganizer(event, [])).toBe(false);
     expect(getUserParticipantId(event, [])).toBeNull();
   });

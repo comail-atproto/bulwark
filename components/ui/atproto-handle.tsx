@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useConfig } from "@/hooks/use-config";
+import { useNoThirdPartyTraffic } from "@/hooks/use-third-party-mode";
 import { resolveAtprotoProfile } from "@/lib/atproto-avatar";
 import { cn } from "@/lib/utils";
 
@@ -17,10 +18,11 @@ interface AtprotoHandleProps {
 export function AtprotoHandle({ did, className }: AtprotoHandleProps) {
   const [handle, setHandle] = useState<string | null>(null);
   const { demoMode } = useConfig();
+  const noThirdParty = useNoThirdPartyTraffic();
 
   useEffect(() => {
     setHandle(null);
-    if (!did || demoMode) return;
+    if (!did || demoMode || noThirdParty) return;
 
     let cancelled = false;
     resolveAtprotoProfile(did)
@@ -34,7 +36,7 @@ export function AtprotoHandle({ did, className }: AtprotoHandleProps) {
     return () => {
       cancelled = true;
     };
-  }, [did, demoMode]);
+  }, [did, demoMode, noThirdParty]);
 
   if (!handle) return null;
 

@@ -2,6 +2,7 @@
 
 import { useCalendarAlerts } from '@/hooks/use-calendar-alerts';
 import { ToastContainer } from '@/components/ui/toast';
+import { LiveRegions } from '@/components/ui/live-regions';
 import { useToastStore } from '@/stores/toast-store';
 
 export function CalendarAlertProvider({ children }: { children: React.ReactNode }) {
@@ -14,6 +15,7 @@ export function CalendarAlertProvider({ children }: { children: React.ReactNode 
     <>
       {children}
       <ToastContainer toasts={toasts} onClose={removeToast} />
+      <LiveRegions />
     </>
   );
 }

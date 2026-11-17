@@ -38,6 +38,9 @@ vi.mock('@/lib/settings-sync', () => ({
   saveUserSettings: async (username: string, serverUrl: string, settings: Record<string, unknown>) => {
     store.set(`${username}|${serverUrl}`, settings);
   },
+  updateUserSettings: async (username: string, serverUrl: string, change: (stored: Record<string, unknown> | null) => Record<string, unknown>) => {
+    store.set(`${username}|${serverUrl}`, change(store.get(`${username}|${serverUrl}`) ?? null));
+  },
   deleteUserSettings: async () => {},
 }));
 
@@ -115,5 +118,21 @@ describe('settings route merges templates into the stored blob', () => {
     const saved = await push({ templates: [template('a')], deletedTemplateIds: {} });
 
     expect(ids(saved)).toEqual(['a']);
+  });
+});
+
+describe('settings route merges iCal subscriptions into the stored blob', () => {
+  const sub = (id: string) => ({
+    id, url: `https://feeds.example.org/${id}.ics`, calendarId: `cal-${id}`, name: id,
+    color: '#3b82f6', refreshInterval: 60, lastRefreshed: null, updatedAt: '2026-10-01T00:00:00.000Z',
+  });
+
+  it('keeps a subscription another device added when a stale client pushes', async () => {
+    store.set(KEY, { icalSubscriptions: [sub('a'), sub('b')], deletedSubscriptionIds: {} });
+
+    const saved = await push({ theme: 'dark', icalSubscriptions: [sub('a')], deletedSubscriptionIds: {} });
+
+    expect((saved.icalSubscriptions as { id: string }[]).map((s) => s.id).sort()).toEqual(['a', 'b']);
+    expect(saved.theme).toBe('dark');
   });
 });

@@ -1,5 +1,6 @@
 import { IS_LITE_STALWART, getLiteMount } from '@/lib/lite';
 import { discoverOAuth, type OAuthMetadata } from '@/lib/oauth/discovery';
+import { withProviderDataScopes } from '@/lib/oauth/scopes';
 
 /**
  * OAuth sign-in (authorization code + PKCE) for Lite served by Stalwart.
@@ -86,7 +87,7 @@ function rebase(endpoint: string, serverUrl: string): string {
 function pickScope(supported: unknown): string {
   if (!Array.isArray(supported)) return DEFAULT_SCOPE;
   if (!supported.includes('openid')) return '';
-  return WANTED_SCOPES.filter((scope) => supported.includes(scope)).join(' ');
+  return withProviderDataScopes(WANTED_SCOPES.filter((scope) => supported.includes(scope)).join(' '), supported);
 }
 
 /**
@@ -109,11 +110,6 @@ async function isOwnEndpoint(endpoint: string, serverUrl: string): Promise<boole
 // it said. Failures are not kept, so a retry asks again.
 const DISCOVERY_CACHE_MAX = 32;
 const discoveryCache = new Map<string, LiteOAuthDiscovery>();
-
-/** Test hook. */
-export function resetLiteOAuthDiscoveryCache(): void {
-  discoveryCache.clear();
-}
 
 /**
  * Asks Stalwart which provider signs `username` in. `null` when the server

@@ -1,4 +1,5 @@
 import { configManager } from '@/lib/admin/config-manager';
+import { observeUpstream } from '@/lib/metrics/upstream';
 import { logger } from '@/lib/logger';
 
 /**
@@ -68,13 +69,24 @@ function discoveryUrlFor(clientUrl: string): string {
   }
 }
 
+const XML_ENTITIES: Record<string, string> = { lt: '<', gt: '>', amp: '&', quot: '"', apos: "'" };
+
+/**
+ * Attribute values are XML-escaped: ONLYOFFICE writes its urlsrc placeholders
+ * as `&lt;ui=UI_LLCC&amp;&gt;`, which buildWopiActionUrl only recognises once
+ * they read `<ui=UI_LLCC&>` again (#1187).
+ */
+function decodeXmlEntities(value: string): string {
+  return value.replace(/&(lt|gt|amp|quot|apos);/g, (_match, name: string) => XML_ENTITIES[name]);
+}
+
 export function parseWopiDiscovery(xml: string): WopiActions {
   const actions: WopiActions = { edit: {}, view: {} };
   const tags = xml.match(/<action\b[^>]*\/?>/gi) || [];
   for (const tag of tags) {
     const attr = (name: string): string => {
       const m = tag.match(new RegExp(`\\b${name}\\s*=\\s*"([^"]*)"`, 'i'));
-      return m?.[1] ?? '';
+      return decodeXmlEntities(m?.[1] ?? '');
     };
     const name = attr('name').toLowerCase();
     const ext = attr('ext').toLowerCase();
@@ -112,10 +124,10 @@ export async function getWopiActions(): Promise<WopiActions | null> {
 
 async function fetchWopiActions(discoveryUrl: string): Promise<WopiActions | null> {
   try {
-    const res = await fetch(discoveryUrl, {
+    const res = await observeUpstream('wopi', () => fetch(discoveryUrl, {
       headers: { Accept: 'text/xml' },
       signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
-    });
+    }));
     if (!res.ok) {
       logger.warn('WOPI discovery fetch failed', { discoveryUrl, status: res.status });
       return null;
@@ -137,7 +149,7 @@ async function fetchWopiActions(discoveryUrl: string): Promise<WopiActions | nul
 
 function httpOrigin(url: string): string {
   try {
-    const parsed = new URL(url.replace(/<[^>]*>/g, ''));
+    const parsed = new URL(url);
     return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.origin : '';
   } catch {
     return '';
@@ -197,10 +209,15 @@ function languageTag(lang: string | undefined): string {
  * instead, so that is added when the urlsrc names no language itself (#1130).
  */
 export function buildWopiActionUrl(urlsrc: string, wopiSrc: string, lang?: string): string {
+  const editor = new URL(urlsrc);
+  if ((editor.protocol !== 'http:' && editor.protocol !== 'https:') || editor.username || editor.password) {
+    throw new Error('Invalid WOPI editor URL');
+  }
   const tag = languageTag(lang);
   const base = urlsrc.replace(/<([^=<>]+)=([^&<>]*)&?>/g, (_group, name: string, placeholder: string) =>
     tag && (placeholder === 'UI_LLCC' || placeholder === 'DC_LLCC') ? `${name}=${tag}&` : '',
   ).replace(/<[^>]*>/g, '');
+  if (new URL(base).origin !== editor.origin) throw new Error('Invalid WOPI editor URL');
   const sep = base.includes('?')
     ? (base.endsWith('?') || base.endsWith('&') ? '' : '&')
     : '?';

@@ -3,6 +3,7 @@ import { useEmailStore } from '../email-store';
 import { useAuthStore } from '../auth-store';
 import type { Email, Mailbox } from '@/lib/jmap/types';
 import type { IJMAPClient } from '@/lib/jmap/client-interface';
+import { jmapError } from '@/lib/jmap/jmap-error';
 
 // Regression coverage for keyword writes (tags, $pinned, $answered/$forwarded,
 // $mdnsent) performed while viewing a shared/group mailbox DIRECTLY from the
@@ -102,7 +103,7 @@ describe('non-unified shared-folder keyword routing', () => {
       accountMailboxes: {},
       selectedEmail: null,
       emails: [makeEmail({ id: 'e1', keywords: {}, mailboxIds: { 'owner-x:x-inbox': true } })],
-      selectedEmailIds: new Set<string>(),
+      selectedEmailKeys: new Set<string>(),
     } as never);
   });
 
@@ -114,6 +115,19 @@ describe('non-unified shared-folder keyword routing', () => {
       { 'keywords/$label:work': true },
       'owner-x',
     );
+  });
+
+  it('setEmailKeywords keeps the old tags when Stalwart 1.0 refuses the keyword', async () => {
+    // What batchUpdateKeywords throws for a `notUpdated` entry on 1.0 (0.16
+    // accepts the write and cuts the keyword to 128 characters instead).
+    const refusal = jmapError('Failed to update keywords: Keywords cannot be longer than 128 bytes.', {
+      type: 'invalidProperties', properties: ['keywords'],
+    });
+    vi.mocked(activeClient.batchUpdateKeywords).mockRejectedValueOnce(refusal);
+
+    await expect(useEmailStore.getState().setEmailKeywords(activeClient, 'e1', { [`$label:${'x'.repeat(130)}`]: true }))
+      .rejects.toBe(refusal);
+    expect(useEmailStore.getState().emails.find(e => e.id === 'e1')?.keywords).toEqual({});
   });
 
   it('writes only the keywords that change, not the whole set from the row', async () => {
@@ -152,6 +166,26 @@ describe('non-unified shared-folder keyword routing', () => {
     await useEmailStore.getState().markEmailKeyword(activeClient, 'e1', '$answered');
 
     expect(activeClient.setKeyword).toHaveBeenCalledWith('e1', '$answered', 'owner-x');
+  });
+
+  it('markEmailKeyword writes to the login and account the reply started from, not a namesake in the open folder', async () => {
+    // The reply was written to the group's e1; by the time it is sent the
+    // own Inbox is open, and the own account has an e1 too.
+    useEmailStore.setState({
+      selectedMailbox: 'a-inbox',
+      emails: [makeEmail({ id: 'e1', mailboxIds: { 'a-inbox': true } })],
+    } as never);
+
+    await useEmailStore.getState().markEmailKeyword(activeClient, 'e1', '$answered', { clientAccountId: 'account-a', accountId: 'owner-x' });
+
+    expect(activeClient.setKeyword).toHaveBeenCalledWith('e1', '$answered', 'owner-x');
+  });
+
+  it('markEmailKeyword writes nothing when the login the reply started from is gone', async () => {
+    await expect(useEmailStore.getState().markEmailKeyword(activeClient, 'e1', '$answered', { clientAccountId: 'account-b', accountId: 'owner-x' }))
+      .rejects.toThrow('Not connected');
+
+    expect(activeClient.setKeyword).not.toHaveBeenCalled();
   });
 
   it('routes a keyword write for an email that is only the selected email', async () => {
@@ -249,7 +283,7 @@ describe('batchSetTag (#1077)', () => {
         makeEmail({ id: 'e3', keywords: { '$color:work': true } }),
         makeEmail({ id: 'e4', keywords: {} }),
       ],
-      selectedEmailIds: new Set(['e1', 'e2', 'e3']),
+      selectedEmailKeys: new Set(['e1', 'e2', 'e3']),
       fetchTagCounts,
     } as never);
   });
@@ -264,7 +298,7 @@ describe('batchSetTag (#1077)', () => {
     expect(client.batchUpdateKeywords).toHaveBeenCalledWith(['e1'], { 'keywords/$label:work': true }, undefined);
     expect(keywordsOf('e1')).toEqual({ $seen: true, '$label:home': true, '$label:work': true });
     expect(keywordsOf('e4')).toEqual({});
-    expect(useEmailStore.getState().selectedEmailIds.size).toBe(3);
+    expect(useEmailStore.getState().selectedEmailKeys.size).toBe(3);
     expect(fetchTagCounts).toHaveBeenCalled();
   });
 
@@ -292,13 +326,36 @@ describe('batchSetTag (#1077)', () => {
         makeEmail({ id: 'e1', sourceClientAccountId: 'account-a', sourceAccountId: 'jmap-a' }),
         makeEmail({ id: 'e2', sourceClientAccountId: 'account-b', sourceAccountId: 'jmap-b' }),
       ],
-      selectedEmailIds: new Set(['e1', 'e2']),
+      selectedEmailKeys: new Set(['account-a/jmap-a:e1', 'account-b/jmap-b:e2']),
     } as never);
 
     await useEmailStore.getState().batchSetTag(client, 'work', true);
 
     expect(client.batchUpdateKeywords).toHaveBeenCalledWith(['e1'], { 'keywords/$label:work': true }, 'jmap-a');
     expect(other.batchUpdateKeywords).toHaveBeenCalledWith(['e2'], { 'keywords/$label:work': true }, 'jmap-b');
+  });
+
+  it('leaves a namesake in another account alone', async () => {
+    const other = makeClient();
+    useAuthStore.setState({
+      getClientForAccount: (id: string) => (id === 'account-a' ? client : id === 'account-b' ? other : undefined) as never,
+    } as never);
+    useEmailStore.setState({
+      isUnifiedView: true,
+      emails: [
+        makeEmail({ id: 'e1', sourceClientAccountId: 'account-a', sourceAccountId: 'jmap-a' }),
+        makeEmail({ id: 'e1', sourceClientAccountId: 'account-b', sourceAccountId: 'jmap-b' }),
+      ],
+      selectedEmailKeys: new Set(['account-a/jmap-a:e1']),
+    } as never);
+
+    await useEmailStore.getState().batchSetTag(client, 'work', true);
+
+    expect(client.batchUpdateKeywords).toHaveBeenCalledWith(['e1'], { 'keywords/$label:work': true }, 'jmap-a');
+    expect(other.batchUpdateKeywords).not.toHaveBeenCalled();
+    const [mine, namesake] = useEmailStore.getState().emails;
+    expect(mine.keywords).toEqual({ '$label:work': true });
+    expect(namesake.keywords ?? {}).toEqual({});
   });
 
   it('rejects and leaves the rows untouched when the write fails', async () => {

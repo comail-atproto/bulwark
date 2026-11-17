@@ -4,6 +4,7 @@ import { createDemoFileNodes } from '@/lib/demo/fixtures/files';
 import { generateDemoId } from '@/lib/demo/demo-utils';
 import type { FileNode } from '@/lib/jmap/types';
 import JSZip from 'jszip';
+import { isNoThirdPartyTrafficOn } from '@/lib/admin/third-party-mode';
 
 /**
  * Mock JMAP server for local development.
@@ -949,6 +950,73 @@ const emails: MockEmail[] = [
   },
 ];
 
+appendBenchCorpus(Number(process.env.DEV_MOCK_JMAP_BULK) || 0);
+
+/**
+ * DEV_MOCK_JMAP_BULK=<n> replaces the fixtures above with n synthetic
+ * messages shaped like the benchmark rig's seed (repos/benchmark/seed):
+ * "#<n>" subjects, 60 % plain text, the rest HTML or with an attachment,
+ * spread 70/15/5/5/5 over Inbox, Sent, Drafts, Junk and Trash. For
+ * performance tests, where a folder of a few messages hides every per-row
+ * cost. Deterministic, so counts are stable.
+ */
+function appendBenchCorpus(count: number): void {
+  if (count <= 0) return;
+  let seed = 0x1234abcd;
+  const rand = () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const pick = <T,>(list: T[]): T => list[Math.floor(rand() * list.length)];
+  const prefixes = ['Re:', 'Fwd:', '', '', '', '[BENCH]', '[BENCH]', '[BENCH]'];
+  const nouns = ['Quarterly review', 'Project status', 'Lunch tomorrow?', 'Merge request',
+    'Production incident', 'Vacation policy update', 'Architecture review', 'Customer feedback',
+    'Standup notes', 'Performance budget', 'Release plan', 'Database migration', 'Security audit',
+    'Team offsite', 'Onboarding doc', 'Roadmap Q4', 'Bug triage', 'Design review', 'Hiring loop',
+    'Budget proposal', 'New customer', 'Postmortem draft'];
+  const senders = ['Alice', 'Bob', 'Carol', 'Dave', 'Marketing', 'Updates', 'Reports'];
+  const domains = ['github.com', 'example.com', 'stripe.com', 'vendor.io', 'product.com', 'analytics.io'];
+  const lorem = 'Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. ';
+  const text = (chars: number) => lorem.repeat(Math.ceil(chars / lorem.length)).slice(0, chars);
+  const folders: Array<[string, number]> = [['mb-inbox', 0.70], ['mb-sent', 0.85], ['mb-drafts', 0.90], ['mb-junk', 0.95], ['mb-trash', 1]];
+  const now = Date.now();
+  emails.length = 0;
+  for (let n = 1; n <= count; n++) {
+    const name = pick(senders);
+    const body = `Hi,\n\n${text(800 + Math.floor(rand() * 2000))}\n\nSynthetic seed message ${n}/${count}.`;
+    const kind = rand();
+    // The seed's attachment messages carry their own subject.
+    const subject = kind >= 0.95 ? `[BENCH] Document attached #${n}` : `${pick(prefixes)} ${pick(nouns)} #${n}`.trim();
+    const slot = rand();
+    const mailboxId = folders.find(([, upTo]) => slot < upTo)![0];
+    const id = `email-bench-${n}`;
+    const email: MockEmail = {
+      id, threadId: `thread-bench-${n}`, mailboxIds: { [mailboxId]: true },
+      keywords: { ...(rand() < 0.7 ? { $seen: true } : {}), ...(mailboxId === 'mb-drafts' ? { $draft: true } : {}) },
+      size: body.length + 600, receivedAt: new Date(now - n * 37 * 60_000).toISOString(),
+      from: [{ name, email: `${name.toLowerCase()}@${pick(domains)}` }],
+      to: [{ name: 'Dev User', email: 'dev@localhost' }], cc: [],
+      subject, preview: body.slice(4, 200).replace(/\s+/g, ' '),
+      hasAttachment: kind >= 0.95,
+      textBody: [{ partId: 'p1', blobId: `blob-${id}-p1`, size: body.length, type: 'text/plain' }],
+      htmlBody: [],
+      bodyValues: { p1: { value: body } },
+    };
+    if (kind >= 0.60 && kind < 0.95) {
+      const html = `<!doctype html><html><body style="font-family:system-ui"><h2>${subject}</h2><p>${text(200)}</p><table border="1" cellpadding="6"><tr><th>Item</th><th>Value</th></tr>${Array.from({ length: 8 }, (_, i) => `<tr><td>row-${i}</td><td>${rand().toFixed(8)}</td></tr>`).join('')}</table><p>${text(kind < 0.80 ? 8000 : 40000)}</p></body></html>`;
+      email.htmlBody = [{ partId: 'p2', blobId: `blob-${id}-p2`, size: html.length, type: 'text/html' }];
+      email.bodyValues.p2 = { value: html };
+    }
+    if (email.hasAttachment) {
+      email.attachments = [{ partId: 'att1', blobId: `blob-${id}-att1`, size: 50_000, name: `synthetic-${n}.txt`, type: 'text/plain' }];
+    }
+    emails.push(email);
+  }
+  recomputeMailboxCounts();
+}
+
 // ---------------------------------------------------------------------------
 // Identities
 // ---------------------------------------------------------------------------
@@ -1588,6 +1656,32 @@ function handleMailboxSet(args: MethodArgs, callId: string): MethodResult {
   return ['Mailbox/set', { accountId: ACCOUNT_ID, oldState: nextState(), newState: nextState(), created, updated, destroyed, notCreated: null, notUpdated: null, notDestroyed: null }, callId];
 }
 
+/**
+ * A loose stand-in for Stalwart's text conditions, enough for the shapes the
+ * app sends (see splitSearchText): a value wrapped in quotes is a phrase,
+ * anything else needs every word, with a trailing `*` dropped. Substrings
+ * stand in for the server's word and stem matching.
+ */
+function matchesText(value: string, fields: Array<string | null | undefined>): boolean {
+  const haystack = fields.filter(Boolean).join('\n').toLowerCase();
+  const needle = value.trim().toLowerCase();
+  const phrase = /^(["'])([\s\S]*)\1$/.exec(needle)?.[2].trim();
+  if (phrase !== undefined) return phrase !== '' && haystack.includes(phrase);
+  const words = needle.replace(/\*$/, '').split(/\s+/).filter(Boolean);
+  return words.length > 0 && words.every((word) => haystack.includes(word));
+}
+
+/** Resolves AND / OR / NOT operators down to `matches`, the test for one condition. */
+function matchesFilter(filter: Record<string, unknown>, matches: (condition: Record<string, unknown>) => boolean): boolean {
+  if (typeof filter.operator === 'string') {
+    const conditions = (Array.isArray(filter.conditions) ? filter.conditions : []) as Record<string, unknown>[];
+    if (filter.operator === 'AND') return conditions.every((c) => matchesFilter(c, matches));
+    if (filter.operator === 'OR') return conditions.some((c) => matchesFilter(c, matches));
+    return !conditions.some((c) => matchesFilter(c, matches));
+  }
+  return matches(filter);
+}
+
 function handleEmailQuery(args: MethodArgs, callId: string): MethodResult {
   const filter = args.filter as Record<string, unknown> | undefined;
   const limit = (args.limit as number) || 50;
@@ -1612,13 +1706,9 @@ function handleEmailQuery(args: MethodArgs, callId: string): MethodResult {
       result = result.filter((e) => e.mailboxIds[f.inMailbox as string]);
     }
     if (f.text) {
-      const q = (f.text as string).toLowerCase();
-      result = result.filter(
-        (e) =>
-          (e.subject?.toLowerCase().includes(q)) ||
-          (e.preview?.toLowerCase().includes(q)) ||
-          e.from?.some((addr) => addr.name?.toLowerCase().includes(q) || addr.email.toLowerCase().includes(q)),
-      );
+      const q = f.text as string;
+      result = result.filter((e) =>
+        matchesText(q, [e.subject, e.preview, ...(e.from ?? []).flatMap((addr) => [addr.name, addr.email])]));
     }
     if (f.hasKeyword) {
       const kw = f.hasKeyword as string;
@@ -1629,16 +1719,16 @@ function handleEmailQuery(args: MethodArgs, callId: string): MethodResult {
       result = result.filter((e) => !e.keywords[kw]);
     }
     if (f.from) {
-      const q = (f.from as string).toLowerCase();
-      result = result.filter((e) => e.from?.some((addr) => addr.name?.toLowerCase().includes(q) || addr.email.toLowerCase().includes(q)));
+      const q = f.from as string;
+      result = result.filter((e) => matchesText(q, (e.from ?? []).flatMap((addr) => [addr.name, addr.email])));
     }
     if (f.to) {
-      const q = (f.to as string).toLowerCase();
-      result = result.filter((e) => e.to?.some((addr) => addr.name?.toLowerCase().includes(q) || addr.email.toLowerCase().includes(q)));
+      const q = f.to as string;
+      result = result.filter((e) => matchesText(q, (e.to ?? []).flatMap((addr) => [addr.name, addr.email])));
     }
     if (f.subject) {
-      const q = (f.subject as string).toLowerCase();
-      result = result.filter((e) => e.subject?.toLowerCase().includes(q));
+      const q = f.subject as string;
+      result = result.filter((e) => matchesText(q, [e.subject]));
     }
     if (f.hasAttachment === true) {
       result = result.filter((e) => e.hasAttachment);
@@ -1897,7 +1987,31 @@ function handleEmailSubmissionSet(args: MethodArgs, callId: string): MethodResul
       }
     }
   }
-  return ['EmailSubmission/set', { accountId: ACCOUNT_ID, oldState: nextState(), newState: nextState(), created, updated, notCreated: null, notUpdated: null }, callId];
+  // Like Stalwart, destroying removes only the record. Immediate sends are
+  // never recorded here, so their ids come back notFound, as they would once
+  // another client had pruned them.
+  const destroyed: string[] = [];
+  const notDestroyed: Record<string, { type: string }> = {};
+  for (const id of (args.destroy as string[] | undefined) ?? []) {
+    const index = scheduledSubmissions.findIndex(s => s.id === id);
+    if (index === -1) {
+      notDestroyed[id] = { type: 'notFound' };
+    } else {
+      scheduledSubmissions.splice(index, 1);
+      destroyed.push(id);
+    }
+  }
+  return ['EmailSubmission/set', {
+    accountId: ACCOUNT_ID,
+    oldState: nextState(),
+    newState: nextState(),
+    created,
+    updated,
+    destroyed,
+    notCreated: null,
+    notUpdated: null,
+    notDestroyed: Object.keys(notDestroyed).length > 0 ? notDestroyed : null,
+  }, callId];
 }
 
 function handleEmailSubmissionQuery(args: MethodArgs, callId: string): MethodResult {
@@ -1922,9 +2036,14 @@ function handleVacationResponseGet(_args: MethodArgs, callId: string): MethodRes
   return ['VacationResponse/get', { accountId: ACCOUNT_ID, state: nextState(), list: [{ id: 'vacation-1', isEnabled: false, fromDate: null, toDate: null, subject: null, textBody: null, htmlBody: null }], notFound: [] }, callId];
 }
 
+// The sample photos come from randomuser.me: none while third-party traffic
+// is off (#903). Set per request in POST, which can await the config.
+let samplePhotos = true;
+
 function handleContactCardGet(args: MethodArgs, callId: string): MethodResult {
   const ids = args.ids as string[] | undefined;
-  const list = ids ? contacts.filter((c) => ids.includes(c.id)) : contacts;
+  const found = ids ? contacts.filter((c) => ids.includes(c.id)) : contacts;
+  const list = samplePhotos ? found : found.map(({ media: _media, ...rest }) => rest);
   return ['ContactCard/get', { accountId: ACCOUNT_ID, state: nextState(), list, notFound: [] }, callId];
 }
 
@@ -2002,19 +2121,23 @@ function handleCalendarEventGet(args: MethodArgs, callId: string): MethodResult 
 
 function handleCalendarEventQuery(args: MethodArgs, callId: string): MethodResult {
   const filter = args.filter as Record<string, unknown> | undefined;
-  let filtered = [...calendarEvents];
-  const needle = [filter?.text, filter?.title].find((v): v is string => typeof v === 'string')?.toLowerCase();
-  if (needle) {
-    filtered = filtered.filter((e) => {
+  // Global search sends several text parts, and then its bounds, as an AND.
+  const matches = (e: (typeof calendarEvents)[number], condition: Record<string, unknown>): boolean => {
+    const needle = [condition.text, condition.title].find((v): v is string => typeof v === 'string');
+    if (needle) {
       const event = e as { title?: string; description?: string; locations?: Record<string, { name?: string }> | null };
-      const locations = Object.values(event.locations ?? {}).map((l) => l?.name ?? '').join(' ');
-      return ((event.title ?? '') + ' ' + (event.description ?? '') + ' ' + locations).toLowerCase().includes(needle);
-    });
-  }
-  if (filter?.inCalendars) {
-    const calIds = filter.inCalendars as string[];
-    filtered = filtered.filter((e) => calIds.some((cid) => (e.calendarIds as Record<string, boolean>)[cid]));
-  }
+      const locations = Object.values(event.locations ?? {}).map((l) => l?.name);
+      if (!matchesText(needle, [event.title, event.description, ...locations])) return false;
+    }
+    if (condition.inCalendars) {
+      const calIds = condition.inCalendars as string[];
+      if (!calIds.some((cid) => (e.calendarIds as Record<string, boolean>)[cid])) return false;
+    }
+    return true;
+  };
+  const filtered = filter
+    ? calendarEvents.filter((e) => matchesFilter(filter, (condition) => matches(e, condition)))
+    : [...calendarEvents];
   const ids = filtered.map((e) => e.id);
   return ['CalendarEvent/query', { accountId: ACCOUNT_ID, queryState: nextState(), ids, total: ids.length, position: 0, canCalculateChanges: false }, callId];
 }
@@ -2232,6 +2355,7 @@ function handleFileNodeSet(args: MethodArgs, callId: string): MethodResult {
   const updated: Record<string, unknown> = {};
   const notUpdated: Record<string, unknown> = {};
   const destroyed: string[] = [];
+  const notDestroyed: Record<string, unknown> = {};
 
   if (args.create) {
     for (const [tempId, props] of Object.entries(args.create as Record<string, Record<string, unknown>>)) {
@@ -2242,6 +2366,11 @@ function handleFileNodeSet(args: MethodArgs, callId: string): MethodResult {
       }
       const blobId = typeof props.blobId === 'string' ? props.blobId : null;
       const now = new Date().toISOString();
+      // The client leaves `size` to the server, which reads it off the blob:
+      // an upload from this process, or the blob of the node being copied.
+      const blobSize = blobId
+        ? uploadedBlobs.get(blobId)?.bytes.byteLength ?? fileNodes.find((n) => n.blobId === blobId)?.size ?? 0
+        : 0;
       const node: FileNode = {
         id: generateDemoId('file'),
         parentId: typeof props.parentId === 'string' ? props.parentId : null,
@@ -2249,7 +2378,7 @@ function handleFileNodeSet(args: MethodArgs, callId: string): MethodResult {
         // A node without a blob is a folder (draft-ietf-jmap-filenode).
         type: blobId ? (typeof props.type === 'string' ? props.type : 'application/octet-stream') : 'd',
         blobId,
-        size: typeof props.size === 'number' ? props.size : 0,
+        size: typeof props.size === 'number' ? props.size : blobSize,
         created: now,
         modified: now,
       };
@@ -2281,9 +2410,17 @@ function handleFileNodeSet(args: MethodArgs, callId: string): MethodResult {
   }
 
   if (Array.isArray(args.destroy)) {
-    // The client always sends onDestroyRemoveChildren: true, so a destroyed
-    // folder takes its subtree with it.
-    const toDestroy = new Set(args.destroy as string[]);
+    const toDestroy = new Set<string>();
+    for (const id of args.destroy as string[]) {
+      // Like Stalwart, a folder that still holds anything goes only with
+      // onDestroyRemoveChildren (the rollback of a failed copy leaves it out).
+      if (!args.onDestroyRemoveChildren && fileNodes.some((n) => n.parentId === id)) {
+        notDestroyed[id] = { type: 'nodeHasChildren', description: 'Cannot delete non-empty folder.' };
+      } else {
+        toDestroy.add(id);
+      }
+    }
+    // A destroyed folder takes its subtree with it.
     let grew = true;
     while (grew) {
       grew = false;
@@ -2311,6 +2448,7 @@ function handleFileNodeSet(args: MethodArgs, callId: string): MethodResult {
     updated,
     notUpdated,
     destroyed,
+    notDestroyed,
   }, callId];
 }
 
@@ -2383,15 +2521,17 @@ const METHOD_HANDLERS: Record<string, MethodHandler> = {
   },
   'ContactCard/query': (args, callId) => {
     const filter = args.filter as Record<string, unknown> | undefined;
-    const needle = [filter?.text, filter?.name, filter?.email].find((v): v is string => typeof v === 'string')?.toLowerCase();
-    const list = needle
-      ? contacts.filter((c) => {
-          const card = c as { name?: { components?: Array<{ value?: string }> }; emails?: Record<string, { address?: string }>; organizations?: Record<string, { name?: string }> };
-          const names = (card.name?.components ?? []).map((p) => p.value ?? '').join(' ');
-          const emails = Object.values(card.emails ?? {}).map((e) => e.address ?? '').join(' ');
-          const orgs = Object.values(card.organizations ?? {}).map((o) => o.name ?? '').join(' ');
-          return (names + ' ' + emails + ' ' + orgs).toLowerCase().includes(needle);
-        })
+    const matches = (c: (typeof contacts)[number], condition: Record<string, unknown>): boolean => {
+      const needle = [condition.text, condition.name, condition.email].find((v): v is string => typeof v === 'string');
+      if (!needle) return true;
+      const card = c as { name?: { components?: Array<{ value?: string }> }; emails?: Record<string, { address?: string }>; organizations?: Record<string, { name?: string }> };
+      const names = (card.name?.components ?? []).map((p) => p.value ?? '').join(' ');
+      const emails = Object.values(card.emails ?? {}).map((e) => e.address);
+      const orgs = Object.values(card.organizations ?? {}).map((o) => o.name);
+      return matchesText(needle, [names, ...emails, ...orgs]);
+    };
+    const list = filter
+      ? contacts.filter((c) => matchesFilter(filter, (condition) => matches(c, condition)))
       : contacts;
     return ['ContactCard/query', { accountId: ACCOUNT_ID, queryState: nextState(), ids: list.map(c => c.id), total: list.length, position: 0 }, callId];
   },
@@ -2414,6 +2554,24 @@ const METHOD_HANDLERS: Record<string, MethodHandler> = {
 // Resolve back-references between method calls
 // ---------------------------------------------------------------------------
 
+/** A JSON pointer with "*" wildcard steps, as JMAP result references use. */
+function resolvePointer(value: unknown, path: string): unknown {
+  const steps = path.replace(/^\//, '').split('/').filter((step) => step.length > 0);
+  let current: unknown[] = [value];
+  for (const step of steps) {
+    const next: unknown[] = [];
+    for (const item of current) {
+      if (step === '*') {
+        if (Array.isArray(item)) next.push(...item);
+      } else if (item && typeof item === 'object') {
+        next.push((item as Record<string, unknown>)[step]);
+      }
+    }
+    current = next;
+  }
+  return steps.includes('*') ? current : current[0];
+}
+
 function resolveBackReferences(
   methodCalls: Array<[string, MethodArgs, string]>,
   responses: MethodResult[],
@@ -2422,15 +2580,17 @@ function resolveBackReferences(
     const [method, args, callId] = call;
     const resolved = { ...args };
 
-    // Handle #ids back-reference (used by Email/get after Email/query)
-    if (resolved['#ids']) {
-      const ref = resolved['#ids'] as { resultOf: string; name: string; path: string };
+    // Every "#name" argument is a back-reference (RFC 8620 §3.7): the value at
+    // `path` in an earlier response replaces it under the plain name, where a
+    // "*" step collects across an array (e.g. /list/*/threadId).
+    for (const key of Object.keys(resolved)) {
+      if (!key.startsWith('#')) continue;
+      const ref = resolved[key] as { resultOf: string; name: string; path: string };
       const refResponse = responses.find((r) => r[2] === ref.resultOf && r[0] === ref.name);
       if (refResponse) {
-        const path = ref.path.replace(/^\//, '');
-        resolved.ids = refResponse[1][path] as string[];
+        resolved[key.slice(1)] = resolvePointer(refResponse[1], ref.path);
       }
-      delete resolved['#ids'];
+      delete resolved[key];
     }
 
     return [method, resolved, callId] as [string, MethodArgs, string];
@@ -2672,6 +2832,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
 
   // JMAP API endpoint
   if (joined === 'api') {
+    samplePhotos = !(await isNoThirdPartyTrafficOn());
     try {
       const body = await request.json();
       const methodCalls = body.methodCalls as Array<[string, MethodArgs, string]>;

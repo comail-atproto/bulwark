@@ -66,21 +66,6 @@ vi.mock('@/stores/account-store', () => {
   return { useAccountStore: hook };
 });
 
-vi.mock('@/stores/smime-store', () => {
-  const state = {
-    certs: [],
-    signingEnabled: false,
-    encryptionEnabled: false,
-    defaultSigningCertId: null,
-    defaultEncryptionCertId: null,
-  };
-  const hook = (sel?: (s: typeof state) => unknown) =>
-    typeof sel === 'function' ? sel(state) : state;
-  hook.getState = () => state;
-  hook.setState = (p: Partial<typeof state>) => Object.assign(state, p);
-  return { useSmimeStore: hook };
-});
-
 vi.mock('@/stores/email-store', () => {
   const state = {
     draftSaveEnabled: false,
@@ -144,6 +129,14 @@ vi.mock('@/stores/toast-store', () => ({
 }));
 
 vi.mock('@/lib/plugin-hooks', () => ({
+  identityHooks: {
+    onSignatureRender: { size: 0, transform: async (value: unknown) => value },
+    onIdentitySelect: { size: 0, emit: async () => {} },
+  },
+  templateHooks: {
+    onTemplateRender: { size: 0, transform: async (value: unknown) => value },
+    onTemplateApply: { size: 0, emit: async () => {} },
+  },
   emailHooks: {
     onComposerOpen: { call: async () => [] },
     onRecipientChange: { call: async () => [] },
@@ -177,12 +170,6 @@ vi.mock('@/lib/signature-utils', () => ({
   getPlainTextSignature: () => '',
 }));
 vi.mock('@/lib/sub-addressing', () => ({ generateSubAddress: () => '' }));
-vi.mock('@/lib/smime/smime-sign', () => ({ smimeSign: async () => null }));
-vi.mock('@/lib/smime/smime-encrypt', () => ({ smimeEncrypt: async () => null }));
-vi.mock('@/lib/smime/mime-builder', () => ({
-  buildMimeMessage: () => null,
-  wrapCmsAsSmimeMessage: () => null,
-}));
 vi.mock('@/lib/debug', () => ({ debug: () => {} }));
 vi.mock('@/components/email/quoted-html', () => ({
   buildQuotedHtmlBlock: () => '',

@@ -11,9 +11,8 @@
  * itself (via api.http.fetch, through its origin allowlist).
  *
  * Delivery chain:
- *   1. The payload `{ code, state, receivedAt }` is written to sessionStorage
- *      (`plugin-oauth-callback`) and mirrored into localStorage under the same
- *      key, plus a same-tab CustomEvent `plugin-oauth-callback`.
+ *   1. The payload `{ code, state, receivedAt }` is briefly written to
+ *      localStorage, then removed, and sent in a same-tab CustomEvent.
  *   2. The host listens via `PluginOAuthCallbackListener` (mounted in the
  *      [locale] layout): the localStorage write raises a `storage` event in
  *      every OTHER tab of this origin, including the tab that started the
@@ -76,15 +75,11 @@ function PluginOAuthCallbackInner() {
 
     let delivered = false;
     try {
-      sessionStorage.setItem(PLUGIN_OAUTH_STORAGE_KEY, JSON.stringify(payload));
-    } catch {
-      // sessionStorage unavailable - the event still fires for same-tab flows
-    }
-    try {
       // localStorage (unlike sessionStorage) raises a `storage` event in the
       // OTHER tabs of this origin - that is what carries the payload across
       // to the tab where the plugin's background instance is running.
       localStorage.setItem(PLUGIN_OAUTH_STORAGE_KEY, JSON.stringify(payload));
+      localStorage.removeItem(PLUGIN_OAUTH_STORAGE_KEY);
       delivered = true;
     } catch {
       // localStorage unavailable - fall through to the same-tab CustomEvent

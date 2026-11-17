@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
 
-vi.mock('@/lib/groupware/access', () => ({ groupwareAllowed: vi.fn().mockResolvedValue(true), groupwareMailboxAllowed: vi.fn().mockResolvedValue(true) }));
 vi.mock('next/server', () => ({
   NextResponse: {
     json: (data: unknown, init?: { status?: number }) => ({ status: init?.status ?? 200, json: async () => data }),
@@ -69,6 +68,16 @@ describe('POST /api/caldav/discover', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(2);
   });
 
+  it('bounds how many PROPFINDs one request can fan out into', async () => {
+    fetchSpy.mockResolvedValue({ status: 404, headers: new Headers() });
+    const candidates = Array.from({ length: 200 }, (_, i) => `c${i}`);
+    const accounts = Array.from({ length: 50 }, (_, i) => ({ key: `A${i}`, candidates }));
+    const res = read(await POST(makeReq({ accounts })));
+    expect(res.status).toBe(200);
+    expect(fetchSpy.mock.calls.length).toBeLessThanOrEqual(100);
+    expect(Object.keys((await res.json()).accounts).length).toBeLessThanOrEqual(10);
+  });
+
   it('catches a probe error and continues to the next candidate', async () => {
     fetchSpy
       .mockRejectedValueOnce(new Error('boom'))
@@ -77,18 +86,19 @@ describe('POST /api/caldav/discover', () => {
     expect((await res.json()).accounts.A).toEqual({ url: target('c2'), resolvedAccount: 'c2' });
   });
 
+  it('keeps the path prefix of a server mounted below the root', async () => {
+    mockCreds.mockResolvedValue({ ...CREDS, serverUrl: 'https://host.example.com/stalwart/' });
+    fetchSpy.mockResolvedValue({ status: 207, headers: new Headers() });
+    const data = await read(await POST(makeReq({ accounts: [{ key: 'A', candidates: ['c1'] }] }))).json();
+    expect(data.wellKnownUrl).toBe('https://host.example.com/stalwart/.well-known/caldav');
+    expect(data.accounts.A.url).toBe('https://host.example.com/stalwart/dav/cal/c1');
+    expect(fetchSpy).toHaveBeenCalledWith('https://host.example.com/stalwart/dav/cal/c1', expect.anything());
+  });
+
   it('de-duplicates and trims candidates before probing', async () => {
     fetchSpy.mockResolvedValue({ status: 404, headers: new Headers() });
     await POST(makeReq({ accounts: [{ key: 'A', candidates: ['  c1 ', 'c1', '', 'c1'] }] }));
     expect(fetchSpy).toHaveBeenCalledTimes(1); // collapsed to a single "c1"
     expect(fetchSpy).toHaveBeenCalledWith(target('c1'), expect.anything());
   });
-});
-
-it('denies discovery before probing upstream when Groupware is off', async () => {
- const { groupwareAllowed } = await import('@/lib/groupware/access');
- vi.mocked(groupwareAllowed).mockResolvedValueOnce(false);
- const response = read(await POST(makeReq({ accounts: [{ key: 'A', candidates: ['c1'] }] })));
- expect(response.status).toBe(404);
- expect(fetchSpy).not.toHaveBeenCalled();
 });

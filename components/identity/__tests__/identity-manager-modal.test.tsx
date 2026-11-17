@@ -99,16 +99,16 @@ describe('IdentityManagerModal identity-management gating', () => {
 
   it('renders no delete controls when management is disabled', () => {
     mockIdentityManagementEnabled = false;
-    const { container } = render(<IdentityManagerModal isOpen onClose={vi.fn()} />);
+    render(<IdentityManagerModal isOpen onClose={vi.fn()} />);
     // The delete button carries the destructive trash affordance; when
     // management is off, deletion of identities must not be offered.
-    expect(container.querySelector('[data-testid="identity-delete"]')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'delete_button' })).not.toBeInTheDocument();
   });
 
   it('keeps the edit control (display-name/signature editing is safe)', () => {
     mockIdentityManagementEnabled = false;
-    const { container } = render(<IdentityManagerModal isOpen onClose={vi.fn()} />);
+    render(<IdentityManagerModal isOpen onClose={vi.fn()} />);
     // Edit stays available so members can adjust display name + signature.
-    expect(container.querySelector('[data-testid="identity-edit"]')).not.toBeNull();
+    expect(screen.getAllByRole('button', { name: 'edit_identity' })).toHaveLength(IDENTITIES.length);
   });
 });

@@ -36,7 +36,7 @@ test.describe('Single-account sync', () => {
     await jmap.reset();
   });
 
-  test('incoming mail appears and bumps the Inbox unread counter @smoke', async ({ page }) => {
+  test('incoming mail appears and bumps the Inbox unread counter', async ({ page }) => {
     await login(page, alice);
     await expectFolderUnread(page, { role: 'inbox' }, 0);
 

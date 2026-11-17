@@ -15,12 +15,12 @@
 // /_next/static/media/*.woff2, byte-identical to a networked `next build`.
 //
 // The googleapis CSS URLs below are derived from the 4 next/font/google
-// declarations in web-bulwark/app/(main)/layout.tsx (Geist, Geist Mono,
+// declarations in app/(main)/layout.tsx and app/comail-fonts.ts (Geist, Geist Mono,
 // Young Serif, Atkinson Hyperlegible). They were produced by running next/font's
 // OWN get-google-fonts-url.js (kept in web-bulwark/node_modules) against those
 // declarations, then hardcoded here so the FOD is self-contained — it does
 // NOT need the bulwark node_modules tree at fetch time (which would be awkward
-// to plumb into a fixed-output derivation). They only change when layout.tsx's
+// to plumb into a fixed-output derivation). They only change when the
 // font declarations change; if they drift, next/font's build-time lookup keys
 // won't match and the build fails with "Missing mocked response for URL" —
 // regenerate by running get-google-fonts-url.js locally (see the script in
@@ -69,7 +69,7 @@ function fetchBuf(url) {
   );
 }
 
-// Derived from web-bulwark/app/(main)/layout.tsx (see comment block above):
+// Derived from the font declarations listed above:
 //   Geist({ subsets:["latin"] })                         → wght@100..900
 //   Geist_Mono({ subsets:["latin"] })                    → wght@100..900
 //   Young_Serif({ weight:"400", display:"swap" })        → wght@400
